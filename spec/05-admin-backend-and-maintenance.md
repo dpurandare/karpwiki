@@ -61,7 +61,7 @@ flowchart LR
     META[(Metadata DB:\nindex_status, page_version,\nraw_source, page_link)] --> D1 & D3 & D4
     LOG[(query_log, lint_log)] --> D3 & D5
     CUR[Curator Agent: lint pass] --> D5
-    FTS[(Full-Text Index:\n"more like this" scan)] --> D6
+    FTS[(Full-Text Index:\n'more like this' scan)] --> D6
 
     D1 --> RI_RE[review_item: kind=reindex]
     D3 --> RI_PR[review_item: kind=prune]

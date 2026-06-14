@@ -88,7 +88,7 @@ Runs once `workspace_id` is known, against that workspace's existing content onl
 flowchart TD
     A[New source, workspace known] --> B{Exact content-hash match\nin workspace?}
     B -- yes --> C[Review item: kind=duplicate, severity=high\nproposed: reject as exact duplicate of source X]
-    B -- no --> D{Near-duplicate via Full-Text Index\n"more like this" similarity\n>= workspace threshold?}
+    B -- no --> D{Near-duplicate via Full-Text Index\n'more like this' similarity\n>= workspace threshold?}
     D -- yes --> E[Review item: kind=duplicate, severity=medium\nproposed: merge into page Y / supersede page Y / keep both]
     D -- no --> F[No duplicate concerns —\nproceed per workspace ingestion policy]
     C --> G[pending_review]
