@@ -9,9 +9,9 @@ this is the Platform's entire "search and retrieval" responsibility.
 
 ```mermaid
 flowchart LR
-    Q[Query] --> FILT[Resolve accessible workspaces,\noptional taxonomy pre-filter \(§4\)]
-    FILT --> S1[Full-Text Index query\nwith filters \(§6\)]
-    S1 --> RANK[Rank by lexical score\n+ catalog-match boost \(§3\)]
+    Q[Query] --> FILT["Resolve accessible workspaces,\noptional taxonomy pre-filter (§4)"]
+    FILT --> S1["Full-Text Index query\nwith filters (§6)"]
+    S1 --> RANK["Rank by lexical score\n+ catalog-match boost (§3)"]
     RANK --> OUT[Return ranked, cited candidates]
 ```
 
@@ -40,7 +40,7 @@ raw-source hits surface as supporting evidence alongside (not instead of) the cu
 
 ```mermaid
 flowchart TB
-    Q[Query text] --> LEX[Full-Text Index query\n\(resolved workspace\(s\), filters applied\)]
+    Q[Query text] --> LEX["Full-Text Index query\n(resolved workspace(s), filters applied)"]
     LEX --> CAT{Result matches an\nindex.md catalog entry?}
     CAT -- yes --> BOOST[Apply catalog-match boost]
     CAT -- no --> RANK

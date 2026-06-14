@@ -54,7 +54,7 @@ flowchart LR
         D1[Staleness Detector]
         D3[Orphan / Low-Traffic Detector]
         D4[Superseded-Source Detector]
-        D5[Contradiction Detector\n(lint)]
+        D5["Contradiction Detector\n(lint)"]
         D6[Existing-Content Duplicate Detector]
     end
 
@@ -67,7 +67,7 @@ flowchart LR
     D3 --> RI_PR[review_item: kind=prune]
     D4 --> RI_PR
     D5 --> RI_PR
-    D5 --> RI_RX2[review_item: kind=reindex\n(after content edit)]
+    D5 --> RI_RX2["review_item: kind=reindex\n(after content edit)"]
     D6 --> RI_DUP[review_item: kind=duplicate]
 ```
 

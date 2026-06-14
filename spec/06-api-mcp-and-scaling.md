@@ -98,12 +98,12 @@ flowchart TB
     LB --> GW2[Gateway instance 2]
     LB --> GWN[Gateway instance N]
 
-    GW1 & GW2 & GWN --> SVC[Core Services\n(stateless, scaled independently per service)]
+    GW1 & GW2 & GWN --> SVC["Core Services\n(stateless, scaled independently per service)"]
 
     SVC --> Q[Job Queue]
     Q --> WK1[Worker pool: classification]
     Q --> WK2[Worker pool: curation/ingest]
-    Q --> WK3[Worker pool: indexing \(FTS\)]
+    Q --> WK3["Worker pool: indexing (FTS)"]
     Q --> WK4[Worker pool: maintenance advisor]
 
     subgraph Storage Shards
