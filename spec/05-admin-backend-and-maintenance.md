@@ -155,7 +155,7 @@ thresholds, ingestion policy) are visible and revertible in the same Version Bro
 | Function | Description |
 |---|---|
 | **Workspace lifecycle** | Create, archive, or (rarely) delete workspaces; edit `SCHEMA.md`; view workspace storage bindings ([01](01-architecture-and-data-model.md) §3). |
-| **Document-type taxonomy** | Add/remove/rename document types; reassign a type's target workspace (affects future routing only — existing pages are not moved automatically, but a bulk "move workspace" admin action can re-home a set of pages/sources if needed). |
+| **Document-type taxonomy** | Add/remove/rename document types; reassign a type's target workspace (affects future routing only — existing pages are not moved automatically, but a bulk "move workspace" admin action can re-home a set of pages/sources if needed). The bulk move previews affected pages/sources (dry-run), then executes in batches with per-batch progress; a failed batch halts without rolling back completed batches. |
 | **Connector management** | Configure ingestion connectors (Git repos, websites, Confluence, Notion, OpenAPI, etc. — see [03](03-ingestion-and-review-workflows.md) §2); set schedule/refresh interval, default ingestion policy (`auto`/`gated`), and credentials. |
 | **Raw source browser** | Browse sources per workspace, view `supersedes` chains, manually trigger re-ingestion, adjust retention. |
 | **Access policy management** | Assign principals (users/groups) to workspace roles ([06](06-api-mcp-and-scaling.md) §3). |

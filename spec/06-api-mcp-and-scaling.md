@@ -84,6 +84,11 @@ table the gateway's AuthZ step consults. Roles are intentionally simple (`reader
 `admin`) — finer-grained permissions (e.g. per-page-type) are a roadmap item
 ([07](07-additional-features-and-roadmap.md)) rather than a baseline requirement.
 
+**On-behalf-of delegation** (`wiki_submit` "on a user's behalf", §2): the calling agent
+authenticates normally as an API/MCP client *and* the request carries an `acting_as: user:<id>`
+claim. AuthZ requires `contributor` on the target workspace for **both** the agent's own principal
+and the `acting_as` user — whichever is more restrictive applies — before the submission proceeds.
+
 ## 4. Horizontal Scaling Strategy
 
 **Principle**: every layer in [01](01-architecture-and-data-model.md) §1 is either (a) stateless
@@ -144,20 +149,19 @@ Multi-region deployment, active-active workspace replication, and disaster-recov
 [07](07-additional-features-and-roadmap.md), since they depend on the organization's actual
 latency/availability requirements.
 
-## 6. Non-Functional Requirements (Placeholder)
+## 6. Non-Functional Requirements
 
-The architecture above scales along the dimensions in the table; **fill in target values** before
-sizing an implementation:
+Initial sizing targets for this deployment (revisit as real usage data accumulates):
 
-| Dimension | Target (TBD by org) |
+| Dimension | Target |
 |---|---|
-| Peak search QPS | — |
-| Peak ingestion rate (documents/hour) | — |
-| Total wiki pages per workspace (typical / max) | — |
-| Total raw source volume (storage) | — |
-| Search latency SLA | — |
-| Review-item resolution SLA (per `kind`) | — |
-| Availability target | — |
+| Peak search QPS | 10-100 QPS |
+| Peak ingestion rate (documents/hour) | 10-100 documents/hour |
+| Total wiki pages per workspace (typical / max) | Typical: 5,000-50,000; max not yet sized — workspaces approaching this range are candidates for a dedicated FTS index ([02](02-storage-and-indexing.md) §4) |
+| Total raw source volume (storage) | 100 GB - 1 TB platform-wide (near-term) |
+| Search latency SLA | < 1s (p95) for `search` |
+| Review-item resolution SLA (per `kind`) | `submission`/`classification`/`duplicate`: < 4 hours (gate a placeholder page going live); `reindex`/`prune`: no SLA — processed in scheduled maintenance batches, not gating live content |
+| Availability target | 99% (~3.65 days/yr downtime) |
 
 ---
 Previous: [05-admin-backend-and-maintenance.md](05-admin-backend-and-maintenance.md) · Next: [07-additional-features-and-roadmap.md](07-additional-features-and-roadmap.md)

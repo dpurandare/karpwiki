@@ -12,7 +12,7 @@ detection (§4, [03](03-ingestion-and-review-workflows.md) §4, [05](05-admin-ba
 
 | Component | Stores | Written by | Read by | Example technologies |
 |---|---|---|---|---|
-| **Object Store** | Raw sources, large binary assets, generated diagrams (SVG), and a materialized markdown export of each workspace's wiki | Ingestion Service (sources/assets), Wiki Service (wiki export) | Wiki Service (citations), Search Service (deep-source-search text extraction), Admin Console (export/backup), file-based agent access | S3-compatible object storage (AWS S3, GCS, Azure Blob, MinIO, Cloudflare R2) |
+| **Object Store** | Raw sources, large binary assets, generated diagrams (SVG), page-version diffs, and a materialized markdown export of each workspace's wiki | Ingestion Service (sources/assets), Wiki Service (wiki export, page-version diffs) | Wiki Service (citations), Search Service (deep-source-search text extraction), Admin Console (export/backup, version diffs), file-based agent access | S3-compatible object storage (AWS S3, GCS, Azure Blob, MinIO, Cloudflare R2) |
 | **Metadata DB** | Workspaces, taxonomy, wiki pages + versions, page links, raw source records, review items, index-status table, access policies | Workspace/Wiki/Ingestion/Review Services | All core services | Relational DB (PostgreSQL, MySQL); horizontally-scaled variants (CockroachDB, Aurora) for very large deployments |
 | **Full-Text Index** | Lexical index of wiki page content (+ optionally source text) | Indexing workers (async) | Search Service, Ingestion Service (dedup queries), Maintenance Advisor (similarity scans) | PostgreSQL full-text search, OpenSearch/Elasticsearch, Typesense, Meilisearch |
 | **Append-Only Log / Event Store** | Ingestion events, query events, admin actions, lint/advisor runs | All core services (write-only, append) | Maintenance Advisor, Admin Console, audit/export | Time-partitioned table in the metadata DB, or a dedicated log/stream store (Kafka, cloud log service) |
@@ -55,6 +55,9 @@ flowchart LR
   retention window defined in `SCHEMA.md`).
 - **Generated assets** (SVG diagrams embedded in wiki pages) are also stored here under
   `/{workspace_id}/assets/`, referenced by wiki pages like any other citable asset.
+- **Page-version diffs** are stored under `/{workspace_id}/diffs/{version_id}.diff` — a unified
+  diff against the previous version, computed once and written by the Wiki Service alongside the
+  `page_version` row (§3) it belongs to; referenced by that row's `diff_ref` field.
 
 **Wiki markdown export** (`/{workspace_id}/wiki/...`): a read-only, regenerated mirror of the
 workspace's current wiki — `overview.md`, `index.md`, `log.md`, `concepts/*.md`, `entities/*.md`,
@@ -69,7 +72,9 @@ and serves two purposes the Metadata DB alone doesn't:
 2. **File-based agent access** — an agent with filesystem/grep access to this prefix can consume
    the wiki exactly as Karpathy's original pattern describes (read `index.md`, drill into pages),
    without going through the API/MCP gateway. This is an *additional* consumption path, not a
-   replacement for the gateway-mediated one ([06](06-api-mcp-and-scaling.md)).
+   replacement for the gateway-mediated one ([06](06-api-mcp-and-scaling.md)). Access is
+   **read-only and opt-in per workspace** via `access_policy` (§3) — a workspace admin grants it
+   explicitly, it is not automatic for every `reader`/`contributor`.
 
 ## 3. Metadata DB — System of Record
 
@@ -97,9 +102,9 @@ erDiagram
 |---|---|
 | `workspace` | `workspace_id`, `name`, `document_types[]`, `schema_ref`, `status`, `storage_bindings` |
 | `document_type` | `type_code`, `workspace_id`, `description` |
-| `raw_source` | `source_id`, `workspace_id`, `object_key`, `filename`, `content_hash`, `content_shape` (`narrative\|structured_data`), `submitted_by` (`user:<id>\|connector:<connector_id>`), `artifact_identity`, `source_version`, `source_modified_at` (`structured_data` only — [03](03-ingestion-and-review-workflows.md) §3–4), `supersedes`, `status` (`active\|superseded\|archived\|rejected`), `ingested_at` |
+| `raw_source` | `source_id`, `workspace_id`, `object_key`, `filename`, `content_hash`, `content_shape` (`narrative\|structured_data`), `submitted_by` (`user:<id>\|connector:<connector_id>`), `artifact_identity`, `source_version`, `source_modified_at` (`structured_data` only — [03](03-ingestion-and-review-workflows.md) §3–4), `supersedes`, `status` (`active\|superseded\|archived\|rejected`), `pipeline_state` (`submitted\|classifying\|classified\|duplicate_check\|pending_review\|ingesting\|ingested\|error\|rejected` — [03](03-ingestion-and-review-workflows.md) §1; denormalized current-state pointer, `ingestion_log` in §5 holds full history), `ingested_at` |
 | `wiki_page` | `page_id`, `workspace_id`, `path`, `page_type`, `current_version_id`, `status` (`draft\|published\|archived`) |
-| `page_version` | `version_id`, `page_id`, `content`, `frontmatter`, `author`, `created_at`, `change_summary`, `diff_ref`, `trigger`, `restored_from_version_id` |
+| `page_version` | `version_id`, `page_id`, `content`, `frontmatter`, `author`, `created_at`, `change_summary`, `diff_ref` (object-store path, §2), `trigger`, `restored_from_version_id` |
 | `page_link` | `from_page_id`, `to_page_id`, `link_type` (`cross_reference\|cross_workspace`), `updated_at` |
 | `index_status` | `page_id`, `index_type` (`fts`), `state`, `last_indexed_at`, `last_content_version` |
 | `review_item` | `review_id`, `workspace_id`, `kind` (`submission\|classification\|duplicate\|reindex\|prune`), `severity`, `subject_ref`, `proposed_action`, `status` (`open\|resolved`), `resolved_action`, `created_at`, `resolved_by`, `resolved_at` |
@@ -149,7 +154,7 @@ Four logical streams, all append-only and partitioned by `workspace_id` + time:
 | Stream | Records | Consumed by |
 |---|---|---|
 | `ingestion_log` | Every state transition of every raw source through the ingestion pipeline ([03](03-ingestion-and-review-workflows.md) §1) | Admin Console, Maintenance Advisor |
-| `query_log` | Search requests (anonymized per policy), latency, which pages were returned | Maintenance Advisor (orphan/low-traffic detection), analytics ([07](07-additional-features-and-roadmap.md)) |
+| `query_log` | Search requests (full detail, retained per policy below), latency, which pages were returned | Maintenance Advisor (orphan/low-traffic detection), analytics ([07](07-additional-features-and-roadmap.md)) |
 | `admin_action_log` | Review item resolutions, rollbacks, manual edits, workspace/schema changes | Audit/compliance export |
 | `lint_log` | Curator Agent lint passes: contradictions found, cross-refs fixed, staleness flags raised | Maintenance Advisor, Admin Console |
 
@@ -157,6 +162,12 @@ Four logical streams, all append-only and partitioned by `workspace_id` + time:
 readable materialized view** generated from `ingestion_log` + `lint_log` + `admin_action_log` for
 a given workspace — the structured streams are the system of record; `log.md` is rendered from
 them for the wiki's own navigation (and is part of the wiki markdown export, §2).
+
+**`query_log` retention policy**: entries (query text, principal, resolved workspaces, returned
+page IDs/scores) are retained in full detail for 90 days, then purged — the retention window is
+itself the privacy boundary, with no separate anonymization step. The Orphan/Low-Traffic
+Detector's lookback window ([05](05-admin-backend-and-maintenance.md) §2, default 90 days per
+`SCHEMA.md`) fits within this retention period.
 
 ## 6. Optional Cache Layer
 

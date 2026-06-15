@@ -75,7 +75,9 @@ The Classifier (LLM-based, async worker) reads the new source and:
 5. Resolves `document_type → workspace_id` via the taxonomy's routing table.
 6. If confidence ≥ the workspace's configured threshold (`SCHEMA.md`), proceeds to `classified`.
    Otherwise, creates a `kind=classification` review item with the top candidate type(s) and
-   moves to `pending_review`.
+   moves to `pending_review`. Confidence is self-reported by the Classifier as part of its
+   structured output, periodically recalibrated against admin resolutions of `classification`
+   review items.
 
 ```mermaid
 flowchart LR

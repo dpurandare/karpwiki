@@ -3,15 +3,17 @@
 ## 1. Purpose and Scope
 
 `techfeasibility.md` (working doc, not part of this spec) flagged a set of implementation-
-readiness gaps in `00`–`08`. Most of those are genuinely org/runtime decisions (NFR targets,
-retention policy, relevance test-set ownership) and stay as flagged placeholders. This document
-addresses the remaining subset — questions concrete enough to answer now, in the same spirit as
-`08`'s reference-implementation choices.
+readiness gaps in `00`–`08`. The first pass (§3–7) covered questions concrete enough to answer as
+design decisions, in the same spirit as `08`'s reference-implementation choices. A second pass
+(§8–12) covers the remaining org/runtime decisions — retention defaults, classifier confidence
+calibration, relevance-test ownership, taxonomy bulk-move safeguards, and FUSE access scope —
+using values supplied by the organization adopting this spec. NFR targets specifically are
+recorded in [06](06-api-mcp-and-scaling.md) §6, the placeholder table designated for that purpose.
 
-Unlike `08` (which only picks libraries for roles `00`–`07` already define), a couple of the
-decisions below imply a small addition to `00`–`07`'s conceptual data model. Each item below
-notes its **spec touch-point** where relevant — these are optional follow-up edits to `01`/`02`,
-not applied by this document.
+Unlike `08` (which only picks libraries for roles `00`–`07` already define), several of the
+decisions below imply a small addition to `00`–`07`'s conceptual data model or prose. Each item
+below notes its **spec touch-point** where relevant — these have since been applied to
+`02`/`03`/`05`/`06`/`07` (see each section).
 
 ## 2. Decisions at a Glance
 
@@ -22,6 +24,11 @@ not applied by this document.
 | MCP on-behalf-of delegation | [06](06-api-mcp-and-scaling.md) §2–3 | Dual-identity request: agent's own AuthN + `acting_as: user:<id>` claim, AuthZ-checked against both principals |
 | `SCHEMA.md` example | [01](01-architecture-and-data-model.md) §7 | Concrete template with starting threshold defaults (§6 below) |
 | `diff_ref` format | [01](01-architecture-and-data-model.md) §5, [02](02-storage-and-indexing.md) §3 | Computed-on-write unified diff, stored in Object Store at `/{workspace_id}/diffs/{version_id}.diff` |
+| Query-log & threshold retention defaults | [02](02-storage-and-indexing.md) §5, [05](05-admin-backend-and-maintenance.md) §2, §6 below | 90-day full-detail `query_log` retention (no separate anonymization step); 90-day orphan/low-traffic lookback; 180-day superseded-source retention (confirms §6's illustrative default) |
+| Classifier confidence calibration | [03](03-ingestion-and-review-workflows.md) §1, §3 | Self-reported confidence in structured output, periodically recalibrated against admin-resolved `classification` review items |
+| Relevance testing / regression process | [04](04-search-and-retrieval.md) §3–4, [07](07-additional-features-and-roadmap.md) §4 | No dedicated test set — the search result feedback loop is the regression signal |
+| Taxonomy bulk-move execution model | [05](05-admin-backend-and-maintenance.md) §7 | Dry-run preview, then batched execute with per-batch progress; failed batch halts, completed batches not rolled back |
+| FUSE-mount access scope | [02](02-storage-and-indexing.md) §2 | Read-only, opt-in per workspace via `access_policy`, wiki-export prefix only |
 
 ## 3. Pipeline-State Storage
 
@@ -41,7 +48,8 @@ avoiding a log-table scan on a frequently-polled endpoint (`06` §2: `wiki_get_s
 With this field, `03` §6 step 7 reads as: *set `raw_source.pipeline_state = ingested`;
 `raw_source.status` remains `active`* — consistent with the wording already fixed in `03` §6.
 
-**Spec touch-point**: `02` §3, `raw_source` row gains `pipeline_state` (9-value enum, `03` §1).
+**Spec touch-point** (applied): `02` §3's `raw_source` row now includes `pipeline_state`
+(9-value enum, `03` §1).
 
 ## 4. Connector Execution Model
 
@@ -69,9 +77,9 @@ Polling vs. webhook: polling is the default (matches `05` §7's "schedule/refres
 Webhook-triggered connectors (e.g., a Git push webhook) are an additive optimization that
 short-circuits step 1–2 for that one item — same step 3 onward.
 
-**Roadmap note**: `07` §6 Phase 2 ("Multi-workspace + taxonomy routing") is a natural place to add
-a "Connector framework" deliverable, since connector-routed content depends on the taxonomy being
-in place.
+**Roadmap note** (applied): `07` §6 Phase 2 now includes a "Connector framework" deliverable,
+sequenced after "Multi-workspace + taxonomy routing" since connector-routed content depends on the
+taxonomy being in place.
 
 ## 5. MCP On-Behalf-Of Delegation
 
@@ -95,8 +103,8 @@ enum, unchanged) and any resulting `page_version.author = user:<id>` (`01` §5, 
 calling agent's own identity is recorded in the `ingestion_log` entry's metadata for audit —
 no new core field required.
 
-**Spec touch-point**: none to `01`/`02`'s enums. `06` §3 could gain a one-line note describing
-this dual-identity check.
+**Spec touch-point** (applied): no changes to `01`/`02`'s enums; `06` §3 now includes a one-line
+note describing this dual-identity check.
 
 ## 6. `SCHEMA.md` Example Template
 
@@ -127,6 +135,8 @@ thresholds:
     low_traffic_days: 365
   dedup:
     near_duplicate_score: 0.85  # FTS "more like this" score, normalized 0-1 (03 §4)
+  orphan:
+    query_log_lookback_days: 90 # zero appearances in this window -> prune candidate (05 §2)
 
 retention:
   superseded_source_days: 180   # before Superseded-Source Detector proposes prune (05 §2)
@@ -147,8 +157,107 @@ Alternative considered (compute-on-read from two `page_version.content` blobs): 
 but pays the diff cost on every `versions/diff` call, growing with version count. Write-once
 avoids this at the cost of one small object per version.
 
-**Spec touch-point**: `02` §1's Object Store row could add "page-version diffs" alongside what it
-already stores; `02` §3's `diff_ref` could note its type as an object-store path.
+**Spec touch-point** (applied): `02` §1's Object Store row now lists "page-version diffs"; `02` §2
+documents the `/{workspace_id}/diffs/{version_id}.diff` path scheme; `02` §3's `diff_ref` now notes
+its type as an object-store path.
+
+## 8. Query-Log & Threshold Retention Defaults
+
+`02` §5 describes `query_log` as "(anonymized per policy)" without defining the policy; `05` §2's
+Orphan/Low-Traffic Detector and Superseded-Source Detector key off "the workspace's lookback
+window" and "retention window" respectively, also unspecified. §6 above gave
+`retention.superseded_source_days: 180` as an illustrative default.
+
+**Decision**:
+- `query_log` entries are retained in full detail (query text, principal, resolved workspaces,
+  returned page IDs/scores) for **90 days**, then purged — the retention window is itself the
+  privacy boundary; no separate anonymization step.
+- Orphan/Low-Traffic Detector lookback window: **90 days** (`SCHEMA.md`
+  `thresholds.orphan.query_log_lookback_days`, §6 above), within the `query_log` retention window.
+- Superseded-Source retention window: **180 days** — confirms §6's illustrative
+  `retention.superseded_source_days` as the actual default.
+
+**Spec touch-point** (applied): `02` §5's `query_log` row and surrounding text now state the
+retention policy; §6 above's `SCHEMA.md` template gains `thresholds.orphan.query_log_lookback_days`.
+
+## 9. Classifier Confidence Calibration
+
+`03` §1/§3 gate routing on "confidence ≥ the workspace's configured threshold" without specifying
+how confidence is produced — relevant because `00` §3 keeps the LLM provider swappable, and
+self-reported LLM confidence is notoriously poorly calibrated.
+
+**Decision**: confidence is **self-reported** by the Classifier as part of its structured output
+(`08`'s Pydantic AI `ClassificationResult` model) — provider-agnostic, no dependency on
+provider-specific log-prob APIs. This score is **periodically recalibrated**: admin resolutions of
+`classification` review items (`03` §3's "confirm the top suggestion, pick a different type") are
+ground truth — if admins consistently override a particular confidence band, the workspace's
+threshold (`SCHEMA.md`) is adjusted accordingly. No new pipeline state or review-item kind:
+recalibration is an offline analysis of existing `review_item.resolved_action` data
+([02](02-storage-and-indexing.md) §3), producing a `SCHEMA.md` config change (itself an
+`admin_action_log` entry, [02](02-storage-and-indexing.md) §5).
+
+**Alternative considered**: a secondary scoring pass (separate model/heuristic scores each
+classification) — more consistent, but doubles classification cost per source. Log-prob-based
+confidence — not universally exposed across LLM providers, would violate `00` §3's
+provider-neutrality.
+
+**Spec touch-point** (applied): `03` §3 step 6 now notes the calibration loop.
+
+## 10. Relevance Testing / Regression Process
+
+`04` §3–4 defines ranking/boosting behavior (catalog-match boost, cross-backend score
+normalization, tie-breaks) but no process for validating that a change to this logic is an
+improvement.
+
+**Decision**: no dedicated golden-query test set initially. `07` §4's **Search result feedback
+loop** (thumbs-up/down per result, recorded alongside `query_log`) is the relevance-regression
+signal — a ranking/boosting change is monitored via this feedback's trend for affected query
+patterns before and after the change, rather than a separate offline test suite.
+
+**Alternative considered**: a maintained golden query set (shared or per-workspace) — more
+rigorous, but adds an ongoing-ownership burden ahead of having real usage data to build the set
+from. Revisit once feedback-loop data exists, or once a dedicated-index workspace's cross-backend
+score normalization ([04](04-search-and-retrieval.md) §4, [08](08-implementation-stack.md) §3)
+needs empirical validation against real rankings.
+
+**Spec touch-point** (applied): `07` §4's "Search result feedback loop" row now notes this dual
+purpose.
+
+## 11. Taxonomy Bulk-Move Execution Model
+
+`05` §7 names a bulk "move workspace" admin action (re-homing pages/sources after a document-type
+taxonomy change) but doesn't define batch limits, preview, or partial-failure handling.
+
+**Decision**: dry-run preview, then batched execute. The admin first previews the affected
+page/source count and list (no writes); on confirmation, the move executes in batches, each page
+re-homed via its `wiki_page.workspace_id`/`raw_source.workspace_id` update plus a `page_version`
+with `trigger=manual_edit` ([01](01-architecture-and-data-model.md) §5) — with per-batch progress
+visible in the Admin Console. A failed batch halts the operation; already-completed batches are
+not rolled back (each page move is independently valid and versioned) — the admin resumes or
+retries the remaining batches.
+
+**Alternative considered**: all-or-nothing transactional move — simpler mental model, but
+impractical at the page counts [06](06-api-mcp-and-scaling.md) §6 now targets (5,000–50,000
+pages/workspace) and conflicts with the partitioned, append-only versioning model
+([02](02-storage-and-indexing.md) §3).
+
+**Spec touch-point** (applied): `05` §7's taxonomy row now describes the dry-run + batched
+execution model.
+
+## 12. FUSE-Mount Access Scope
+
+`02` §2 and `08` §3 describe FUSE-mounting an fsspec backend for "file-based agent access" to the
+wiki export, without defining who gets this access or whether it's read-only.
+
+**Decision**: read-only, opt-in per workspace via `access_policy`
+([02](02-storage-and-indexing.md) §3) — a workspace admin explicitly grants a principal FUSE
+access (not automatic for every existing `reader`/`contributor`). The mount exposes only the
+regenerated wiki markdown export (`/{workspace_id}/wiki/...`, [02](02-storage-and-indexing.md)
+§2) — never the `sources/`, `diffs/`, or `assets/` prefixes — and never write access; content
+changes continue to go through the Wiki Service (gateway-mediated, `06`), preserving "every wiki
+page write creates a new version" ([00](00-overview.md) §2 Principle 9).
+
+**Spec touch-point** (applied): `02` §2's "File-based agent access" bullet now states this scope.
 
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

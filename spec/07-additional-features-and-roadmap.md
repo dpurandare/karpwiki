@@ -99,7 +99,7 @@ as `document_type` ([03](03-ingestion-and-review-workflows.md) §3).
 
 | Feature | Description | Builds on |
 |---|---|---|
-| **Search result feedback loop** | Thumbs-up/down (or similar) on individual `search` results, recorded alongside `query_log` ([02](02-storage-and-indexing.md) §5). Persistently low-rated pages for a topic become a signal for the Maintenance Advisor's staleness/contradiction detectors ([05](05-admin-backend-and-maintenance.md) §2). | `query_log`, Maintenance Advisor |
+| **Search result feedback loop** | Thumbs-up/down (or similar) on individual `search` results, recorded alongside `query_log` ([02](02-storage-and-indexing.md) §5). Persistently low-rated pages for a topic become a signal for the Maintenance Advisor's staleness/contradiction detectors ([05](05-admin-backend-and-maintenance.md) §2), and this feedback trend is also the platform's primary relevance-regression signal for ranking/boosting changes ([04](04-search-and-retrieval.md) §3–4). | `query_log`, Maintenance Advisor |
 | **Content quality scoring** | During ingest/lint, the Curator Agent scores pages on citation density, cross-reference completeness, and freshness. Surfaced in the Admin Console as a sortable column, and used by the Advisor to prioritize lint/reindex work. | Curator Agent lint pass |
 | **Multi-language support** | Per-workspace primary language plus optional translated page variants; the Full-Text Index applies language-specific analyzers/tokenization per page language, with cross-language retrieval (query in one language, match a page in another) as a stretch goal. | Full-Text Index (per-language analyzers), Classifier (language detection) |
 | **Cross-workspace knowledge graph view** | Admin-facing visualization of cross-workspace links (built from the `page_link` reference graph maintained on every page write — [02](02-storage-and-indexing.md) §3) — helps admins spot taxonomy/workspace boundaries that don't match how content actually references itself. | Reference graph, Metadata DB |
@@ -126,6 +126,7 @@ gantt
 
     section Phase 2: Enterprise Core
     Multi-workspace + taxonomy routing                                :p2a, after p1c, 45d
+    Connector framework (polling workers, per-connector cursors)      :p2e, after p2a, 30d
     FTS indexing lifecycle + reindex jobs                              :p2b, after p1c, 45d
     Maintenance Advisor (staleness, orphan, dedup detectors)           :p2c, after p2b, 60d
     Full API + MCP surface, horizontal scaling infra                   :p2d, after p2a, 60d
