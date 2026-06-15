@@ -185,6 +185,11 @@ flowchart LR
 `archived` (read-only, excluded from default search/ingestion routing but still queryable) or, in
 rare cases, deleted (requires explicit admin action + export, see [05](05-admin-backend-and-maintenance.md) §7).
 
+Cross-workspace links (`page_link`, [02](02-storage-and-indexing.md) §3) into an `archived`
+workspace continue to resolve normally, since archived workspaces remain queryable. Deletion is
+rare and explicit enough that cleanup of inbound links from other workspaces is handled as part of
+that admin action, not automatically.
+
 ## 4. Page and Content Types
 
 Within a workspace, the wiki is a set of markdown pages, all sharing required frontmatter

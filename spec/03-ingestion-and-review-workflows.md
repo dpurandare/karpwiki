@@ -26,7 +26,7 @@ stateDiagram-v2
 
 | State | Meaning | Raw source status | Wiki visibility |
 |---|---|---|---|
-| `submitted` | Source stored in object store, `raw_source` record created | `active` | A placeholder `source` page is created immediately (status `processing`) — the document is "in the wiki" from this point, per the requirement that submissions are added right away. |
+| `submitted` | Source stored in object store, `raw_source` record created | `active` | A placeholder `source` page is created immediately (marked "processing") — the document is "in the wiki" from this point, per the requirement that submissions are added right away. |
 | `classifying` | Classifier assigns `document_type` (+ confidence) and resolves `workspace_id` | `active` | placeholder `source` page |
 | `classified` | Type + workspace confirmed (confidence ≥ threshold) | `active` | placeholder `source` page |
 | `duplicate_check` | Compare against existing content in target workspace | `active` | placeholder `source` page |
@@ -35,6 +35,12 @@ stateDiagram-v2
 | `ingested` | Curator finished; wiki pages updated, indices marked `pending` | `active` | `source` page + touched concept/entity pages, `overview.md`, `log.md` |
 | `rejected` | Admin declined ingestion | `rejected` (retained, excluded from search/ingestion) | placeholder `source` page marked "rejected" with reason |
 | `error` | A step failed | `active` | placeholder `source` page marked "error", surfaced to admin |
+
+**Note on `status` vs. these markings.** The quoted labels above ("processing", "awaiting review",
+"rejected", "error") describe how the placeholder `source` page is presented in the UI during the
+pipeline — they are not values of the page frontmatter `status` field (`draft|published|archived`,
+[01](01-architecture-and-data-model.md) §6), which remains `draft` until the Curator Agent's
+finalization step (§6 step 2) sets it to `published` on `ingested`.
 
 ## 2. Submission
 

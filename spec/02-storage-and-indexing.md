@@ -102,7 +102,7 @@ erDiagram
 | `page_version` | `version_id`, `page_id`, `content`, `frontmatter`, `author`, `created_at`, `change_summary`, `diff_ref`, `trigger`, `restored_from_version_id` |
 | `page_link` | `from_page_id`, `to_page_id`, `link_type` (`cross_reference\|cross_workspace`), `updated_at` |
 | `index_status` | `page_id`, `index_type` (`fts`), `state`, `last_indexed_at`, `last_content_version` |
-| `review_item` | `review_id`, `workspace_id`, `kind` (`submission\|duplicate\|reindex\|prune`), `severity`, `subject_ref`, `proposed_action`, `status` (`open\|resolved`), `resolved_action`, `created_at`, `resolved_by`, `resolved_at` |
+| `review_item` | `review_id`, `workspace_id`, `kind` (`submission\|classification\|duplicate\|reindex\|prune`), `severity`, `subject_ref`, `proposed_action`, `status` (`open\|resolved`), `resolved_action`, `created_at`, `resolved_by`, `resolved_at` |
 | `access_policy` | `workspace_id`, `principal`, `role` (see [06](06-api-mcp-and-scaling.md) §3) |
 
 `page_link` rows are (re)written by the Wiki Service whenever a page's cross-references are parsed
@@ -202,10 +202,10 @@ re-summarization. The index update itself is never the bottleneck.
 - The **Metadata DB write is the commit point**. A page write is "done" once `page_version` and
   `wiki_page.current_version_id` are updated — this is what `overview.md`/`index.md`/`log.md`
   reflect immediately (in the Metadata DB; the wiki markdown export, §2, follows shortly after).
-- Full-Text Index updates are **asynchronous** (queued). Between a write and successful
-  reindexing, the page is `indexed` (serving the *previous* version's lexical entries) then
-  `stale`, never invisible — search continues to serve the last-good index entry until the new one
-  lands.
+- Full-Text Index updates are **asynchronous** (queued). A write immediately marks the page's
+  `index_status` `stale` (existing page) or `pending` (new page, §7); until the reindex job
+  completes, search continues to serve the *previous* version's lexical entries for `stale` pages
+  — never invisible.
 - This eventual-consistency window is bounded and observable via `index_status`. The Admin Console
   surfaces pages stuck in `pending`/`error` beyond a threshold (operational health,
   [05](05-admin-backend-and-maintenance.md) §8).

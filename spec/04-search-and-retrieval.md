@@ -111,7 +111,8 @@ sequenceDiagram
   have different score scales, the Search Service normalizes each dedicated index's scores (e.g.
   min-max to `[0,1]` within that query's result set) before merging with the shared index's
   results — an approximation, called out explicitly so it's a deliberate tradeoff rather than a
-  surprise.
+  surprise. Merged results are sorted by normalized score descending; ties are broken by
+  `workspace_id` then `page_id` for deterministic ordering.
 - Every result is tagged with its `workspace_id` for UI grouping and citation.
 
 ## 5. Query Modes

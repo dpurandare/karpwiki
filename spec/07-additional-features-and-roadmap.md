@@ -83,6 +83,7 @@ as `document_type` ([03](03-ingestion-and-review-workflows.md) §3).
 | **Fine-grained access control** | Extend the baseline `reader`/`contributor`/`admin` roles ([06](06-api-mcp-and-scaling.md) §3) to per-`page_type` or per-tag permissions within a workspace (e.g. a "Legal" sub-area of the *Policies* workspace visible only to a subset of readers). | `access_policy` table |
 | **PII detection at ingestion** | Classifier (or a dedicated scanner) flags sources containing PII; flagged sources get a dedicated review-item kind (`pii_review`) before ingestion proceeds. | Classifier ([03](03-ingestion-and-review-workflows.md) §3) |
 | **Compliance erasure workflow** | A guarded "hard delete" path (distinct from normal archive-based pruning, [05](05-admin-backend-and-maintenance.md) §4) that removes a raw source and all derived wiki content/citations, with an audit record of the erasure request and approver — for right-to-erasure style requests. | `admin_action_log`, object-store lifecycle |
+| **Legal hold** | A `legal_hold` flag on a `raw_source` or `wiki_page` that exempts it from Maintenance Advisor `prune` proposals ([05](05-admin-backend-and-maintenance.md) §4) and the compliance erasure workflow above, until an admin lifts the hold. | Maintenance Advisor, Compliance erasure workflow |
 | **Data residency controls** | Per-workspace storage-binding configuration ([01](01-architecture-and-data-model.md) §3) can pin a workspace's object store / DB partition to a specific region. | Storage adapters |
 
 ## 3. Operations & Reliability
