@@ -79,7 +79,7 @@ flowchart LR
 | **Contradiction** (lint) | Curator's periodic lint pass finds two pages making conflicting claims | `prune` (for the page that should be retired) and/or `reindex` (for the page that gets edited) |
 | **Existing-content duplicate** | Periodic "more like this" scan of each workspace's own pages against the Full-Text Index ([02](02-storage-and-indexing.md) §4) finds high-similarity pairs not previously merged | `duplicate` |
 
-**Scheduling philosophy** (adapted from Context7's popularity-tiered refresh model): detector run
+**Scheduling philosophy** (popularity-tiered refresh): detector run
 frequency per page/source can scale with query frequency — frequently-queried content is checked
 for staleness more often than rarely-queried content, since staleness there has higher user
 impact. This is a tuning detail of the scheduler, configurable per workspace, not a hard

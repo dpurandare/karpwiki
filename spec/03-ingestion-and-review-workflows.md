@@ -44,9 +44,9 @@ Two entry points feed the same pipeline:
   is the primary path for the requirement *"end user should be able to add documents to the
   wiki."*
 - **Connectors** (managed by admins, [05](05-admin-backend-and-maintenance.md) §7): scheduled
-  crawlers/integrations (Git repos, Confluence, Notion, websites, OpenAPI specs, `llms.txt` — the
-  source types Context7 supports are a useful reference list) that discover new or changed
-  content and submit it the same way, with `submitted_by = connector:<connector_id>`.
+  crawlers/integrations (e.g., Git repositories, Confluence, Notion, websites, OpenAPI specs,
+  `llms.txt` files) that discover new or changed content and submit it the same way, with
+  `submitted_by = connector:<connector_id>`.
 
 Either way, a `raw_source` record is created in the **target-undetermined** state — the gateway
 accepts the upload without requiring the caller to know which workspace it belongs to; that's the
@@ -61,8 +61,13 @@ The Classifier (LLM-based, async worker) reads the new source and:
 3. Tags `content_shape` (`narrative` | `structured_data`) — independent of `document_type`/workspace
    routing. This determines how the Curator Agent ingests the source (§6 below; full treatment in
    [07](07-additional-features-and-roadmap.md) §1).
-4. Resolves `document_type → workspace_id` via the taxonomy's routing table.
-5. If confidence ≥ the workspace's configured threshold (`SCHEMA.md`), proceeds to `classified`.
+4. For `structured_data` sources, extracts identity/version metadata: `artifact_identity` (a
+   stable identifier for the artifact — e.g. derived from its path, name, or declared
+   schema/resource identity) and `source_version`/`source_modified_at` (from version headers, file
+   metadata, or naming conventions, where extractable). Used by Duplicate Detection (§4) to
+   recognize a new version of an existing artifact.
+5. Resolves `document_type → workspace_id` via the taxonomy's routing table.
+6. If confidence ≥ the workspace's configured threshold (`SCHEMA.md`), proceeds to `classified`.
    Otherwise, creates a `kind=classification` review item with the top candidate type(s) and
    moves to `pending_review`.
 
@@ -86,15 +91,26 @@ Runs once `workspace_id` is known, against that workspace's existing content onl
 
 ```mermaid
 flowchart TD
-    A[New source, workspace known] --> B{Exact content-hash match\nin workspace?}
+    A[New source, workspace known] --> Z{content_shape=structured_data AND\nartifact_identity matches an existing\nraw_source with an older\nsource_version/source_modified_at?}
+    Z -- yes --> H[Review item: kind=duplicate, severity=low\nproposed: supersede existing source --\nnew version of same artifact]
+    Z -- no --> B{Exact content-hash match\nin workspace?}
     B -- yes --> C[Review item: kind=duplicate, severity=high\nproposed: reject as exact duplicate of source X]
     B -- no --> D{Near-duplicate via Full-Text Index\n'more like this' similarity\n>= workspace threshold?}
     D -- yes --> E[Review item: kind=duplicate, severity=medium\nproposed: merge into page Y / supersede page Y / keep both]
     D -- no --> F[No duplicate concerns —\nproceed per workspace ingestion policy]
-    C --> G[pending_review]
+    H --> G[pending_review]
+    C --> G
     E --> G
 ```
 
+- **Same artifact, newer version** (`structured_data` only): if the new source's
+  `artifact_identity` (§3) matches an existing `raw_source` in the same workspace whose
+  `source_version`/`source_modified_at` is older, raise a `duplicate` review item with
+  `severity=low` and `proposed_action=supersede` pre-filled — the expected case when re-ingesting
+  an updated schema/config. Always blocks (`pending_review`), but the low severity and pre-filled
+  action keep resolution to a single confirmation; approving applies the `supersede` resolution
+  below (prior source marked `superseded`, existing `source`/`entity` pages updated in place via
+  new `page_version`s — [01](01-architecture-and-data-model.md) §5).
 - **Exact match**: `content_hash` of the new source equals an existing `raw_source.content_hash`
   in the same workspace. Always blocks (`pending_review`), regardless of workspace policy.
 - **Near match**: run the new source's summary as a similarity ("more like this") query against
@@ -118,15 +134,16 @@ ingestion as a distinct source — use when the similarity is coincidental).
 Independent of the duplicate/classification checks, **every** new submission creates a
 `kind=submission` review item the moment the `raw_source` record exists (state `submitted`).
 This satisfies *"a review item should be added for the admin staff so that they know [about the]
-addition of new document"* — it is informational by default (`status=open`, default disposition
-`acknowledge`), but admins can open it to see the placeholder `source` page, reassign workspace,
-or halt processing if something looks wrong before `ingesting` completes.
+addition of new document"* — it is informational by default (`status=open` until resolved with
+`resolved_action=acknowledge`, a one-click no-op resolution), but admins can open it to see the
+placeholder `source` page, reassign workspace, or halt processing if something looks wrong before
+`ingesting` completes.
 
-| Review item kind | Created when | Blocks pipeline? | Default disposition |
+| Review item kind | Created when | Blocks pipeline? | Default `resolved_action` |
 |---|---|---|---|
-| `submission` | Every new `raw_source` | No | Acknowledge (informational) |
+| `submission` | Every new `raw_source` | No | `acknowledge` (informational) |
 | `classification` | Classifier confidence below threshold | Yes (`pending_review`) | None — admin must choose a type |
-| `duplicate` | Exact or near-duplicate found | Yes (`pending_review`) | None — admin must choose an action |
+| `duplicate` | Exact/near/version-supersede match found (§4) | Yes (`pending_review`) | None — admin must choose an action (`supersede` pre-filled for version-supersede) |
 
 ## 6. Ingestion ("Ingest" Operation)
 

@@ -97,12 +97,12 @@ erDiagram
 |---|---|
 | `workspace` | `workspace_id`, `name`, `document_types[]`, `schema_ref`, `status`, `storage_bindings` |
 | `document_type` | `type_code`, `workspace_id`, `description` |
-| `raw_source` | `source_id`, `workspace_id`, `object_key`, `filename`, `content_hash`, `content_shape` (`narrative\|structured_data`), `supersedes`, `status` (`active\|superseded\|archived`), `ingested_at` |
+| `raw_source` | `source_id`, `workspace_id`, `object_key`, `filename`, `content_hash`, `content_shape` (`narrative\|structured_data`), `submitted_by` (`user:<id>\|connector:<connector_id>`), `artifact_identity`, `source_version`, `source_modified_at` (`structured_data` only — [03](03-ingestion-and-review-workflows.md) §3–4), `supersedes`, `status` (`active\|superseded\|archived`), `ingested_at` |
 | `wiki_page` | `page_id`, `workspace_id`, `path`, `page_type`, `current_version_id`, `status` (`draft\|published\|archived`) |
 | `page_version` | `version_id`, `page_id`, `content`, `frontmatter`, `author`, `created_at`, `change_summary`, `diff_ref`, `trigger`, `restored_from_version_id` |
 | `page_link` | `from_page_id`, `to_page_id`, `link_type` (`cross_reference\|cross_workspace`), `updated_at` |
 | `index_status` | `page_id`, `index_type` (`fts`), `state`, `last_indexed_at`, `last_content_version` |
-| `review_item` | `review_id`, `workspace_id`, `kind` (`submission\|duplicate\|reindex\|prune`), `subject_ref`, `proposed_action`, `status`, `created_at`, `resolved_by`, `resolved_at` |
+| `review_item` | `review_id`, `workspace_id`, `kind` (`submission\|duplicate\|reindex\|prune`), `severity`, `subject_ref`, `proposed_action`, `status` (`open\|resolved`), `resolved_action`, `created_at`, `resolved_by`, `resolved_at` |
 | `access_policy` | `workspace_id`, `principal`, `role` (see [06](06-api-mcp-and-scaling.md) §3) |
 
 `page_link` rows are (re)written by the Wiki Service whenever a page's cross-references are parsed

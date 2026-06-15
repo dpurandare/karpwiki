@@ -27,7 +27,7 @@ contract is the resource/operation table above, not the wire format.
 ## 2. MCP Surface
 
 The MCP server is a **thin protocol adapter over the same Common Gateway** — no business logic
-lives in the MCP layer, mirroring how Context7's MCP package wraps its hosted API. The surface
+lives in the MCP layer — it's a direct mapping onto the gateway's existing operations (§1). The surface
 spans both consumer operations (search, browse, submit) and — gated to `admin` — the same
 review-queue and version-control operations the Admin Console uses
 ([05](05-admin-backend-and-maintenance.md)), so an LLM-based admin copilot can triage the queue and
@@ -47,12 +47,11 @@ act on Maintenance Advisor proposals through the same protocol a human admin use
 | `wiki_rollback_page` | `pages/{id}/rollback` | admin | Roll back a page to a prior version ([01](01-architecture-and-data-model.md) §5) |
 
 **Transport**: both `stdio` (for local agent/IDE integration) and streamable HTTP (for
-remote/multi-user agent deployments) should be supported, following the pattern observed in
-Context7's MCP server. In HTTP mode, session state (if any) is kept in a shared store reachable by
+remote/multi-user agent deployments) should be supported — standard MCP transport options. In HTTP mode, session state (if any) is kept in a shared store reachable by
 any gateway instance — **not** pinned to a single process — so MCP sessions don't constrain
 horizontal scaling (§4).
 
-**Argument normalization**: as with Context7, the MCP layer should tolerate near-miss parameter
+**Argument normalization**: the MCP layer should tolerate near-miss parameter
 names/aliases from LLM-generated tool calls and normalize before dispatch, rather than failing the
 call outright.
 

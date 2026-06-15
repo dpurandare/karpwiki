@@ -154,7 +154,7 @@ erDiagram
 | `name`, `description` | Human-readable. |
 | `document_types[]` | The taxonomy of document types this workspace accepts (drives ingestion routing — see [03](03-ingestion-and-review-workflows.md) §3). |
 | `schema_ref` | Pointer to this workspace's `SCHEMA.md` (conventions, curator rules, thresholds — see §6). |
-| `status` | `active` \| `archived` \| `read_only`. |
+| `status` | `active` \| `archived`. |
 | `storage_bindings` | Adapter config for this workspace's object store namespace, metadata partition, FTS index, log stream (§1 of [02](02-storage-and-indexing.md)). |
 | `access_policy_ref` | Who can read/write/submit/admin this workspace (see [06](06-api-mcp-and-scaling.md) §4). |
 
@@ -276,8 +276,7 @@ current_version: <version_id>
 ```
 
 Citations use markdown footnotes referencing raw sources by full filename (and page number for
-PDFs), consistent with the conventions already used by the `llmwiki-research`/`wiki-r2` tooling
-observed in this environment. Cross-references use standard markdown links; links that target
+PDFs). Cross-references use standard markdown links; links that target
 another workspace are written as fully-qualified workspace-relative paths so the gateway can
 resolve and AuthZ-check them.
 

@@ -58,8 +58,10 @@ Agent's task for a `structured_data` source is:
 2. **Intent**: write a 1–3 sentence plain-language statement of *what this artifact is for* — what
    question it answers, what system or process it supports, who owns/produces/consumes it. This is
    inferred from the artifact's context (surrounding files, naming, comments), not invented.
-3. **Provenance**: source system/format, version or last-modified info if extractable, and the
-   citation back to the raw source in object storage ([02](02-storage-and-indexing.md) §2).
+3. **Provenance**: source system/format, the `artifact_identity`/`source_version`/
+   `source_modified_at` extracted during classification ([03](03-ingestion-and-review-workflows.md)
+   §3) if available, and the citation back to the raw source in object storage
+   ([02](02-storage-and-indexing.md) §2).
 4. **Concept/entity pages**: per [03](03-ingestion-and-review-workflows.md) §6 step 3, create/update
    an `entity` page for each major thing the artifact *defines* (a table, a top-level API resource,
    a config section) when it's significant enough to be referenced from elsewhere —
@@ -99,7 +101,7 @@ as `document_type` ([03](03-ingestion-and-review-workflows.md) §3).
 | **Search result feedback loop** | Thumbs-up/down (or similar) on individual `search` results, recorded alongside `query_log` ([02](02-storage-and-indexing.md) §5). Persistently low-rated pages for a topic become a signal for the Maintenance Advisor's staleness/contradiction detectors ([05](05-admin-backend-and-maintenance.md) §2). | `query_log`, Maintenance Advisor |
 | **Content quality scoring** | During ingest/lint, the Curator Agent scores pages on citation density, cross-reference completeness, and freshness. Surfaced in the Admin Console as a sortable column, and used by the Advisor to prioritize lint/reindex work. | Curator Agent lint pass |
 | **Multi-language support** | Per-workspace primary language plus optional translated page variants; the Full-Text Index applies language-specific analyzers/tokenization per page language, with cross-language retrieval (query in one language, match a page in another) as a stretch goal. | Full-Text Index (per-language analyzers), Classifier (language detection) |
-| **Cross-workspace knowledge graph view** | Admin-facing visualization of cross-workspace links (built from the reference graph maintained on every page write, per the `wiki-r2`/`llmwiki-research` conventions observed in this environment) — helps admins spot taxonomy/workspace boundaries that don't match how content actually references itself. | Reference graph, Metadata DB |
+| **Cross-workspace knowledge graph view** | Admin-facing visualization of cross-workspace links (built from the `page_link` reference graph maintained on every page write — [02](02-storage-and-indexing.md) §3) — helps admins spot taxonomy/workspace boundaries that don't match how content actually references itself. | Reference graph, Metadata DB |
 
 ## 5. Platform Operations
 

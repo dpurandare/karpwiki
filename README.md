@@ -12,9 +12,6 @@ multi-workspace, horizontally scalable system for enterprise use.
 - **Enterprise extensions**: multi-workspace partitioning by document type, a common gateway
   fronting all storage/indices/logs, async ingestion with human review, federated lexical search
   (no vector index), versioning/rollback, and dual API + MCP interfaces.
-- Architecture research on [Context7](https://github.com/upstash/context7) informed several
-  design decisions (MCP surface conventions, ingestion lifecycle states, popularity-tiered
-  refresh scheduling).
 
 ## Specification
 
