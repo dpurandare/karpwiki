@@ -34,4 +34,7 @@ Start with [`spec/00-overview.md`](spec/00-overview.md).
 
 [`spec/08-implementation-stack.md`](spec/08-implementation-stack.md) is an optional appendix
 pinning a concrete Python stack (FastAPI, Celery, PostgreSQL, fsspec, Pydantic AI, etc.) to the
-vendor-neutral roles defined in `00`–`07`.
+vendor-neutral roles defined in `00`–`07`. [`spec/09-implementation-notes.md`](spec/09-implementation-notes.md)
+follows up with concrete design decisions for a handful of implementation-readiness gaps
+(pipeline-state tracking, connector execution, MCP delegation, a `SCHEMA.md` example, `diff_ref`
+format).

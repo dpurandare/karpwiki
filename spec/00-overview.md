@@ -68,6 +68,7 @@ behave like one platform.
 | [06-api-mcp-and-scaling.md](06-api-mcp-and-scaling.md) | Public API + MCP surface, auth/access model, horizontal scaling and deployment topology |
 | [07-additional-features-and-roadmap.md](07-additional-features-and-roadmap.md) | Completeness features (RBAC, notifications, analytics, connectors, etc.) and phased roadmap |
 | [08-implementation-stack.md](08-implementation-stack.md) | *(Optional appendix)* Python reference implementation — concrete library/service choices for each role above |
+| [09-implementation-notes.md](09-implementation-notes.md) | *(Optional appendix)* Design decisions for implementation-readiness gaps — pipeline-state storage, connector execution, MCP delegation, `SCHEMA.md` example, `diff_ref` format |
 
 ## 5. System at a Glance
 
@@ -136,7 +137,7 @@ flowchart TB
 | **Schema (`SCHEMA.md`)** | Per-workspace configuration: document-type taxonomy, page conventions, curator behavioral rules, staleness/pruning thresholds, dedup sensitivity. The enterprise analogue of Karpathy's `CLAUDE.md`. |
 | **Curator Agent** | The LLM-driven process that reads raw sources and writes/updates wiki pages during ingest, and that performs lint/maintenance analysis. |
 | **Maintenance Advisor** | The background service that scans workspaces for staleness, low-traffic/orphaned content, and likely duplicates, and emits **review items** with proposed actions (reindex, prune, merge). |
-| **Review Item** | A record in the admin review queue: a new submission, a duplicate-candidate flag, or a maintenance recommendation, each with a proposed action awaiting admin approval/rejection. |
+| **Review Item** | A record in the admin review queue: a new submission, a low-confidence classification, a duplicate-candidate flag, or a maintenance recommendation, each with a proposed action awaiting admin approval/rejection. |
 | **Ingestion Pipeline** | The async, stateful process taking a raw source from `submitted` through classification, dedup check, optional review, to `ingested` (wiki updated) or `error`. |
 | **Version** | An immutable snapshot of a wiki page's content + metadata at a point in time. Pages have a linear version history; "current" is a pointer, never an overwrite. |
 | **Rollback** | Creating a new version whose content equals a prior version's content — non-destructive reversion. |

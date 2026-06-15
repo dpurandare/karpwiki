@@ -167,7 +167,7 @@ ingest operation from Karpathy's pattern, scoped to the target workspace:
 5. Append an entry to the `ingestion_log` (materialized into `log.md`).
 6. Mark every touched page's `index_status` row `pending` for the Full-Text Index
    ([02](02-storage-and-indexing.md) §7) — this enqueues a reindex job.
-7. Set `raw_source.status` and pipeline state to `ingested`.
+7. Set the pipeline state to `ingested` (`raw_source.status` remains `active`, per §1).
 
 On failure at any step, state moves to `error` and a review item is raised with the failure
 context (state `pending_review`) for admin triage/retry.

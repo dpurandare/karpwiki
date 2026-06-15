@@ -90,4 +90,4 @@ remain correct regardless of which implementation is built against them.
 - `authlib`, `pyjwt`
 
 ---
-Previous: [07-additional-features-and-roadmap.md](07-additional-features-and-roadmap.md) · Back to: [00-overview.md](00-overview.md)
+Previous: [07-additional-features-and-roadmap.md](07-additional-features-and-roadmap.md) · Next: [09-implementation-notes.md](09-implementation-notes.md) · Back to: [00-overview.md](00-overview.md)
