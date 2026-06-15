@@ -67,6 +67,7 @@ behave like one platform.
 | [05-admin-backend-and-maintenance.md](05-admin-backend-and-maintenance.md) | Admin console scope, reindex/pruning advisor, repository management, versioning/rollback ops, performance monitoring |
 | [06-api-mcp-and-scaling.md](06-api-mcp-and-scaling.md) | Public API + MCP surface, auth/access model, horizontal scaling and deployment topology |
 | [07-additional-features-and-roadmap.md](07-additional-features-and-roadmap.md) | Completeness features (RBAC, notifications, analytics, connectors, etc.) and phased roadmap |
+| [08-implementation-stack.md](08-implementation-stack.md) | *(Optional appendix)* Python reference implementation — concrete library/service choices for each role above |
 
 ## 5. System at a Glance
 

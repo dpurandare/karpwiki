@@ -149,4 +149,4 @@ gantt
 | **4 — Advanced** | Compliance, multi-region, multi-language — pursued based on actual organizational need. | Driven by org-specific requirements, not a fixed timeline. |
 
 ---
-Previous: [06-api-mcp-and-scaling.md](06-api-mcp-and-scaling.md) · Back to: [00-overview.md](00-overview.md)
+Previous: [06-api-mcp-and-scaling.md](06-api-mcp-and-scaling.md) · Next: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)
