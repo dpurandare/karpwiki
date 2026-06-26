@@ -28,17 +28,3 @@ htmlcov/
 .vscode/
 .idea/
 .DS_Store
-
-# Context7 research materials (background reference, not tracked)
-context7/
-
-# GBrain research notes (background reference, not tracked)
-gbrain/
-
-# Local-only files (background reference, not tracked)
-base.txt
-CLAUDE.md
-review1.md
-review2.md
-review3.md
-techfeasibility.md
