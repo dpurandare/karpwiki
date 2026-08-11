@@ -1,10 +1,11 @@
 # Technical Feasibility / Implementation-Readiness Concerns
 
-These are **not spec defects** — `spec/00`–`08` is internally consistent (see `review1.md`,
-`review2.md`, `review3.md`). These are items the spec deliberately leaves open (per `00` §3's
-vendor-neutral scope and "numeric capacity planning... TBD by org" stance), or that surfaced
-during review as needing a concrete answer before/during implementation. Hand this list to
-whoever is designing or coding each area.
+These are **not spec defects** — `spec/00`–`09` is internally consistent (multiple review rounds
+resolved or explicitly deferred every finding; see `tasklist.md` for the small number of items
+still open). These are items the spec deliberately leaves open (per `00` §3's vendor-neutral scope
+and "numeric capacity planning... TBD by org" stance), or that surfaced during review as needing a
+concrete answer before/during implementation. Hand this list to whoever is designing or coding
+each area.
 
 ## Status (2026-06-15): all resolved or explicitly deferred
 
