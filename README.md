@@ -7,6 +7,13 @@ multi-workspace, horizontally scalable system for enterprise use.
 
 ## Background
 
+### Karpathy Wiki for Agentic AI
+
+Andrej Karpathy's original pattern is a small, LLM-maintained wiki meant to be read and kept
+up to date by an AI agent rather than a human editor. This spec keeps that agent-first design
+center: the dual API + MCP interfaces mean any agentic AI system can query the curated wiki or
+submit new raw sources for ingestion directly, without a human in the loop.
+
 - **Core idea**: raw sources → curated wiki → schema, with ingest / query / lint as the three
   operations (Karpathy's pattern).
 - **Enterprise extensions**: multi-workspace partitioning by document type, a common gateway
