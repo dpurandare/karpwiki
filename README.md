@@ -13,6 +13,20 @@ multi-workspace, horizontally scalable system for enterprise use.
   fronting all storage/indices/logs, async ingestion with human review, federated lexical search
   (no vector index), versioning/rollback, and dual API + MCP interfaces. As there is no reference implementation of Karpathy's wiki available, this is an attempt to define the detailed specifications for the implementation (and possible reference implementation).
 
+The specification in [`spec/`](spec/) is written to be implementable as-is — it can be handed
+to an engineering team (or an AI coding agent) to build directly.
+
+## Research
+
+Two similar open-source projects were analyzed for implementation ideas that fed into this
+specification. Each has its own folder, named after the project it covers:
+
+- [`context7/`](context7/) — analysis of [Context7](https://github.com/upstash/context7)
+  (Upstash), a documentation retrieval MCP server/gateway.
+- [`gbrain/`](gbrain/) — analysis of [GBrain](https://github.com/garrytan/gbrain), a
+  Postgres-native personal/team knowledge brain with hybrid (vector + BM25) search and a
+  self-wiring knowledge graph.
+
 ## Specification
 
 The full specification lives in [`spec/`](spec/), as eight documents meant to be read in order:
