@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon.svg" width="120" height="120" alt="karpwiki icon">
+</p>
+
 # Enterprise Wiki Platform — Specification
 
 A specification for an **Enterprise Wiki Platform** that adapts Andrej Karpathy's
