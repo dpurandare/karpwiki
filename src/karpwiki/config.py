@@ -7,6 +7,13 @@ workspace's SCHEMA.md may override (09 §16); nothing reads them until 1b.
 
 import os
 
+from dotenv import load_dotenv
+
+# Local development reads a gitignored .env; a deployment has none and passes real
+# environment variables instead. load_dotenv does not override variables already set,
+# so the deployment's values always win and this is a no-op there.
+load_dotenv()
+
 DATABASE_URL = os.environ.get(
     "KARPWIKI_DATABASE_URL",
     "postgresql+asyncpg://karpwiki:karpwiki@localhost:5432/karpwiki",

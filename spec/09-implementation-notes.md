@@ -480,10 +480,21 @@ one-value change.
 
 ### What is *not* configurable here
 
-**Credentials never live in `SCHEMA.md`.** The provider API key follows §13's pattern: a
-`credential_ref` into the deployment's secrets manager, resolved at call time. `SCHEMA.md` is
-versioned, admin-editable, and part of the wiki export (`02` §2) — a workspace-editable model name
-belongs there, a secret does not.
+**Credentials never live in `SCHEMA.md`.** `SCHEMA.md` is versioned, admin-editable, and part of
+the wiki export (`02` §2) — a workspace-editable model name belongs there, a secret does not. Nor
+does the key belong in the Platform's own configuration: the OpenAI SDK and Pydantic AI read
+`OPENAI_API_KEY` from the environment themselves, so the Platform never reads, holds, or logs it,
+and `config.py` deliberately has no setting for it. Where the variable comes from is per
+environment:
+
+| Environment | Source of `OPENAI_API_KEY` |
+|---|---|
+| Local development | A gitignored `.env` file, from the committed `.env.example` template |
+| Deployment | Injected as an environment variable by the secrets manager at container start, the same custody model §13 defines for connector credentials |
+
+This is the one credential the Platform holds on its own behalf rather than a workspace's, so it is
+a single deployment-wide secret rather than a per-workspace `credential_ref` row. Rotating it is a
+secrets-manager operation and a restart; no Platform record changes.
 
 ### Consequences of making it configurable
 

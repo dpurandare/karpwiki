@@ -52,11 +52,16 @@ core Metadata DB tables, the append-only versioning model with non-destructive r
 frontmatter validation, the object-store adapter, and the Celery queue definitions.
 
 ```bash
+cp .env.example .env                     # then fill in OPENAI_API_KEY
 docker compose up -d                     # PostgreSQL + Redis
 pip install -e '.[dev]'                  # Python 3.11+
 alembic upgrade head                     # create the schema
 pytest                                   # 1a step-6 verification
 ```
+
+Configuration is environment variables, listed with their defaults in
+[`.env.example`](.env.example). `.env` is gitignored and loaded automatically; real environment
+variables always win over it, so a deployment passes its own and needs no file.
 
 Tests need a `karpwiki_test` database (`createdb karpwiki_test`, or
 `docker exec karpwiki-postgres-1 psql -U karpwiki -c 'CREATE DATABASE karpwiki_test;'`). Override
@@ -64,16 +69,14 @@ Tests need a `karpwiki_test` database (`createdb karpwiki_test`, or
 other backends.
 
 The two agents' models are configuration, resolved per role
-([09](spec/09-implementation-notes.md) §16) — the same model in every environment:
+([09](spec/09-implementation-notes.md) §16) — `openai:gpt-5-nano` in every environment. Neither has
+a default in code: an unset role raises `ModelNotConfiguredError` rather than silently picking a
+model, and a workspace's `SCHEMA.md` may override either role. §16 records what this cost-first
+choice trades and the three signals that should trigger raising the curator's tier.
 
-```bash
-export KARPWIKI_LLM_CLASSIFIER_MODEL=openai:gpt-5-nano
-export KARPWIKI_LLM_CURATOR_MODEL=openai:gpt-5-nano
-```
-
-Neither has a default in code: an unset role raises `ModelNotConfiguredError` rather than silently
-picking a model. A workspace's `SCHEMA.md` may override either role. §16 records what this
-cost-first choice trades and the three signals that should trigger raising the curator's tier.
+**`OPENAI_API_KEY` is never read by this codebase** — the OpenAI SDK and Pydantic AI read it from
+the environment themselves, so the Platform never holds or logs it. Locally it comes from `.env`;
+in a deployment the secrets manager injects it at container start.
 
 ## Reference Implementation
 
