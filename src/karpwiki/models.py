@@ -63,6 +63,12 @@ class PipelineState(enum.Enum):
     rejected = "rejected"
 
 
+# `pipeline_state` is referenced by raw_source and twice by ingestion_log. create_all
+# dedupes the CREATE TYPE; Alembic does not, so a migration that adds a *later* table
+# using this type must reference it with postgresql.ENUM(..., create_type=False).
+PIPELINE_STATE_ENUM = Enum(PipelineState, name="pipeline_state")
+
+
 class PageType(enum.Enum):
     overview = "overview"
     index = "index"
@@ -145,7 +151,11 @@ class RawSource(Base):
     __tablename__ = "raw_source"
 
     source_id: Mapped[uuid.UUID] = _uuid_pk()
-    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspace.workspace_id"), index=True)
+    # Nullable until `classifying` resolves it: the raw_source row is created at
+    # `submitted`, before any workspace is known (03 §1).
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace.workspace_id"), index=True
+    )
     object_key: Mapped[str] = mapped_column(String(1024))
     filename: Mapped[str] = mapped_column(String(512))
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
@@ -162,7 +172,7 @@ class RawSource(Base):
         Enum(RawSourceStatus, name="raw_source_status"), default=RawSourceStatus.active
     )
     pipeline_state: Mapped[PipelineState] = mapped_column(
-        Enum(PipelineState, name="pipeline_state"), default=PipelineState.submitted
+        PIPELINE_STATE_ENUM, default=PipelineState.submitted
     )
     ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -252,6 +262,32 @@ class ReviewItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     resolved_by: Mapped[str | None] = mapped_column(String(255))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class IngestionLog(Base):
+    """Append-only history of every pipeline transition (02 §5).
+
+    `raw_source.pipeline_state` is the denormalized current pointer; this is the system of
+    record for how a source got there (09 §3), and `log.md` is materialized from it.
+    """
+
+    __tablename__ = "ingestion_log"
+
+    entry_id: Mapped[uuid.UUID] = _uuid_pk()
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("raw_source.source_id"), index=True)
+    # Null before `classifying` resolves the workspace, and on the initial transition.
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace.workspace_id"), index=True
+    )
+    from_state: Mapped[PipelineState | None] = mapped_column(PIPELINE_STATE_ENUM)
+    to_state: Mapped[PipelineState] = mapped_column(PIPELINE_STATE_ENUM)
+    actor: Mapped[str] = mapped_column(String(255))
+    detail: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # clock_timestamp, not now(): several transitions can share one transaction, and
+    # now() would make their order indeterminate (same reasoning as page_version).
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.clock_timestamp()
+    )
 
 
 class AccessPolicy(Base):

@@ -18,6 +18,8 @@ each row records where the decision lives.
 | 0.3 | **API conventions undefined.** Pagination/cursor format, error-response schema, idempotency keys, partial-failure shape, rate-limit headers — deferred in `techfeasibility.md` §3 to "the API design phase," which Phase 1 reaches at its first endpoint. | Step 7 | **Done** — [09](09-implementation-notes.md) §14 |
 | 0.4 | **No LLM model chosen.** [00](00-overview.md) §3 puts the provider out of scope and [08](08-implementation-stack.md) picks Pydantic AI but no model. | Step 9 | **Done** — [09](09-implementation-notes.md) §16: the model is configuration per agent role. `openai:gpt-5-nano` for both roles in every environment. Still needs an OpenAI key in the secrets manager before step 9 runs |
 
+| 0.5 | **A Classifier failure has no representable state.** [03](03-ingestion-and-review-workflows.md) §1's diagram admits `error` only from `ingesting`, matching §6's "on failure at any step" — whose steps are the *ingest operation's*. But the Classifier is an external API call, so transient failures are certain, and `classifying → error` is not a legal edge. Decide whether `error` becomes reachable from every non-terminal state, or whether classifier failures retry inside the worker and surface some other way. | Step 9 | Decision |
+
 Accepted for Phase 1, no action needed — recorded so they aren't rediscovered as surprises:
 
 - **No relevance-regression signal.** [09](09-implementation-notes.md) §10 designates the search

@@ -54,9 +54,10 @@ frontmatter validation, the object-store adapter, and the Celery queue definitio
 ```bash
 cp .env.example .env                     # then fill in OPENAI_API_KEY
 docker compose up -d                     # PostgreSQL + Redis + MinIO
-pip install -e '.[dev]'                  # Python 3.11+
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e '.[dev]'                  # Python 3.11+ (tested on 3.14)
 alembic upgrade head                     # create the schema
-pytest                                   # 1a step-6 verification
+pytest                                   # 1a and 1b step-8 verification
 ```
 
 Configuration is environment variables, listed with their defaults in
