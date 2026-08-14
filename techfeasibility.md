@@ -1,8 +1,8 @@
 # Technical Feasibility / Implementation-Readiness Concerns
 
 These are **not spec defects** — `spec/00`–`09` is internally consistent (multiple review rounds
-resolved or explicitly deferred every finding; see `tasklist.md` for the small number of items
-still open). These are items the spec deliberately leaves open (per `00` §3's vendor-neutral scope
+resolved or explicitly deferred every finding, and the last two open items were closed on
+2026-08-14). These are items the spec deliberately leaves open (per `00` §3's vendor-neutral scope
 and "numeric capacity planning... TBD by org" stance), or that surfaced during review as needing a
 concrete answer before/during implementation. Hand this list to whoever is designing or coding
 each area.
