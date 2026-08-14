@@ -7,8 +7,10 @@ readiness gaps in `00`–`08`. The first pass (§3–7) covered questions concre
 design decisions, in the same spirit as `08`'s reference-implementation choices. A second pass
 (§8–12) covers the remaining org/runtime decisions — retention defaults, classifier confidence
 calibration, relevance-test ownership, taxonomy bulk-move safeguards, and FUSE access scope —
-using values supplied by the organization adopting this spec. NFR targets specifically are
-recorded in [06](06-api-mcp-and-scaling.md) §6, the placeholder table designated for that purpose.
+using values supplied by the organization adopting this spec. A third pass (§13) closes the
+connector credential/security gap left open by §4, which covered connector *execution* only. NFR
+targets specifically are recorded in [06](06-api-mcp-and-scaling.md) §6, the placeholder table
+designated for that purpose.
 
 Unlike `08` (which only picks libraries for roles `00`–`07` already define), several of the
 decisions below imply a small addition to `00`–`07`'s conceptual data model or prose. Each item
@@ -29,6 +31,7 @@ below notes its **spec touch-point** where relevant — these have since been ap
 | Relevance testing / regression process | [04](04-search-and-retrieval.md) §3–4, [07](07-additional-features-and-roadmap.md) §4 | No dedicated test set — the search result feedback loop is the regression signal |
 | Taxonomy bulk-move execution model | [05](05-admin-backend-and-maintenance.md) §7 | Dry-run preview, then batched execute with per-batch progress; failed batch halts, completed batches not rolled back |
 | FUSE-mount access scope | [02](02-storage-and-indexing.md) §2 | Read-only, opt-in per workspace via `access_policy`, wiki-export prefix only |
+| Connector credentials & security | [05](05-admin-backend-and-maintenance.md) §7, [06](06-api-mcp-and-scaling.md) §3, §4 above | Secret lives in an external secrets manager, referenced by `credential_ref`; connector is a `connector:<id>` principal with `contributor` on exactly one workspace; config changes audit to `admin_action_log`, runs to `ingestion_log` |
 
 ## 3. Pipeline-State Storage
 
@@ -258,6 +261,69 @@ changes continue to go through the Wiki Service (gateway-mediated, `06`), preser
 page write creates a new version" ([00](00-overview.md) §2 Principle 9).
 
 **Spec touch-point** (applied): `02` §2's "File-based agent access" bullet now states this scope.
+
+## 13. Connector Credential & Security Model
+
+§4 above defines *how* a connector run executes, and `05` §7 lists "credentials" as part of
+connector configuration — but neither says where a credential lives, how it rotates, what a
+connector may do once authenticated, or what its actions leave behind for audit.
+
+**Decision**: a connector is an ordinary Platform principal whose secret is held outside the
+Platform.
+
+**Credential storage.** Connector secrets are never stored in the Metadata DB, `SCHEMA.md`, the
+Object Store, or any log stream. A `connector` row (`02` §3) holds a `credential_ref` — an opaque
+pointer into the deployment's external secrets manager (a role, not a product: Vault, AWS Secrets
+Manager, GCP Secret Manager, Kubernetes secrets) — resolved by the connector polling worker (§4)
+at the start of each run and held in memory for that run only. The `connectors` API (`06` §1)
+accepts a secret write-only on configure/update and never returns it; reads return the
+`credential_ref` plus non-sensitive metadata (last rotated, expiry, last auth outcome).
+
+**Rotation.** Rotation happens in the secrets manager, not the Platform: the `credential_ref` is
+stable across rotations, so no Platform-side record changes and no scheduled run is interrupted. A
+run whose credential fails to authenticate does **not** retry on the normal schedule — the
+connector moves to `disabled_auth` and surfaces via the Admin Console's operational health
+(`05` §8) and the Notification Service (`07`), because a connector retrying an expired credential
+on a poll interval is the usual way an integration account gets locked out at the source system.
+An admin re-enables it once the secret is fixed. Optional `credential_expires_at` metadata lets the
+same channel warn ahead of expiry rather than after failure.
+
+**Secret scope.** One credential per connector, scoped to that connector's single target
+workspace — two connectors against the same source system get separate refs, so revoking one never
+disables the other. The credential should be the least-privileged read-only account the source
+system offers: connectors only ever *read* from the source and *write* into the Platform.
+
+**Permission boundary.** `connector:<connector_id>` is a principal in `access_policy` (`02` §3,
+`06` §3) exactly like a user or API client, granted `contributor` on exactly one workspace — never
+`admin`, never several workspaces, never global. That grant permits only what `contributor`
+already permits: create a `raw_source` (`03` §2). A connector cannot resolve review items, edit or
+roll back pages, read `query_log`, or configure connectors, and it cannot route content outside
+its own workspace. Connector-submitted sources obey that workspace's `ingestion_policy`
+(`auto`/`gated`, `03` §7) like any other submission; a connector's own configured policy (`05` §7)
+may only *tighten* that to `gated`, never relax a `gated` workspace to `auto` — a connector is not
+a trusted bypass. This mirrors §5's rule for delegated submission: no principal borrows privilege
+by routing through another.
+
+**Audit.** No new log stream is required:
+
+- *Configuration* — create/update/disable and each rotation event (the fact and timestamp, never
+  the value) append to `admin_action_log` (`02` §5) with the acting admin.
+- *Runs* — each run appends an `ingestion_log` entry carrying connector id, run id, auth outcome,
+  items discovered, and `raw_source`s created, alongside the per-source state transitions that
+  stream already records.
+- *Items* — attribution already exists: `raw_source.submitted_by = connector:<connector_id>`
+  (`02` §3, unchanged), so every wiki page traces back to the connector that fetched its source.
+
+**Alternative considered**: encrypted credentials in the Metadata DB (an `encrypted_credential`
+column plus a platform-managed key). Fewer moving parts for a small deployment, but it makes the
+Platform a secrets custodian — key management, rotation tooling, and an exfiltration surface it
+otherwise doesn't have — and enterprise deployments of the kind `00` §3 targets already run a
+secrets manager.
+
+**Spec touch-point** (applied): `02` §3 gains a `connector` table (§4's "small per-connector
+cursor" is its `last_sync_cursor` field, still not a table of its own) and notes
+`connector:<connector_id>` as an `access_policy` principal; `05` §7's connector row points here
+for the credential/security model; `06` §3's principal table gains a Connector row.
 
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

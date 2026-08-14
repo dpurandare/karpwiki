@@ -88,6 +88,7 @@ erDiagram
     WORKSPACE ||--o{ RAW_SOURCE : contains
     WORKSPACE ||--o{ WIKI_PAGE : contains
     WORKSPACE ||--o{ REVIEW_ITEM : queues
+    WORKSPACE ||--o{ CONNECTOR : configures
     RAW_SOURCE ||--o{ RAW_SOURCE : supersedes
     WIKI_PAGE ||--o{ PAGE_VERSION : "version history"
     WIKI_PAGE ||--o{ INDEX_STATUS : "per-index state"
@@ -108,7 +109,8 @@ erDiagram
 | `page_link` | `from_page_id`, `to_page_id`, `link_type` (`cross_reference\|cross_workspace`), `updated_at` |
 | `index_status` | `page_id`, `index_type` (`fts`), `state`, `last_indexed_at`, `last_content_version` |
 | `review_item` | `review_id`, `workspace_id`, `kind` (`submission\|classification\|duplicate\|reindex\|prune`), `severity`, `subject_ref`, `proposed_action`, `status` (`open\|resolved`), `resolved_action`, `created_at`, `resolved_by`, `resolved_at` |
-| `access_policy` | `workspace_id`, `principal`, `role` (see [06](06-api-mcp-and-scaling.md) §3) |
+| `connector` | `connector_id`, `workspace_id`, `type`, `config`, `credential_ref` (pointer into the external secrets manager — the secret itself is never stored here, [09](09-implementation-notes.md) §13), `schedule`, `ingestion_policy`, `state` (`enabled\|disabled\|disabled_auth`), `last_sync_cursor` ([09](09-implementation-notes.md) §4), `last_run_at` |
+| `access_policy` | `workspace_id`, `principal` (a user, group, API/MCP client, or `connector:<connector_id>` — see [06](06-api-mcp-and-scaling.md) §3), `role` |
 
 `page_link` rows are (re)written by the Wiki Service whenever a page's cross-references are parsed
 during a write — `link_type=cross_reference` for same-workspace links, `cross_workspace` for links

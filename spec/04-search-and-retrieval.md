@@ -54,7 +54,11 @@ flowchart TB
   §4) is itself indexed. A query matching a page's catalog entry gets a ranking boost for that
   page — the lexical-scoring expression of Karpathy's "LLM reads `index.md` first" pattern.
 - Because there is only one retrieval path (lexical), there's no fusion of heterogeneous signal
-  types — and so none of the score-comparability problems fusion exists to solve.
+  types — and so none of the score-comparability problems fusion exists to solve. This holds for
+  scores drawn from a single index instance, which is the default for every query (§4). The one
+  case where scores from *separate* index instances must be reconciled — a federated query that
+  spans a dedicated-index workspace — is not fusion of signal types either, but it does need a
+  normalization step; see §4.
 
 ## 4. Federated / Cross-Workspace Search
 

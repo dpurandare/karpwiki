@@ -78,6 +78,7 @@ flowchart LR
 | End user | Enterprise SSO (OIDC/SAML) | `reader` (search, view published pages), `contributor` (also: submit documents) per workspace |
 | Admin staff | Same SSO, elevated group/role | `admin` per workspace, or global admin across all workspaces |
 | API/MCP client | API key or OAuth client-credentials | Scoped to specific workspaces and operations (typically `reader`, optionally `contributor`) |
+| Connector | Internal principal `connector:<connector_id>`, established by its `connector` record ([02](02-storage-and-indexing.md) §3); its *outbound* source-system credential is resolved from the secrets manager per run ([09](09-implementation-notes.md) §13) | `contributor` on exactly one workspace — enough to create a `raw_source`, never `admin` or multi-workspace |
 
 `access_policy(workspace_id, principal, role)` ([02](02-storage-and-indexing.md) §3) is the single
 table the gateway's AuthZ step consults. Roles are intentionally simple (`reader`, `contributor`,
