@@ -1,8 +1,8 @@
 """Metadata DB schema — the system of record (02 §3).
 
 Field lists follow 02 §3's conceptual table definitions; enum values follow the states
-defined in 01 §5, 02 §7, and 03 §1. Phase 1 needs the seven core tables only —
-`connector` and `access_policy` belong to later phases (phase1-tasklist §0.2, Phase 2).
+defined in 01 §5, 02 §7, and 03 §1. Phase 1 covers the seven core tables plus
+`access_policy` (09 §15); `connector` arrives with the connector framework in Phase 2.
 """
 
 import enum
@@ -115,6 +115,14 @@ class ReviewKind(enum.Enum):
 class ReviewStatus(enum.Enum):
     open = "open"
     resolved = "resolved"
+
+
+class Role(enum.Enum):
+    """The three baseline roles (06 §3); finer-grained permissions are a roadmap item."""
+
+    reader = "reader"
+    contributor = "contributor"
+    admin = "admin"
 
 
 class Workspace(Base):
@@ -244,3 +252,20 @@ class ReviewItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     resolved_by: Mapped[str | None] = mapped_column(String(255))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AccessPolicy(Base):
+    """Who may do what in a workspace (06 §3) — the single table gateway AuthZ consults.
+
+    Phase 1 ships authorization; authentication resolves a principal through a pluggable
+    provider (09 §15). Principals are `user:<id>`, `group:<id>`, `client:<id>`, or
+    `connector:<connector_id>` (Phase 2, 09 §13).
+    """
+
+    __tablename__ = "access_policy"
+
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace.workspace_id"), primary_key=True
+    )
+    principal: Mapped[str] = mapped_column(String(255), primary_key=True)
+    role: Mapped[Role] = mapped_column(Enum(Role, name="role"))

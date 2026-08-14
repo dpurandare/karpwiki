@@ -8,9 +8,10 @@ design decisions, in the same spirit as `08`'s reference-implementation choices.
 (§8–12) covers the remaining org/runtime decisions — retention defaults, classifier confidence
 calibration, relevance-test ownership, taxonomy bulk-move safeguards, and FUSE access scope —
 using values supplied by the organization adopting this spec. A third pass (§13) closes the
-connector credential/security gap left open by §4, which covered connector *execution* only. NFR
-targets specifically are recorded in [06](06-api-mcp-and-scaling.md) §6, the placeholder table
-designated for that purpose.
+connector credential/security gap left open by §4, which covered connector *execution* only. A
+fourth pass (§14–16) settles what Phase 1's first endpoints need before they can be written — API
+conventions, the baseline auth scope, and the LLM model default. NFR targets specifically are
+recorded in [06](06-api-mcp-and-scaling.md) §6, the placeholder table designated for that purpose.
 
 Unlike `08` (which only picks libraries for roles `00`–`07` already define), several of the
 decisions below imply a small addition to `00`–`07`'s conceptual data model or prose. Each item
@@ -32,6 +33,9 @@ below notes its **spec touch-point** where relevant — these have since been ap
 | Taxonomy bulk-move execution model | [05](05-admin-backend-and-maintenance.md) §7 | Dry-run preview, then batched execute with per-batch progress; failed batch halts, completed batches not rolled back |
 | FUSE-mount access scope | [02](02-storage-and-indexing.md) §2 | Read-only, opt-in per workspace via `access_policy`, wiki-export prefix only |
 | Connector credentials & security | [05](05-admin-backend-and-maintenance.md) §7, [06](06-api-mcp-and-scaling.md) §3, §4 above | Secret lives in an external secrets manager, referenced by `credential_ref`; connector is a `connector:<id>` principal with `contributor` on exactly one workspace; config changes audit to `admin_action_log`, runs to `ingestion_log` |
+| API conventions | [06](06-api-mcp-and-scaling.md) §1 | Cursor pagination; one error envelope keyed by a stable `type`; `Idempotency-Key` on submit/resolve; partial search flagged explicitly; `RateLimit-*` headers |
+| Baseline auth scope for Phase 1 | [06](06-api-mcp-and-scaling.md) §3, `phase1-tasklist.md` | Authorization (`access_policy` + three roles) ships in Phase 1; authentication is a pluggable provider, trusted-header first and OIDC/SAML in Phase 2 |
+| LLM provider and model | [00](00-overview.md) §3, [08](08-implementation-stack.md) §2 | Claude Opus 5 (`claude-opus-5`) for Classifier and Curator via Pydantic AI's provider abstraction; prompts ordered stable-prefix-first for caching |
 
 ## 3. Pipeline-State Storage
 
@@ -326,6 +330,126 @@ secrets manager.
 cursor" is its `last_sync_cursor` field, still not a table of its own) and notes
 `connector:<connector_id>` as an `access_policy` principal; `05` §7's connector row points here
 for the credential/security model; `06` §3's principal table gains a Connector row.
+
+## 14. API Conventions
+
+`06` §1 defines the resource/operation table but not the cross-cutting mechanics every endpoint
+needs. `techfeasibility.md` §3 deferred these to "the API design phase" — Phase 1 reaches them at
+its first endpoint (`phase1-tasklist.md` step 7), so they are settled here.
+
+**Pagination.** Cursor-based, not offset. List endpoints accept `limit` (default 50, max 200) and
+an opaque `cursor`, and return `{"items": [...], "next_cursor": <string|null>}`. The cursor encodes
+the sort key plus a tiebreak id. Offset pagination is wrong for this data: `page_version`,
+`raw_source`, and the log streams are append-heavy and partitioned (`02` §3), so rows inserted
+mid-scan shift every later offset and a paging admin silently skips items.
+
+**Error responses.** One shape, on every non-2xx:
+
+```json
+{"error": {"type": "invalid_request", "message": "human-readable summary",
+           "detail": {"field": "page_type", "reason": "not a valid page type"},
+           "request_id": "req_01H..."}}
+```
+
+`type` is a stable machine-readable slug — `invalid_request` (400), `unauthenticated` (401),
+`forbidden` (403), `not_found` (404), `conflict` (409), `rate_limited` (429), `internal` (500) —
+and callers branch on it, never on `message`. `detail` is optional and shape-varies by `type`.
+Every response, success or failure, carries the `request_id` as a header so a user-reported failure
+maps to a log line.
+
+**Idempotency.** `sources` submit and `review-items/{id}/resolve` (`06` §1) accept an
+`Idempotency-Key` header. The gateway stores `(key, principal, endpoint)` with the response for 24
+hours; a replay returns the stored response rather than re-executing. This is what makes a client
+retry after a timeout safe — without it, a retried submit creates a second `raw_source` and a
+second ingestion run. Distinct from content-hash duplicate detection (`02` §3, `03` §4): dedup asks
+"is this the same *document*", idempotency asks "is this the same *request*", and a resubmission of
+identical content by design still creates a new `raw_source` that dedup then flags.
+
+**Partial failure.** `search` fans out across workspaces (`04` §4), so one unavailable index must
+not fail the whole query. A partially-served search returns 200 with the results it has plus
+`"partial": true` and `"unavailable": [<workspace_id>, ...]`. The flag is mandatory, not advisory —
+a caller that renders partial results as complete is the failure this prevents. Callers needing
+all-or-nothing check `partial` and retry. Single-workspace operations have no partial state and
+never carry the field.
+
+**Rate limiting.** The gateway's limiter (`01` §2, `07` §3) returns `RateLimit-Limit`,
+`RateLimit-Remaining`, and `RateLimit-Reset` on every response, and a 429 carries `Retry-After` in
+seconds alongside the standard error body (`type: "rate_limited"`).
+
+**Spec touch-point**: none — these are contract details below the level `00`–`07` specify, recorded
+here so the implementation doesn't invent five inconsistent answers.
+
+## 15. Baseline Auth Scope for Phase 1
+
+`06` §3 defines the auth model, but `07` §6's Phase 1 says only "basic admin console" and
+`phase1-tasklist.md` originally carried no auth step at all — while steps 19–20 build an admin
+console that presupposes an admin role. Building the gateway first and retrofitting authorization
+is the expensive order, so the scope needs settling before step 7.
+
+**Decision**: split authentication from authorization, and implement them on different schedules.
+
+- **Authorization is Phase 1.** The `access_policy` table (`02` §3), the three roles from `06` §3
+  (`reader`, `contributor`, `admin`), and a gateway check on every endpoint against the caller
+  column in `06` §1's table. This is the part that is expensive to retrofit: it determines the
+  shape of every handler signature, so it goes in with the first endpoint.
+- **Authentication is pluggable, and Phase 1 ships the trivial provider.** The gateway resolves a
+  principal through a small interface with one method — request in, principal out. Phase 1 ships a
+  trusted-header provider for single-tenant/dev deployment; the OIDC/SAML provider (`06` §3)
+  lands in Phase 2 as a second implementation, with no change to any handler. This is what lets
+  Phase 1 proceed without waiting on the organization's IdP.
+
+**Explicitly out of Phase 1**: fine-grained per-page-type permissions (a roadmap item already,
+`06` §3, `07`), connector principals (§13 — connectors are Phase 2), and MCP on-behalf-of
+delegation (§5 — it needs the MCP surface, also Phase 2).
+
+**Alternative considered**: declare Phase 1 fully trusted with no `access_policy` at all. Fewer
+moving parts, but every endpoint written in that phase then hard-codes "the caller may do
+anything," and steps 19–20's admin console has no way to be an admin — the retrofit would touch
+every handler built in 1b and 1c.
+
+**Spec touch-point** (applied): `phase1-tasklist.md` step 2 gains the `access_policy` table, and
+step 7 — the first endpoint — gains principal resolution and role enforcement as the gateway's
+cross-cutting concern rather than a separate later step.
+
+## 16. LLM Provider and Model Default
+
+`00` §3 puts LLM provider selection out of scope and `08` §2 picks Pydantic AI as the agent
+framework without naming a model — leaving the Classifier (`03` §3) and Curator (`03` §6) with no
+concrete model to run against.
+
+**Decision**: **Claude Opus 5 (`claude-opus-5`) for both roles**, reached through Pydantic AI's
+model-provider abstraction so `00` §3's provider neutrality holds — the model is a configuration
+value, not a code dependency, and a workspace could run a different one.
+
+Both roles suit the strongest tier available. The Classifier's output gates the pipeline
+(`03` §3 step 6): a wrong `document_type` routes a source to the wrong workspace, and a
+miscalibrated confidence either floods the review queue or waves bad classifications through.
+The Curator's output *is* the product — the wiki pages users read and cite.
+
+Cost is not the constraint here. At `06` §6's ingestion rate of 10–100 documents/hour, and Claude
+Opus 5's $5/$25 per million input/output tokens, the LLM line is small next to the engineering
+time a weaker classifier costs in review-queue volume. Trading down to a cheaper tier is a decision
+for the adopting organization once real classification-accuracy data exists (`09` §9's calibration
+loop is what produces that data), not a default to assume up front.
+
+Two implementation notes that follow from the choice:
+
+- **Structure the prompts for caching.** Both agents send a large stable prefix and a small
+  variable suffix — the Classifier its system prompt plus the document-type taxonomy (`01` §3), the
+  Curator its `SCHEMA.md` curator rules and tone (`01` §7, §6 above) — with the source document
+  last. Caching is a prefix match, so the stable part must physically precede the variable part;
+  ordered that way, per-workspace prefixes are cached across every document in a batch and read at
+  roughly a tenth of input cost. A prefix must reach 512 tokens to cache at all on this model, which
+  a taxonomy plus curator rules comfortably clears.
+- **Size `max_tokens` for thinking plus output.** Thinking is on by default on this model and
+  counts against the same ceiling, so a limit sized only for the expected `ClassificationResult`
+  will truncate.
+
+Confidence remains self-reported in the structured output per §9 — Pydantic AI's typed result
+models are how both agents return it.
+
+**Spec touch-point** (applied): `08` §2's LLM-layer row names the default model, and `08` §3's
+LLM-layer notes record the caching and `max_tokens` guidance.
 
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

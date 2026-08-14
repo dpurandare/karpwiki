@@ -12,12 +12,14 @@ from sqlalchemy import select
 from karpwiki import objectstore, versioning
 from karpwiki.frontmatter import FrontmatterError, split_frontmatter, validate_frontmatter
 from karpwiki.models import (
+    AccessPolicy,
     IndexState,
     IndexStatus,
     IndexType,
     PageStatus,
     PageType,
     PageVersion,
+    Role,
     VersionTrigger,
     WikiPage,
 )
@@ -173,6 +175,30 @@ async def test_frontmatter_requires_two_tags(session, workspace):
             body="# Retry\n",
             **{**PAGE, "tags": ["reliability"]},
         )
+
+
+async def test_access_policy_grants_a_role_per_principal(session, workspace):
+    session.add_all(
+        [
+            AccessPolicy(
+                workspace_id=workspace.workspace_id, principal="user:deepak", role=Role.admin
+            ),
+            AccessPolicy(
+                workspace_id=workspace.workspace_id, principal="group:eng", role=Role.contributor
+            ),
+        ]
+    )
+    await session.commit()
+
+    granted = (
+        await session.execute(
+            select(AccessPolicy).where(AccessPolicy.workspace_id == workspace.workspace_id)
+        )
+    ).scalars()
+    assert {p.principal: p.role for p in granted} == {
+        "user:deepak": Role.admin,
+        "group:eng": Role.contributor,
+    }
 
 
 async def test_frontmatter_round_trips(session, workspace):
