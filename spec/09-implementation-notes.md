@@ -9,9 +9,9 @@ design decisions, in the same spirit as `08`'s reference-implementation choices.
 calibration, relevance-test ownership, taxonomy bulk-move safeguards, and FUSE access scope —
 using values supplied by the organization adopting this spec. A third pass (§13) closes the
 connector credential/security gap left open by §4, which covered connector *execution* only. A
-fourth pass (§14–16) settles what Phase 1's first endpoints need before they can be written — API
-conventions, the baseline auth scope, and the LLM model default. NFR targets specifically are
-recorded in [06](06-api-mcp-and-scaling.md) §6, the placeholder table designated for that purpose.
+fourth pass (§14–17) settles what Phase 1's first endpoints need before they can be written — API
+conventions, the baseline auth scope, the LLM model default, and the near-duplicate metric. NFR
+targets specifically are recorded in [06](06-api-mcp-and-scaling.md) §6, the placeholder table designated for that purpose.
 
 Unlike `08` (which only picks libraries for roles `00`–`07` already define), several of the
 decisions below imply a small addition to `00`–`07`'s conceptual data model or prose. Each item
@@ -35,6 +35,7 @@ below notes its **spec touch-point** where relevant — these have since been ap
 | Connector credentials & security | [05](05-admin-backend-and-maintenance.md) §7, [06](06-api-mcp-and-scaling.md) §3, §4 above | Secret lives in an external secrets manager, referenced by `credential_ref`; connector is a `connector:<id>` principal with `contributor` on exactly one workspace; config changes audit to `admin_action_log`, runs to `ingestion_log` |
 | API conventions | [06](06-api-mcp-and-scaling.md) §1 | Cursor pagination; one error envelope keyed by a stable `type`; `Idempotency-Key` on submit/resolve; partial search flagged explicitly; `RateLimit-*` headers |
 | Baseline auth scope for Phase 1 | [06](06-api-mcp-and-scaling.md) §3, `phase1-tasklist.md` | Authorization (`access_policy` + three roles) ships in Phase 1; authentication is a pluggable provider, trusted-header first and OIDC/SAML in Phase 2 |
+| Near-duplicate similarity metric | [02](02-storage-and-indexing.md) §4, [03](03-ingestion-and-review-workflows.md) §4, §6 below | Lexeme containment over the FTS index, not `ts_rank` (unbounded, length-dependent); `near_duplicate_score` recalibrated from 0.85 to 0.60 against measured scores |
 | LLM model selection | [00](00-overview.md) §3, [08](08-implementation-stack.md) §2 | Configurable per agent role: workspace `SCHEMA.md` override, else platform default. One Pydantic AI `provider:model` string; `openai:gpt-5-nano` in every environment, cost-first with curation quality as the watched risk; credentials stay in the secrets manager |
 
 ## 3. Pipeline-State Storage
@@ -149,7 +150,7 @@ thresholds:
   classification:
     min_confidence: 0.75        # below this -> classification review item (03 §3, §9 above)
   dedup:
-    near_duplicate_score: 0.85  # FTS "more like this" score, normalized 0-1 (03 §4)
+    near_duplicate_score: 0.60  # lexeme containment, 0-1 (03 §4; see §17)
   orphan:
     query_log_lookback_days: 90 # zero appearances in this window -> prune candidate (05 §2)
 
@@ -536,6 +537,53 @@ secrets-manager operation and a restart; no Platform record changes.
 **Spec touch-point** (applied): §6 above's `SCHEMA.md` template gains an optional `llm:` block;
 `08` §2's LLM-layer row and §3's notes record the resolution order and the prompt-ordering
 requirement.
+
+## 17. Near-Duplicate Similarity Metric
+
+`03` §4 and `02` §4 specify a "more like this" similarity query and a `SCHEMA.md` threshold above
+which a match blocks, but not what the score *is*. §6's template shipped
+`near_duplicate_score: 0.85` as an illustrative value with no metric behind it. Since the number
+gates a correctness check, it needs both.
+
+**Decision**: the score is **lexeme containment** — the fraction of the candidate text's distinct
+lexemes that appear in the page — computed over the Full-Text Index, with a `tsquery` prefilter so
+the GIN index still does the selection.
+
+Ranking functions are the wrong tool for this. `ts_rank`/`ts_rank_cd` are unbounded and scale with
+document length, so they cannot be compared against a fixed threshold. Normalising a page's rank
+against the candidate's own self-rank does not fix it either: a longer page routinely out-ranks a
+short candidate on the candidate's own query, so the ratio saturates and *every* result clamps to
+1.0 — identical text becomes indistinguishable from merely-related text. Containment is bounded by
+construction and degrades smoothly.
+
+Containment rather than Jaccard because `03` §4 runs the Classifier's **summary** against full page
+text. The summary is legitimately far shorter, and Jaccard would score that length asymmetry as
+dissimilarity rather than measuring the thing we care about — whether the page already covers what
+this document says.
+
+**Measured against a single indexed page**, varying only the probe:
+
+| Probe | Containment |
+|---|---|
+| Identical text | 1.00 |
+| Light paraphrase | 0.67 |
+| Same topic, different content | 0.43 |
+| Heavier paraphrase | 0.36 |
+| Unrelated document | 0.11 |
+
+**The 0.85 default was therefore wrong for this metric** — it would have caught only near-identical
+text and let a paraphrase of the same document through, which is precisely the case duplicate
+detection exists for. §6's template now ships `0.60`, sitting in the gap between a light paraphrase
+(a real duplicate, 0.67) and a same-topic document (not one, 0.43), with margin on both sides.
+
+Two caveats worth carrying: the ordering between "same topic" and "heavier paraphrase" inverts,
+so the metric ranks confidently only at the ends of its range — which is all a threshold needs; and
+these figures come from short probes against one page. Re-measure against real content before
+tuning a workspace away from the default, and note that `03` §4 gives the Curator the final
+near-duplicate judgement precisely because a lexical score is a candidate generator, not a verdict.
+
+**Spec touch-point** (applied): §6 above's `SCHEMA.md` template now reads
+`near_duplicate_score: 0.60` and names the metric.
 
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

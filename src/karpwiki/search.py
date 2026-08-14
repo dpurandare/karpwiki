@@ -127,10 +127,22 @@ async def find_similar(
 ) -> list[Hit]:
     """"More like this" against a workspace's own pages (02 §4, 03 §4).
 
-    The query is the candidate's own lexemes OR'd together, and the score is normalised
-    against the candidate's self-rank so 1.0 means "as similar to this page as the text is
-    to itself". Raw `ts_rank` is unbounded and its magnitude depends on document length,
-    so it cannot be compared to a fixed threshold like `SCHEMA.md`'s `near_duplicate_score`.
+    The score is **lexeme containment**: what fraction of the candidate's distinct terms
+    appear in the page. 1.0 means the page covers everything the candidate talks about.
+
+    Ranking functions are the wrong tool here. `ts_rank` is unbounded and length-dependent,
+    and normalising it against the candidate's own self-rank does not bound it either — a
+    longer page routinely out-ranks a short candidate on the candidate's own query, so
+    every result clamps to 1.0 and identical text becomes indistinguishable from
+    same-topic text. Containment is bounded by construction and degrades smoothly, which is
+    what a fixed `SCHEMA.md` threshold needs.
+
+    Containment rather than Jaccard because 03 §4 compares a *summary* against full page
+    text: the summary is legitimately much shorter, and Jaccard would punish that
+    asymmetry rather than the dissimilarity we actually care about.
+
+    The tsquery prefilter is what keeps the GIN index in play; containment is then computed
+    only over pages that share at least one term.
     """
     if not text_body.strip():
         return []
@@ -143,17 +155,16 @@ async def find_similar(
             "  SELECT lexeme FROM candidate, unnest(candidate.tsv) "
             "  ORDER BY array_length(positions, 1) DESC NULLS LAST LIMIT :max_terms "
             "), q AS ( "
-            "  SELECT to_tsquery(CAST(:config AS regconfig), string_agg(quote_literal(lexeme), ' | ')) AS query "
+            "  SELECT to_tsquery(CAST(:config AS regconfig), string_agg(quote_literal(lexeme), ' | ')) AS query, "
+            "         array_agg(lexeme) AS lexemes "
             "  FROM terms "
-            "), self AS ( "
-            "  SELECT ts_rank_cd(candidate.tsv, q.query) AS rank FROM candidate, q "
             ") "
             "SELECT i.page_id, i.workspace_id, p.path, "
-            "       CASE WHEN self.rank > 0 "
-            "            THEN LEAST(ts_rank_cd(i.tsv, q.query) / self.rank, 1.0) "
-            "            ELSE 0 END AS score "
+            "       cardinality(ARRAY(SELECT unnest(q.lexemes) "
+            "                         INTERSECT SELECT unnest(tsvector_to_array(i.tsv))))::float "
+            "       / NULLIF(cardinality(q.lexemes), 0) AS score "
             "FROM page_index i "
-            "JOIN wiki_page p ON p.page_id = i.page_id, q, self "
+            "JOIN wiki_page p ON p.page_id = i.page_id, q "
             "WHERE i.workspace_id = :workspace_id AND i.tsv @@ q.query "
             "ORDER BY score DESC, i.page_id "
             "LIMIT :limit"

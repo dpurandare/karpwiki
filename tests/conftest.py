@@ -38,15 +38,25 @@ async def session():
     await engine.dispose()
 
 
-@pytest_asyncio.fixture
-async def workspace(session):
+async def _workspace(session, prefix: str, document_types: list[str]) -> Workspace:
     workspace = Workspace(
-        workspace_id=f"eng-docs-{uuid.uuid4().hex[:8]}",
-        name="Engineering Docs",
-        document_types=["eng.design-doc", "eng.runbook"],
+        workspace_id=f"{prefix}-{uuid.uuid4().hex[:8]}",
+        name=prefix.replace("-", " ").title(),
+        document_types=document_types,
         status=WorkspaceStatus.active,
         storage_bindings={"object_store": "file://./var/objectstore"},
     )
     session.add(workspace)
     await session.flush()
     return workspace
+
+
+@pytest_asyncio.fixture
+async def workspace(session):
+    return await _workspace(session, "eng-docs", ["eng.design-doc", "eng.runbook"])
+
+
+@pytest_asyncio.fixture
+async def other_workspace(session):
+    """A second workspace, for asserting that queries never cross the boundary."""
+    return await _workspace(session, "policies", ["policy.hr"])

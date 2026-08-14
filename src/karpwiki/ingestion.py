@@ -10,7 +10,7 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import classify, llm, objectstore, pipeline
+from . import classify, dedup, llm, objectstore, pipeline
 from .models import PipelineState, RawSource, Workspace
 
 logger = logging.getLogger(__name__)
@@ -131,6 +131,61 @@ async def classify_source(
         detail={**detail, "document_type": routing.document_type},
     )
     return PipelineState.classified
+
+
+async def check_duplicates(
+    session: AsyncSession,
+    *,
+    source: RawSource,
+    summary: str,
+    ingestion_policy: str = "auto",
+    near_duplicate_score: float | None = None,
+) -> PipelineState:
+    """Run `duplicate_check` and route accordingly (03 §4, §7, step 11).
+
+    A duplicate always blocks, whatever the workspace policy; the policy decides only the
+    "no concerns found" path.
+    """
+    await pipeline.transition(
+        session, source=source, to_state=PipelineState.duplicate_check, actor="system:ingestion"
+    )
+
+    finding = await dedup.check(
+        session, source=source, summary=summary, near_duplicate_score=near_duplicate_score
+    )
+
+    if finding.blocks:
+        await pipeline.transition(
+            session,
+            source=source,
+            to_state=PipelineState.pending_review,
+            actor="system:ingestion",
+            detail={
+                "reason": f"duplicate: {finding.verdict.value}",
+                "severity": finding.severity,
+                "proposed_action": finding.proposed_action,
+                "duplicate_source_ids": [str(s) for s in finding.source_ids],
+                "similar_pages": [
+                    {"path": h.path, "score": round(h.score, 4)} for h in finding.page_hits
+                ],
+            },
+        )
+        return PipelineState.pending_review
+
+    if ingestion_policy == "gated":
+        await pipeline.transition(
+            session,
+            source=source,
+            to_state=PipelineState.pending_review,
+            actor="system:ingestion",
+            detail={"reason": "workspace ingestion policy is gated"},
+        )
+        return PipelineState.pending_review
+
+    await pipeline.transition(
+        session, source=source, to_state=PipelineState.ingesting, actor="system:ingestion"
+    )
+    return PipelineState.ingesting
 
 
 def _relocate(source: RawSource, workspace_id: str) -> None:
