@@ -8,12 +8,16 @@ workspace's SCHEMA.md may override (09 §16); nothing reads them until 1b.
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 # Local development reads a gitignored .env; a deployment has none and passes real
 # environment variables instead. load_dotenv does not override variables already set,
 # so the deployment's values always win and this is a no-op there.
-load_dotenv()
+#
+# usecwd=True searches upward from the working directory rather than from the caller's
+# stack frame. The default walks frames and raises outright when there is none — in a
+# REPL, in `python -` from stdin, or under a frozen interpreter.
+load_dotenv(find_dotenv(usecwd=True))
 
 DATABASE_URL = os.environ.get(
     "KARPWIKI_DATABASE_URL",

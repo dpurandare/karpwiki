@@ -8,7 +8,7 @@ horizontal-scaling infra, fine-grained RBAC.
 
 ## 0 — Readiness Items (settle before the step they block)
 
-Found by cross-checking the steps below against the specs they cite. **All four are now closed** —
+Found by cross-checking the steps below against the specs they cite. **All six are now closed** —
 each row records where the decision lives.
 
 | # | Item | Blocks | Kind |
@@ -17,10 +17,8 @@ each row records where the decision lives.
 | 0.2 | **Baseline auth is unscoped for Phase 1.** Step 2's schema list omitted `access_policy` and no step covered authn/authz, yet steps 19–20 build an admin console that presupposes an admin role. The exclusions above defer only *fine-grained* RBAC. | Step 7 | **Done** — [09](09-implementation-notes.md) §15: authorization ships in Phase 1, authentication is a pluggable provider (trusted-header now, OIDC/SAML in Phase 2) |
 | 0.3 | **API conventions undefined.** Pagination/cursor format, error-response schema, idempotency keys, partial-failure shape, rate-limit headers — deferred in `techfeasibility.md` §3 to "the API design phase," which Phase 1 reaches at its first endpoint. | Step 7 | **Done** — [09](09-implementation-notes.md) §14 |
 | 0.4 | **No LLM model chosen.** [00](00-overview.md) §3 puts the provider out of scope and [08](08-implementation-stack.md) picks Pydantic AI but no model. | Step 9 | **Done** — [09](09-implementation-notes.md) §16: the model is configuration per agent role. `openai:gpt-5-nano` for both roles in every environment. Still needs an OpenAI key in the secrets manager before step 9 runs |
-
 | 0.5 | **A Classifier failure has no representable state.** [03](03-ingestion-and-review-workflows.md) §1's diagram admits `error` only from `ingesting`, matching §6's "on failure at any step" — whose steps are the *ingest operation's*. But the Classifier is an external API call, so transient failures are certain, and `classifying → error` is not a legal edge. | Step 9 | **Done** — [03](03-ingestion-and-review-workflows.md) §1: `error` is reachable from every state that runs work, transient failures retry inside the worker rather than becoming states, and `pending_review` resumes at the point the source left instead of always at `ingesting` |
-
-| 0.6 | **A submitted object has no workspace prefix to live under.** [02](02-storage-and-indexing.md) §2's path scheme is `/{workspace_id}/sources/{source_id}/{filename}`, but [03](03-ingestion-and-review-workflows.md) §2 stores the object *before* the workspace is known. Step 7 stages it at `/_inbox/{source_id}/{filename}` and records that in `raw_source.object_key`. Decide whether classification copies it under the workspace prefix (objects are write-once, so a copy, not a move) or whether `object_key` staying authoritative is enough — the prefix exists to drive per-workspace lifecycle and access rules ([02](02-storage-and-indexing.md) §2), which an `_inbox` object escapes. | Step 9 | Decision |
+| 0.6 | **A submitted object has no workspace prefix to live under.** [02](02-storage-and-indexing.md) §2's path scheme is `/{workspace_id}/sources/{source_id}/{filename}`, but [03](03-ingestion-and-review-workflows.md) §2 stores the object *before* the workspace is known. Step 7 stages it at `/_inbox/{source_id}/{filename}` and records that in `raw_source.object_key`. | Step 9 | **Done** — classification copies the object under the workspace prefix, repoints `object_key`, then deletes the staging object. Leaving it in `_inbox` would forfeit the per-workspace retention, access, and bucket-separation rules that prefix exists to drive ([02](02-storage-and-indexing.md) §2). |
 
 Accepted for Phase 1, no action needed — recorded so they aren't rediscovered as surprises:
 

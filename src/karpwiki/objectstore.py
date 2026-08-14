@@ -47,3 +47,18 @@ def read_text(path: str, *, url: str | None = None) -> str:
     fs, root = _fs_and_root(url)
     with fs.open(f"{root.rstrip('/')}{path}", "r") as handle:
         return handle.read()
+
+
+def delete(path: str, *, url: str | None = None) -> None:
+    """Remove an object. Only for staging objects that have been copied to their final
+    key — objects at their final key are write-once and are aged out by lifecycle rules
+    (02 §2), never deleted inline."""
+    fs, root = _fs_and_root(url)
+    full = f"{root.rstrip('/')}{path}"
+    if fs.exists(full):
+        fs.rm(full)
+
+
+def exists(path: str, *, url: str | None = None) -> bool:
+    fs, root = _fs_and_root(url)
+    return fs.exists(f"{root.rstrip('/')}{path}")
