@@ -30,13 +30,14 @@ to an engineering team (or an AI coding agent) to build directly.
 ## Research
 
 Two similar open-source projects were analyzed for implementation ideas that fed into this
-specification. Each has its own folder, named after the project it covers:
+specification:
 
-- [`context7/`](context7/) — analysis of [Context7](https://github.com/upstash/context7)
-  (Upstash), a documentation retrieval MCP server/gateway.
-- [`gbrain/`](gbrain/) — analysis of [GBrain](https://github.com/garrytan/gbrain), a
-  Postgres-native personal/team knowledge brain with hybrid (vector + BM25) search and a
-  self-wiring knowledge graph.
+- [Context7](https://github.com/upstash/context7) (Upstash) — a documentation retrieval MCP
+  server/gateway.
+- [GBrain](https://github.com/garrytan/gbrain) — a Postgres-native personal/team knowledge brain
+  with hybrid (vector + BM25) search and a self-wiring knowledge graph.
+
+The write-ups of those analyses are kept locally and are not published in this repository.
 
 ## Specification
 

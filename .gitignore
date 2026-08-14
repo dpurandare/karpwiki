@@ -28,3 +28,7 @@ htmlcov/
 .vscode/
 .idea/
 .DS_Store
+
+# Research / reference material (kept locally, not published)
+context7/
+gbrain/
