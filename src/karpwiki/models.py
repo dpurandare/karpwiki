@@ -14,12 +14,13 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -289,6 +290,27 @@ class IngestionLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.clock_timestamp()
     )
+
+
+class PageIndex(Base):
+    """The Full-Text Index (02 §4) — the Platform's only query-time index.
+
+    Derived, not authoritative: rebuildable from `page_version` at any time (02 §3). Each
+    entry is tagged with `workspace_id`, `page_id`, and `version_id`, mirroring
+    `index_status`, and `workspace_id` is a mandatory filter on every query so a federated
+    search touches one index rather than fanning out (02 §4).
+    """
+
+    __tablename__ = "page_index"
+    __table_args__ = (
+        Index("ix_page_index_tsv", "tsv", postgresql_using="gin"),
+        Index("ix_page_index_workspace", "workspace_id"),
+    )
+
+    page_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("wiki_page.page_id"), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspace.workspace_id"))
+    version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("page_version.version_id"))
+    tsv: Mapped[str] = mapped_column(TSVECTOR)
 
 
 class IdempotencyRecord(Base):
