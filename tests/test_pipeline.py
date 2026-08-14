@@ -135,17 +135,72 @@ async def test_review_and_error_paths(session, workspace):
     assert len(await pipeline.history(session, source.source_id)) == 5
 
 
-async def test_classifier_failure_has_no_representable_state(session, workspace):
-    """Documents a gap in 03 §1 rather than papering over it: `error` is reachable only
-    from `ingesting`, so a Classifier failure — an external API call — cannot be recorded.
-    Change this test when the spec decides."""
-    assert pipeline.ERROR_REACHABILITY == frozenset({PipelineState.ingesting})
+async def test_every_working_state_can_fail(session, workspace):
+    """03 §1: `error` means "a step failed", so it is reachable from every state that runs
+    automatic work — a Classifier failure included."""
+    for state in pipeline.FAILABLE:
+        assert PipelineState.error in pipeline.TRANSITIONS[state], state
 
     source = await _source(session)
     await pipeline.transition(
         session, source=source, to_state=PipelineState.classifying, actor="system:classifier"
     )
-    with pytest.raises(pipeline.IllegalTransition):
-        await pipeline.transition(
-            session, source=source, to_state=PipelineState.error, actor="system:classifier"
-        )
+    await pipeline.transition(
+        session,
+        source=source,
+        to_state=PipelineState.error,
+        actor="system:classifier",
+        detail={"step": "classify", "error": "APITimeoutError", "attempts": 3},
+    )
+    await session.commit()
+    assert source.pipeline_state is PipelineState.error
+
+
+async def test_nothing_fails_while_waiting_on_a_human(session, workspace):
+    """`pending_review` runs no work, so it cannot fail; terminals cannot either."""
+    assert PipelineState.pending_review not in pipeline.FAILABLE
+    for terminal in pipeline.TERMINAL:
+        assert PipelineState.error not in pipeline.TRANSITIONS[terminal]
+
+
+async def test_review_resumes_at_the_point_the_source_left(session, workspace):
+    """A classification review resolves to `classified`, not straight to `ingesting`:
+    the admin supplied the document_type, so classification is what just completed."""
+    source = await _source(session)
+    await pipeline.transition(
+        session, source=source, to_state=PipelineState.classifying, actor="system:classifier"
+    )
+    await pipeline.transition(
+        session,
+        source=source,
+        to_state=PipelineState.pending_review,
+        actor="system:classifier",
+        detail={"reason": "lexical cross-check disagreed"},
+    )
+    await pipeline.transition(
+        session,
+        source=source,
+        to_state=PipelineState.classified,
+        actor="user:admin",
+        detail={"document_type": "eng.runbook"},
+    )
+    await pipeline.transition(
+        session, source=source, to_state=PipelineState.duplicate_check, actor="system:ingestion"
+    )
+    await session.commit()
+    assert source.pipeline_state is PipelineState.duplicate_check
+
+
+async def test_a_failed_step_can_be_retried_from_review(session, workspace):
+    """error -> pending_review -> the state that failed (03 §1's resume table)."""
+    source = await _source(session)
+    for state in (
+        PipelineState.classifying,
+        PipelineState.error,
+        PipelineState.pending_review,
+        PipelineState.classifying,
+        PipelineState.classified,
+    ):
+        await pipeline.transition(session, source=source, to_state=state, actor="user:admin")
+    await session.commit()
+    assert source.pipeline_state is PipelineState.classified

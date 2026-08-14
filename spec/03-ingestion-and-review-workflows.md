@@ -11,14 +11,21 @@ stateDiagram-v2
     [*] --> submitted: end user upload,\nor connector discovers new/changed content
     submitted --> classifying
     classifying --> classified: type + workspace assigned
-    classifying --> pending_review: confidence below threshold
+    classifying --> pending_review: confidence below threshold,\nor lexical cross-check disagrees
     classified --> duplicate_check
     duplicate_check --> ingesting: no duplicate found,\nworkspace policy = auto
     duplicate_check --> pending_review: duplicate found (always),\nOR workspace policy = gated
+    pending_review --> classifying: admin retries a failed classification
+    pending_review --> classified: admin assigns document_type
+    pending_review --> duplicate_check: admin retries a failed duplicate check
     pending_review --> ingesting: admin approves
     pending_review --> rejected: admin rejects
     ingesting --> ingested: Curator Agent completes
-    ingesting --> error: processing failure
+    submitted --> error: step failed
+    classifying --> error: step failed
+    classified --> error: step failed
+    duplicate_check --> error: step failed
+    ingesting --> error: step failed
     error --> pending_review: surfaced to admin for retry/triage
     ingested --> [*]
     rejected --> [*]
@@ -35,6 +42,33 @@ stateDiagram-v2
 | `ingested` | Curator finished; wiki pages updated, indices marked `pending` | `active` | `source` page + touched concept/entity pages, `overview.md`, `log.md` |
 | `rejected` | Admin declined ingestion | `rejected` (retained, excluded from search/ingestion) | placeholder `source` page marked "rejected" with reason |
 | `error` | A step failed | `active` | placeholder `source` page marked "error", surfaced to admin |
+
+**`error` is reachable from every state that runs automatic work** — `submitted`, `classifying`,
+`classified`, `duplicate_check`, and `ingesting` — consistent with the table's definition of it as
+"a step failed." It is *not* reachable from `pending_review`, where nothing is running and the
+pipeline is waiting on a human, nor from the terminal states.
+
+**Transient failures are not states.** A step that fails for a recoverable reason — a rate-limited
+or timed-out LLM call, a momentarily unavailable index — is retried inside the worker with backoff.
+Only *exhausted* retries transition to `error`. Retry attempts belong to the transport, not to the
+source's durable business state; recording each one as a state transition would flood
+`ingestion_log` and make `pipeline_state` oscillate. The attempt count and failure context go in
+the `ingestion_log` entry's detail for the transition that finally lands on `error`.
+
+**`pending_review` returns a source to the point it left, not to a fixed successor.** The state is
+entered for four different reasons and its exits differ accordingly:
+
+| Entered from | Because | Resolution returns to |
+|---|---|---|
+| `classifying` | Confidence below threshold, or lexical cross-check disagreed (§3) | `classified` — the admin has assigned the `document_type`, which is what classification produces |
+| `duplicate_check` | Duplicate found, or workspace policy is `gated` (§4, §7) | `ingesting` on approval, `rejected` on rejection |
+| `error` | A step failed and was surfaced for triage | The state that failed — `classifying` or `duplicate_check` to retry it, or `ingesting` |
+| any | Admin declines the source outright | `rejected` |
+
+A single `pending_review → ingesting` edge would be wrong for the classification case: the source
+would reach the Curator with no `document_type` and no resolved workspace, since classification
+never completed. `ingestion_log`'s `from_state` on the entry that reached `pending_review` is what
+identifies the resume point.
 
 **Note on `status` vs. these markings.** The quoted labels above ("processing", "awaiting review",
 "rejected", "error") describe how the placeholder `source` page is presented in the UI during the

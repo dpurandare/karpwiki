@@ -15,7 +15,36 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import IngestionLog, PipelineState, RawSource
 
-# 03 §1, read directly off the state diagram.
+TERMINAL = frozenset({PipelineState.ingested, PipelineState.rejected})
+
+# Every state that runs automatic work can fail into `error` (03 §1). Not `pending_review`,
+# where nothing is running, and not the terminals. Transient failures are retried inside
+# the worker and never appear here — only exhausted retries land on `error`.
+FAILABLE = frozenset(
+    {
+        PipelineState.submitted,
+        PipelineState.classifying,
+        PipelineState.classified,
+        PipelineState.duplicate_check,
+        PipelineState.ingesting,
+    }
+)
+
+# `pending_review` resumes at the point the source left, which depends on why it was parked
+# (03 §1): `classified` once an admin assigns the type, `classifying`/`duplicate_check` to
+# retry a failed step, `ingesting` on approval, `rejected` on refusal. A single edge to
+# `ingesting` would send an unclassified source to the Curator with no workspace.
+_RESUME_FROM_REVIEW = frozenset(
+    {
+        PipelineState.classifying,
+        PipelineState.classified,
+        PipelineState.duplicate_check,
+        PipelineState.ingesting,
+        PipelineState.rejected,
+    }
+)
+
+# 03 §1, read off the state diagram.
 TRANSITIONS: dict[PipelineState, frozenset[PipelineState]] = {
     PipelineState.submitted: frozenset({PipelineState.classifying}),
     PipelineState.classifying: frozenset({PipelineState.classified, PipelineState.pending_review}),
@@ -23,21 +52,16 @@ TRANSITIONS: dict[PipelineState, frozenset[PipelineState]] = {
     PipelineState.duplicate_check: frozenset(
         {PipelineState.ingesting, PipelineState.pending_review}
     ),
-    PipelineState.pending_review: frozenset({PipelineState.ingesting, PipelineState.rejected}),
-    PipelineState.ingesting: frozenset({PipelineState.ingested, PipelineState.error}),
+    PipelineState.pending_review: _RESUME_FROM_REVIEW,
+    PipelineState.ingesting: frozenset({PipelineState.ingested}),
     PipelineState.error: frozenset({PipelineState.pending_review}),
     PipelineState.ingested: frozenset(),
     PipelineState.rejected: frozenset(),
 }
 
-TERMINAL = frozenset({PipelineState.ingested, PipelineState.rejected})
-
-# 03 §1 admits `error` only from `ingesting`, matching 03 §6's "on failure at any step",
-# whose steps are the ingest operation's. That leaves a Classifier failure — an external
-# API call, so failures are certain — with no representable state. Widening the machine
-# here would put the code ahead of the spec, so it is not done; see the note raised
-# alongside this module.
-ERROR_REACHABILITY = frozenset({PipelineState.ingesting})
+# Fold the failure edges in rather than repeating `error` in five entries above.
+for _state in FAILABLE:
+    TRANSITIONS[_state] = TRANSITIONS[_state] | {PipelineState.error}
 
 
 class IllegalTransition(ValueError):
