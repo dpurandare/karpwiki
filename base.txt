@@ -1,6 +1,4 @@
 Facts:
-- We have documentation related to Context7 available in the context7 folder.
-- We are interested in the fetures of the Context7 backend server that could be useful to our work.
 - We have CLAUDE.md file in the root. This file needs to be read in the beginning to set the general work principles. 
 
 Instructions:
@@ -28,7 +26,7 @@ Suggestions:
 Comments on specification:
 1. @oo-overview : 
 - No explicit mention of there would be multiple workspaces. It is assumed in the text though. 
-- This statement is not clear: Retrieval is two-stage: lexical/vector retrieval first, optional LLM rerank second (mirrors Context7's fast=true toggle) — full corpus reasoning is reserved for ingest/lint, not every query.
+- This statement is not clear: Retrieval is two-stage: lexical/vector retrieval first, optional LLM rerank second — full corpus reasoning is reserved for ingest/lint, not every query.
 2. 01-architecture-and-data-model:
 - There is a mention of Vector Index. The use of which is not clear. 
 - Are we missing the classifier which will decide the document type while processing the document as well as the query type so that it is directed to correct workspace?

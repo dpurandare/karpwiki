@@ -27,18 +27,6 @@ submit new raw sources for ingestion directly, without a human in the loop.
 The specification in [`spec/`](spec/) is written to be implementable as-is — it can be handed
 to an engineering team (or an AI coding agent) to build directly.
 
-## Research
-
-Two similar open-source projects were analyzed for implementation ideas that fed into this
-specification:
-
-- [Context7](https://github.com/upstash/context7) (Upstash) — a documentation retrieval MCP
-  server/gateway.
-- [GBrain](https://github.com/garrytan/gbrain) — a Postgres-native personal/team knowledge brain
-  with hybrid (vector + BM25) search and a self-wiring knowledge graph.
-
-The write-ups of those analyses are kept locally and are not published in this repository.
-
 ## Specification
 
 The full specification lives in [`spec/`](spec/), as eight documents meant to be read in order:
