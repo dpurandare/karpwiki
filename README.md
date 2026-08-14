@@ -63,6 +63,18 @@ Tests need a `karpwiki_test` database (`createdb karpwiki_test`, or
 `KARPWIKI_DATABASE_URL`, `KARPWIKI_OBJECT_STORE_URL`, and `KARPWIKI_CELERY_BROKER_URL` to point at
 other backends.
 
+The two agents' models are configuration, resolved per role
+([09](spec/09-implementation-notes.md) §16) — the same model in every environment:
+
+```bash
+export KARPWIKI_LLM_CLASSIFIER_MODEL=openai:gpt-5-nano
+export KARPWIKI_LLM_CURATOR_MODEL=openai:gpt-5-nano
+```
+
+Neither has a default in code: an unset role raises `ModelNotConfiguredError` rather than silently
+picking a model. A workspace's `SCHEMA.md` may override either role. §16 records what this
+cost-first choice trades and the three signals that should trigger raising the curator's tier.
+
 ## Reference Implementation
 
 [`spec/08-implementation-stack.md`](spec/08-implementation-stack.md) is an optional appendix

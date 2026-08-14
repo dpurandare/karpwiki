@@ -35,7 +35,7 @@ below notes its **spec touch-point** where relevant — these have since been ap
 | Connector credentials & security | [05](05-admin-backend-and-maintenance.md) §7, [06](06-api-mcp-and-scaling.md) §3, §4 above | Secret lives in an external secrets manager, referenced by `credential_ref`; connector is a `connector:<id>` principal with `contributor` on exactly one workspace; config changes audit to `admin_action_log`, runs to `ingestion_log` |
 | API conventions | [06](06-api-mcp-and-scaling.md) §1 | Cursor pagination; one error envelope keyed by a stable `type`; `Idempotency-Key` on submit/resolve; partial search flagged explicitly; `RateLimit-*` headers |
 | Baseline auth scope for Phase 1 | [06](06-api-mcp-and-scaling.md) §3, `phase1-tasklist.md` | Authorization (`access_policy` + three roles) ships in Phase 1; authentication is a pluggable provider, trusted-header first and OIDC/SAML in Phase 2 |
-| LLM model selection | [00](00-overview.md) §3, [08](08-implementation-stack.md) §2 | Configurable per agent role: workspace `SCHEMA.md` override, else platform default. One Pydantic AI `provider:model` string; OpenAI flagship tier as the default for both roles; credentials stay in the secrets manager |
+| LLM model selection | [00](00-overview.md) §3, [08](08-implementation-stack.md) §2 | Configurable per agent role: workspace `SCHEMA.md` override, else platform default. One Pydantic AI `provider:model` string; `openai:gpt-5-nano` in every environment, cost-first with curation quality as the watched risk; credentials stay in the secrets manager |
 
 ## 3. Pipeline-State Storage
 
@@ -423,9 +423,10 @@ cross-cutting concern rather than a separate later step.
 framework without naming a model — leaving the Classifier (`03` §3) and Curator (`03` §6) with no
 concrete model to run against, and no defined place to put one.
 
-**Decision**: the model is a **configuration value at three levels**, resolved
-per-agent-role — never a code dependency. The adopting organization's provider is **OpenAI**, and
-the default for both roles is that provider's **flagship general-purpose reasoning tier**.
+**Decision**: the model is a **configuration value**, resolved per agent role — never a code
+dependency. The adopting organization's provider is **OpenAI**, and the selected model for both
+roles, in every environment including production, is **`openai:gpt-5-nano`** — the provider's
+lowest-cost tier.
 
 ### Resolution order
 
@@ -445,15 +446,37 @@ source over a short summary with a constrained structured output, while the Cura
 pages. An organization that later wants a cheaper classifier can change one config value without
 touching curation.
 
-### Why flagship for both, as the default
+### Why the lowest tier, and what it trades
 
-The Classifier's output gates the pipeline (`03` §3 step 6): a wrong `document_type` routes a
-source to the wrong workspace, and a miscalibrated confidence either floods the review queue or
-waves bad classifications through. The Curator's output *is* the product — the wiki pages users
-read and cite. At `06` §6's ingestion rate of 10–100 documents/hour neither is a high-volume
-workload, so the LLM line is small next to the engineering time a weaker classifier costs in
-review-queue volume. Trading down is a decision to make once real classification-accuracy data
-exists — §9's calibration loop is what produces that data — not a default to assume up front.
+This is a deliberate cost-first choice. At `06` §6's 10–100 documents/hour, both agents together
+run roughly $80/month at this tier against roughly $2,000/month at the flagship — a ~25× difference
+on a workload whose value is not yet demonstrated. Running the same model in development and
+production is a second, smaller benefit: the confidence threshold calibrated during development
+(§9) carries into production instead of being discarded, and there is no class of defect that
+appears only after promotion.
+
+The risk this accepts is concentrated in **curation, not classification**. Classification is a
+constrained pick-one-label task over a short summary, and it is already backstopped: low confidence
+routes to a `classification` review item (`03` §3 step 6) and an admin corrects it, so a weak
+classifier degrades into review-queue volume rather than silent error. Curation has no equivalent
+backstop — the Curator's output *is* the product, the wiki pages users read and cite, and a
+thin or inaccurate page is not obviously wrong to the reviewer approving it.
+
+**Signals that should trigger revisiting the curator's model**, in rough order of how early they
+appear:
+
+- `classification` review items running persistently high after §9's calibration has converged —
+  the cheap signal, and the one that arrives first.
+- `duplicate` review items where the Curator's near-duplicate judgment (`03` §4) disagrees with the
+  admin's resolution more often than not.
+- Curated pages being edited by hand shortly after ingest — visible as `page_version` rows with
+  `trigger=manual_edit` close behind an `ingest` version for the same page. This is the direct
+  measure of curation quality and needs no new instrumentation.
+
+Because the model is configuration, acting on any of these is a `SCHEMA.md` edit for one workspace
+or a change to one deployment setting — not a migration. Raising the curator's tier while leaving
+the classifier at this one is the natural first step, and the per-role split exists to make it a
+one-value change.
 
 ### What is *not* configurable here
 

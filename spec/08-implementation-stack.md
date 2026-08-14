@@ -23,7 +23,7 @@ remain correct regardless of which implementation is built against them.
 | Append-Only Log / Event Store | [02](02-storage-and-indexing.md) §5 | Time-partitioned tables in the Metadata DB (PostgreSQL) |
 | Cache (optional) | [02](02-storage-and-indexing.md) §6 | Redis (can share the Celery broker instance via a separate logical DB) |
 | MCP Surface | [06](06-api-mcp-and-scaling.md) §2 | Official `mcp` Python SDK |
-| LLM Layer — Curator Agent / Classifier | [01](01-architecture-and-data-model.md) §1, [07](07-additional-features-and-roadmap.md) §1 | Pydantic AI; the model for each agent is configuration, defaulting to the OpenAI flagship reasoning tier ([09](09-implementation-notes.md) §16) |
+| LLM Layer — Curator Agent / Classifier | [01](01-architecture-and-data-model.md) §1, [07](07-additional-features-and-roadmap.md) §1 | Pydantic AI; the model for each agent is configuration, set to `openai:gpt-5-nano` ([09](09-implementation-notes.md) §16) |
 | Auth | [06](06-api-mcp-and-scaling.md) §3 | Authlib (OIDC/SAML) + PyJWT (API keys) |
 
 ## 3. Notes on Selected Roles
