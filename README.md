@@ -53,7 +53,7 @@ frontmatter validation, the object-store adapter, and the Celery queue definitio
 
 ```bash
 cp .env.example .env                     # then fill in OPENAI_API_KEY
-docker compose up -d                     # PostgreSQL + Redis
+docker compose up -d                     # PostgreSQL + Redis + MinIO
 pip install -e '.[dev]'                  # Python 3.11+
 alembic upgrade head                     # create the schema
 pytest                                   # 1a step-6 verification
@@ -62,6 +62,22 @@ pytest                                   # 1a step-6 verification
 Configuration is environment variables, listed with their defaults in
 [`.env.example`](.env.example). `.env` is gitignored and loaded automatically; real environment
 variables always win over it, so a deployment passes its own and needs no file.
+
+**Durable state lives in named Docker volumes**, so `docker compose down` does not destroy it
+(`down -v` does):
+
+| Volume | Holds | Why it must persist |
+|---|---|---|
+| `pgdata` | Metadata DB | System of record ([02 §3](spec/02-storage-and-indexing.md)) |
+| `objectstore` | MinIO — raw sources, page-version diffs, assets | Raw sources are immutable originals nothing can regenerate, and every citation points at one |
+
+Redis has no volume on purpose: it is only the Celery broker here, and queued work is re-derivable
+from `raw_source.pipeline_state` in Postgres ([09 §3](spec/09-implementation-notes.md)).
+
+MinIO also means local development exercises the same `s3://` fsspec path a deployment uses rather
+than a `file://` path production never takes. Console at `localhost:9001` (`karpwiki` /
+`karpwiki-dev-secret`). Tests are the deliberate exception — [conftest.py](tests/conftest.py)
+points them at a throwaway temp directory so runs stay hermetic and leave nothing behind.
 
 Tests need a `karpwiki_test` database (`createdb karpwiki_test`, or
 `docker exec karpwiki-postgres-1 psql -U karpwiki -c 'CREATE DATABASE karpwiki_test;'`). Override
