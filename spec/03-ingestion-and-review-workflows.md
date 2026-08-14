@@ -60,30 +60,61 @@ Classifier's job (§3).
 
 ## 3. Classification & Routing
 
-The Classifier (LLM-based, async worker) reads the new source and:
+Classification runs in two parts: a deterministic pre-step that needs no model, then the LLM
+Classifier proper. Splitting them keeps the model's job to what actually requires judgement and
+yields a second, independent routing signal for free.
 
-1. Produces a short summary.
-2. Assigns a `document_type` label from the **central taxonomy** ([01](01-architecture-and-data-model.md) §3) with a confidence score.
-3. Tags `content_shape` (`narrative` | `structured_data`) — independent of `document_type`/workspace
-   routing. This determines how the Curator Agent ingests the source (§6 below; full treatment in
+**Pre-step (deterministic, no LLM):**
+
+1. Tag `content_shape` (`narrative` | `structured_data`) from MIME type and structural parse —
+   JSON/YAML/CSV/spreadsheet payloads parse as data or they do not. This is mechanical and needs no
+   model. It is independent of `document_type`/workspace routing, and determines how the Curator
+   Agent ingests the source (§6 below; full treatment in
    [07](07-additional-features-and-roadmap.md) §1).
-4. For `structured_data` sources, extracts identity/version metadata: `artifact_identity` (a
-   stable identifier for the artifact — e.g. derived from its path, name, or declared
-   schema/resource identity) and `source_version`/`source_modified_at` (from version headers, file
-   metadata, or naming conventions, where extractable). Used by Duplicate Detection (§4) to
-   recognize a new version of an existing artifact.
-5. Resolves `document_type → workspace_id` via the taxonomy's routing table.
-6. If confidence ≥ the workspace's configured threshold (`SCHEMA.md`), proceeds to `classified`.
-   Otherwise, creates a `kind=classification` review item with the top candidate type(s) and
-   moves to `pending_review`. Confidence is self-reported by the Classifier as part of its
-   structured output, periodically recalibrated against admin resolutions of `classification`
-   review items.
+2. For `structured_data` sources, derive identity/version metadata: `artifact_identity` (a stable
+   identifier — from its path, name, or declared schema/resource identity) and
+   `source_version`/`source_modified_at` (from version headers, file metadata, or naming
+   conventions, where extractable). Used by Duplicate Detection (§4) to recognize a new version of
+   an existing artifact.
+3. Compute a **lexical taxonomy match**: score the source's filename, title, and text against the
+   central taxonomy's labels and keywords ([01](01-architecture-and-data-model.md) §3) — the same
+   static-table lookup the query path uses in [04](04-search-and-retrieval.md) §4, applied at
+   ingest. Cheap, provider-neutral, and may return no match.
+
+**Classifier (LLM-based, async worker):**
+
+4. Produces a short summary — consumed by Duplicate Detection's near-match query (§4).
+5. Assigns a `document_type` label from the **central taxonomy** with a self-reported confidence
+   score.
+6. Resolves `document_type → workspace_id` via the taxonomy's routing table.
+
+**Routing gate**, requiring *both* signals rather than confidence alone:
+
+7. Proceed to `classified` only if confidence ≥ the workspace's configured threshold
+   (`SCHEMA.md`) **and** the lexical match from step 3 either agrees with the LLM's label or is
+   absent. A disagreement between the two — or a confident lexical match the LLM contradicts —
+   creates a `kind=classification` review item with both candidates and moves to `pending_review`,
+   whatever the self-reported confidence says.
+
+The cross-check exists because self-reported LLM confidence is poorly calibrated
+([09](09-implementation-notes.md) §9), and §9's correction is an offline loop over admin
+resolutions that only pays off after enough of them accumulate. The lexical signal is independent
+of the model, available at decision time rather than weeks later, and costs a table lookup — so it
+is the one calibration input that works from the first document, and it matters more on a
+cheaper model, not less.
+
+The asymmetry with [04](04-search-and-retrieval.md) §4 is deliberate. On the query path a wrong
+lexical match is benign — it narrows a search that falls back to full fan-out. At ingest a wrong
+label routes the source to the wrong workspace and builds pages there, so here the lexical signal
+never routes on its own: it can only confirm the LLM or force a human decision.
 
 ```mermaid
 flowchart LR
-    SRC[New raw source] --> CLS[Classifier]
-    CLS -->|confidence high| TYPE[document_type assigned]
-    CLS -->|confidence low| RI1[Review item:\nkind=classification\nproposed types + confidences]
+    SRC[New raw source] --> PRE["Pre-step (no LLM):\ncontent_shape, artifact_identity,\nlexical taxonomy match"]
+    PRE --> CLS[Classifier]
+    CLS --> GATE{"confidence >= threshold\nAND lexical match agrees\nor is absent?"}
+    GATE -->|yes| TYPE[document_type assigned]
+    GATE -->|no| RI1[Review item:\nkind=classification\nboth candidates + confidence]
     TYPE --> ROUTE[Taxonomy lookup]
     ROUTE --> WS[workspace_id resolved]
     RI1 -.admin picks type.-> ROUTE

@@ -203,7 +203,18 @@ self-reported LLM confidence is notoriously poorly calibrated.
 
 **Decision**: confidence is **self-reported** by the Classifier as part of its structured output
 (`08`'s Pydantic AI `ClassificationResult` model) — provider-agnostic, no dependency on
-provider-specific log-prob APIs. This score is **periodically recalibrated**: admin resolutions of
+provider-specific log-prob APIs.
+
+**Paired with an independent signal at decision time.** Self-reported confidence alone is weak, and
+the recalibration below only pays off once enough admin resolutions have accumulated — which is
+exactly when a new deployment has none. `03` §3's routing gate therefore requires the LLM's label
+to agree with a deterministic lexical taxonomy match before routing, and sends a disagreement to a
+`classification` review item whatever the self-reported score claims. That signal is independent of
+the model, costs a static-table lookup, and works from the first document rather than the
+hundredth. It is also what makes a cheaper model a defensible choice (§16): the gate's quality no
+longer rests solely on the model's own estimate of itself.
+
+This score is **periodically recalibrated**: admin resolutions of
 `classification` review items (`03` §3's "confirm the top suggestion, pick a different type") are
 ground truth — if admins consistently override a particular confidence band, the workspace's
 threshold (`SCHEMA.md`) is adjusted accordingly. No new pipeline state or review-item kind:
