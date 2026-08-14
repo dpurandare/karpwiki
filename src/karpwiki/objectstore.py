@@ -27,6 +27,22 @@ def write_text(path: str, text: str, *, url: str | None = None) -> str:
     return path
 
 
+def write_bytes(path: str, payload: bytes, *, url: str | None = None) -> str:
+    """Write-once binary object (02 §2) — raw sources are stored verbatim, not decoded."""
+    fs, root = _fs_and_root(url)
+    full = f"{root.rstrip('/')}{path}"
+    fs.makedirs(full.rsplit("/", 1)[0], exist_ok=True)
+    with fs.open(full, "wb") as handle:
+        handle.write(payload)
+    return path
+
+
+def read_bytes(path: str, *, url: str | None = None) -> bytes:
+    fs, root = _fs_and_root(url)
+    with fs.open(f"{root.rstrip('/')}{path}", "rb") as handle:
+        return handle.read()
+
+
 def read_text(path: str, *, url: str | None = None) -> str:
     fs, root = _fs_and_root(url)
     with fs.open(f"{root.rstrip('/')}{path}", "r") as handle:

@@ -20,6 +20,8 @@ each row records where the decision lives.
 
 | 0.5 | **A Classifier failure has no representable state.** [03](03-ingestion-and-review-workflows.md) §1's diagram admits `error` only from `ingesting`, matching §6's "on failure at any step" — whose steps are the *ingest operation's*. But the Classifier is an external API call, so transient failures are certain, and `classifying → error` is not a legal edge. | Step 9 | **Done** — [03](03-ingestion-and-review-workflows.md) §1: `error` is reachable from every state that runs work, transient failures retry inside the worker rather than becoming states, and `pending_review` resumes at the point the source left instead of always at `ingesting` |
 
+| 0.6 | **A submitted object has no workspace prefix to live under.** [02](02-storage-and-indexing.md) §2's path scheme is `/{workspace_id}/sources/{source_id}/{filename}`, but [03](03-ingestion-and-review-workflows.md) §2 stores the object *before* the workspace is known. Step 7 stages it at `/_inbox/{source_id}/{filename}` and records that in `raw_source.object_key`. Decide whether classification copies it under the workspace prefix (objects are write-once, so a copy, not a move) or whether `object_key` staying authoritative is enough — the prefix exists to drive per-workspace lifecycle and access rules ([02](02-storage-and-indexing.md) §2), which an `_inbox` object escapes. | Step 9 | Decision |
+
 Accepted for Phase 1, no action needed — recorded so they aren't rediscovered as surprises:
 
 - **No relevance-regression signal.** [09](09-implementation-notes.md) §10 designates the search
