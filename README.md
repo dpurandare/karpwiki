@@ -44,6 +44,25 @@ The full specification lives in [`spec/`](spec/), as eight documents meant to be
 
 Start with [`spec/00-overview.md`](spec/00-overview.md).
 
+## Implementation
+
+Phase 1 of [`spec/phase1-tasklist.md`](spec/phase1-tasklist.md) is being built in this repo under
+[`src/karpwiki/`](src/karpwiki/). **1a (core architecture and data layer) is complete**: the seven
+core Metadata DB tables, the append-only versioning model with non-destructive rollback, required
+frontmatter validation, the object-store adapter, and the Celery queue definitions.
+
+```bash
+docker compose up -d                     # PostgreSQL + Redis
+pip install -e '.[dev]'                  # Python 3.11+
+alembic upgrade head                     # create the schema
+pytest                                   # 1a step-6 verification
+```
+
+Tests need a `karpwiki_test` database (`createdb karpwiki_test`, or
+`docker exec karpwiki-postgres-1 psql -U karpwiki -c 'CREATE DATABASE karpwiki_test;'`). Override
+`KARPWIKI_DATABASE_URL`, `KARPWIKI_OBJECT_STORE_URL`, and `KARPWIKI_CELERY_BROKER_URL` to point at
+other backends.
+
 ## Reference Implementation
 
 [`spec/08-implementation-stack.md`](spec/08-implementation-stack.md) is an optional appendix

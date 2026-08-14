@@ -6,6 +6,30 @@ from this phase (per the roadmap, they're Phase 2+): multi-workspace routing, co
 Maintenance Advisor (staleness/orphan/dedup *background* detectors), full API+MCP surface,
 horizontal-scaling infra, fine-grained RBAC.
 
+## 0 — Readiness Items (settle before the step they block)
+
+Found by cross-checking the steps below against the specs they cite. None block 1a, so they can be
+settled in parallel with it.
+
+| # | Item | Blocks | Kind |
+|---|---|---|---|
+| 0.1 | **Classifier confidence threshold has no default.** [03](03-ingestion-and-review-workflows.md) §3 step 6 and [09](09-implementation-notes.md) §9 both say it lives in `SCHEMA.md`, but [09](09-implementation-notes.md) §6's template never defines the key — unlike dedup, staleness, and orphan, which all ship defaults. Add `thresholds.classification.min_confidence`. | Step 10 | **Done** — `0.75` starting default added to [09](09-implementation-notes.md) §6 |
+| 0.2 | **Baseline auth is unscoped for Phase 1.** Step 2's schema list omits `access_policy` and no step covers authn/authz, yet steps 19–20 build an admin console that presupposes an admin role. The exclusions above defer only *fine-grained* RBAC. Decide: implement the three roles from [06](06-api-mcp-and-scaling.md) §3 now, or declare Phase 1 trusted-mode and defer auth to Phase 2. | Step 7 | Decision |
+| 0.3 | **API conventions undefined.** Pagination/cursor format, error-response schema, idempotency keys, partial-failure shape, rate-limit headers — deferred in `techfeasibility.md` §3 to "the API design phase," which Phase 1 reaches at its first endpoint. | Step 7 | Design session |
+| 0.4 | **No LLM model chosen.** [00](00-overview.md) §3 puts the provider out of scope and [08](08-implementation-stack.md) picks Pydantic AI but no model. Needs a model, credentials, and a cost budget. | Step 9 | Decision |
+
+Accepted for Phase 1, no action needed — recorded so they aren't rediscovered as surprises:
+
+- **No relevance-regression signal.** [09](09-implementation-notes.md) §10 designates the search
+  feedback loop as that signal, but it is [07](07-additional-features-and-roadmap.md) §4 —
+  Phase 2+. Step 17's catalog-match boost is therefore tuned blind in Phase 1, and its magnitude is
+  an unspecified constant. Acceptable at this scale.
+- **`structured_data` is classified but not specially curated.** Step 9 produces `content_shape`,
+  `artifact_identity`, and `source_version` per [03](03-ingestion-and-review-workflows.md) §3
+  steps 3–4, but the Curator's structured-data treatment is
+  [07](07-additional-features-and-roadmap.md) §1.3, outside Phase 1 — so step 12 treats every
+  source as `narrative` while still storing those fields.
+
 ## 1a — Core Architecture & Data Layer
 
 1. Stand up PostgreSQL (Metadata DB) + object store (fsspec, local/S3 backend) —

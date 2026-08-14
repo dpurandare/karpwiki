@@ -1,0 +1,29 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: karpwiki
+      POSTGRES_PASSWORD: karpwiki
+      POSTGRES_DB: karpwiki
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U karpwiki"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:

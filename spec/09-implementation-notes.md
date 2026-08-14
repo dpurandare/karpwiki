@@ -136,6 +136,8 @@ thresholds:
   staleness:
     high_traffic_days: 90       # re-check sooner for frequently-queried pages (05 §2)
     low_traffic_days: 365
+  classification:
+    min_confidence: 0.75        # below this -> classification review item (03 §3, §9 above)
   dedup:
     near_duplicate_score: 0.85  # FTS "more like this" score, normalized 0-1 (03 §4)
   orphan:

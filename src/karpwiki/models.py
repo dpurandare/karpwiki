@@ -1,0 +1,246 @@
+"""Metadata DB schema — the system of record (02 §3).
+
+Field lists follow 02 §3's conceptual table definitions; enum values follow the states
+defined in 01 §5, 02 §7, and 03 §1. Phase 1 needs the seven core tables only —
+`connector` and `access_policy` belong to later phases (phase1-tasklist §0.2, Phase 2).
+"""
+
+import enum
+import uuid
+from datetime import datetime
+
+from sqlalchemy import (
+    ARRAY,
+    DateTime,
+    Enum,
+    ForeignKey,
+    String,
+    Text,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+def _uuid_pk() -> Mapped[uuid.UUID]:
+    return mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+
+class WorkspaceStatus(enum.Enum):
+    active = "active"
+    archived = "archived"
+
+
+class ContentShape(enum.Enum):
+    narrative = "narrative"
+    structured_data = "structured_data"
+
+
+class RawSourceStatus(enum.Enum):
+    """Lifecycle/retention axis (02 §3) — distinct from PipelineState (09 §3)."""
+
+    active = "active"
+    superseded = "superseded"
+    archived = "archived"
+    rejected = "rejected"
+
+
+class PipelineState(enum.Enum):
+    """Ingestion-progress axis (03 §1); denormalized pointer per 09 §3."""
+
+    submitted = "submitted"
+    classifying = "classifying"
+    classified = "classified"
+    duplicate_check = "duplicate_check"
+    pending_review = "pending_review"
+    ingesting = "ingesting"
+    ingested = "ingested"
+    error = "error"
+    rejected = "rejected"
+
+
+class PageType(enum.Enum):
+    overview = "overview"
+    index = "index"
+    log = "log"
+    concept = "concept"
+    entity = "entity"
+    source = "source"
+    comparison = "comparison"
+
+
+class PageStatus(enum.Enum):
+    draft = "draft"
+    published = "published"
+    archived = "archived"
+
+
+class VersionTrigger(enum.Enum):
+    ingest = "ingest"
+    manual_edit = "manual_edit"
+    rollback = "rollback"
+    lint_fix = "lint_fix"
+    prune = "prune"
+
+
+class LinkType(enum.Enum):
+    cross_reference = "cross_reference"
+    cross_workspace = "cross_workspace"
+
+
+class IndexType(enum.Enum):
+    fts = "fts"
+
+
+class IndexState(enum.Enum):
+    pending = "pending"
+    indexing = "indexing"
+    indexed = "indexed"
+    stale = "stale"
+    error = "error"
+
+
+class ReviewKind(enum.Enum):
+    submission = "submission"
+    classification = "classification"
+    duplicate = "duplicate"
+    reindex = "reindex"
+    prune = "prune"
+
+
+class ReviewStatus(enum.Enum):
+    open = "open"
+    resolved = "resolved"
+
+
+class Workspace(Base):
+    __tablename__ = "workspace"
+
+    workspace_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text)
+    # Phase 1 is single-workspace, so the taxonomy slice is an array column rather than
+    # the separate `document_type` table 02 §3 also describes.
+    document_types: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
+    schema_ref: Mapped[str | None] = mapped_column(String(512))
+    status: Mapped[WorkspaceStatus] = mapped_column(
+        Enum(WorkspaceStatus, name="workspace_status"), default=WorkspaceStatus.active
+    )
+    storage_bindings: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+
+class RawSource(Base):
+    __tablename__ = "raw_source"
+
+    source_id: Mapped[uuid.UUID] = _uuid_pk()
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspace.workspace_id"), index=True)
+    object_key: Mapped[str] = mapped_column(String(1024))
+    filename: Mapped[str] = mapped_column(String(512))
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    content_shape: Mapped[ContentShape | None] = mapped_column(
+        Enum(ContentShape, name="content_shape")
+    )
+    submitted_by: Mapped[str] = mapped_column(String(255))
+    # structured_data only (03 §3-4)
+    artifact_identity: Mapped[str | None] = mapped_column(String(512))
+    source_version: Mapped[str | None] = mapped_column(String(128))
+    source_modified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    supersedes: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("raw_source.source_id"))
+    status: Mapped[RawSourceStatus] = mapped_column(
+        Enum(RawSourceStatus, name="raw_source_status"), default=RawSourceStatus.active
+    )
+    pipeline_state: Mapped[PipelineState] = mapped_column(
+        Enum(PipelineState, name="pipeline_state"), default=PipelineState.submitted
+    )
+    ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WikiPage(Base):
+    __tablename__ = "wiki_page"
+
+    page_id: Mapped[uuid.UUID] = _uuid_pk()
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspace.workspace_id"), index=True)
+    path: Mapped[str] = mapped_column(String(1024))
+    page_type: Mapped[PageType] = mapped_column(Enum(PageType, name="page_type"))
+    # Nullable only between INSERT and the first version write; versioning.create_page
+    # sets it in the same transaction (01 §5).
+    current_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("page_version.version_id", use_alter=True, name="fk_wiki_page_current_version")
+    )
+    status: Mapped[PageStatus] = mapped_column(
+        Enum(PageStatus, name="page_status"), default=PageStatus.draft
+    )
+
+
+class PageVersion(Base):
+    __tablename__ = "page_version"
+
+    version_id: Mapped[uuid.UUID] = _uuid_pk()
+    page_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("wiki_page.page_id"), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    frontmatter: Mapped[dict] = mapped_column(JSONB)
+    author: Mapped[str] = mapped_column(String(255))
+    # clock_timestamp(), not now(): now() is transaction-scoped, so several versions
+    # written in one transaction would share a timestamp and history ordering (05 §6)
+    # would be nondeterministic.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.clock_timestamp()
+    )
+    change_summary: Mapped[str | None] = mapped_column(Text)
+    # Object-store path, /{workspace_id}/diffs/{version_id}.diff (09 §7)
+    diff_ref: Mapped[str | None] = mapped_column(String(1024))
+    trigger: Mapped[VersionTrigger] = mapped_column(Enum(VersionTrigger, name="version_trigger"))
+    restored_from_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("page_version.version_id")
+    )
+
+
+class PageLink(Base):
+    __tablename__ = "page_link"
+
+    from_page_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("wiki_page.page_id"), primary_key=True
+    )
+    to_page_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("wiki_page.page_id"), primary_key=True)
+    link_type: Mapped[LinkType] = mapped_column(Enum(LinkType, name="link_type"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class IndexStatus(Base):
+    __tablename__ = "index_status"
+
+    page_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("wiki_page.page_id"), primary_key=True)
+    index_type: Mapped[IndexType] = mapped_column(
+        Enum(IndexType, name="index_type"), primary_key=True
+    )
+    state: Mapped[IndexState] = mapped_column(
+        Enum(IndexState, name="index_state"), default=IndexState.pending
+    )
+    last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_content_version: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("page_version.version_id")
+    )
+
+
+class ReviewItem(Base):
+    __tablename__ = "review_item"
+
+    review_id: Mapped[uuid.UUID] = _uuid_pk()
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspace.workspace_id"), index=True)
+    kind: Mapped[ReviewKind] = mapped_column(Enum(ReviewKind, name="review_kind"))
+    severity: Mapped[str | None] = mapped_column(String(32))
+    subject_ref: Mapped[str] = mapped_column(String(512))
+    proposed_action: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[ReviewStatus] = mapped_column(
+        Enum(ReviewStatus, name="review_status"), default=ReviewStatus.open
+    )
+    resolved_action: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    resolved_by: Mapped[str | None] = mapped_column(String(255))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

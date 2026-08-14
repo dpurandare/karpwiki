@@ -32,3 +32,6 @@ htmlcov/
 # Research / reference material (kept locally, not published)
 context7/
 gbrain/
+
+# Local object store (fsspec file:// backend)
+var/
