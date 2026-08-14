@@ -35,7 +35,7 @@ below notes its **spec touch-point** where relevant — these have since been ap
 | Connector credentials & security | [05](05-admin-backend-and-maintenance.md) §7, [06](06-api-mcp-and-scaling.md) §3, §4 above | Secret lives in an external secrets manager, referenced by `credential_ref`; connector is a `connector:<id>` principal with `contributor` on exactly one workspace; config changes audit to `admin_action_log`, runs to `ingestion_log` |
 | API conventions | [06](06-api-mcp-and-scaling.md) §1 | Cursor pagination; one error envelope keyed by a stable `type`; `Idempotency-Key` on submit/resolve; partial search flagged explicitly; `RateLimit-*` headers |
 | Baseline auth scope for Phase 1 | [06](06-api-mcp-and-scaling.md) §3, `phase1-tasklist.md` | Authorization (`access_policy` + three roles) ships in Phase 1; authentication is a pluggable provider, trusted-header first and OIDC/SAML in Phase 2 |
-| LLM provider and model | [00](00-overview.md) §3, [08](08-implementation-stack.md) §2 | Claude Opus 5 (`claude-opus-5`) for Classifier and Curator via Pydantic AI's provider abstraction; prompts ordered stable-prefix-first for caching |
+| LLM model selection | [00](00-overview.md) §3, [08](08-implementation-stack.md) §2 | Configurable per agent role: workspace `SCHEMA.md` override, else platform default. One Pydantic AI `provider:model` string; OpenAI flagship tier as the default for both roles; credentials stay in the secrets manager |
 
 ## 3. Pipeline-State Storage
 
@@ -135,6 +135,12 @@ curator:
     concept = a pattern, practice, or methodology discussed across sources.
 
 ingestion_policy: gated         # auto | gated, per 03 §7
+
+llm:                            # optional — omit to inherit the platform default (§16)
+  classifier:
+    model: openai:<model-id>    # Pydantic AI model string: provider:model
+  curator:
+    model: openai:<model-id>
 
 thresholds:
   staleness:
@@ -411,45 +417,80 @@ every handler built in 1b and 1c.
 step 7 — the first endpoint — gains principal resolution and role enforcement as the gateway's
 cross-cutting concern rather than a separate later step.
 
-## 16. LLM Provider and Model Default
+## 16. LLM Model Selection and Configuration
 
 `00` §3 puts LLM provider selection out of scope and `08` §2 picks Pydantic AI as the agent
 framework without naming a model — leaving the Classifier (`03` §3) and Curator (`03` §6) with no
-concrete model to run against.
+concrete model to run against, and no defined place to put one.
 
-**Decision**: **Claude Opus 5 (`claude-opus-5`) for both roles**, reached through Pydantic AI's
-model-provider abstraction so `00` §3's provider neutrality holds — the model is a configuration
-value, not a code dependency, and a workspace could run a different one.
+**Decision**: the model is a **configuration value at three levels**, resolved
+per-agent-role — never a code dependency. The adopting organization's provider is **OpenAI**, and
+the default for both roles is that provider's **flagship general-purpose reasoning tier**.
 
-Both roles suit the strongest tier available. The Classifier's output gates the pipeline
-(`03` §3 step 6): a wrong `document_type` routes a source to the wrong workspace, and a
-miscalibrated confidence either floods the review queue or waves bad classifications through.
-The Curator's output *is* the product — the wiki pages users read and cite.
+### Resolution order
 
-Cost is not the constraint here. At `06` §6's ingestion rate of 10–100 documents/hour, and Claude
-Opus 5's $5/$25 per million input/output tokens, the LLM line is small next to the engineering
-time a weaker classifier costs in review-queue volume. Trading down to a cheaper tier is a decision
-for the adopting organization once real classification-accuracy data exists (`09` §9's calibration
-loop is what produces that data), not a default to assume up front.
+For each of the two agent roles independently, the effective model is the first of:
 
-Two implementation notes that follow from the choice:
+1. **Workspace override** — `llm.classifier.model` / `llm.curator.model` in that workspace's
+   `SCHEMA.md` (§6 above). Absent by default.
+2. **Platform default** — deployment configuration (`08` §4), one setting per role.
 
-- **Structure the prompts for caching.** Both agents send a large stable prefix and a small
-  variable suffix — the Classifier its system prompt plus the document-type taxonomy (`01` §3), the
-  Curator its `SCHEMA.md` curator rules and tone (`01` §7, §6 above) — with the source document
-  last. Caching is a prefix match, so the stable part must physically precede the variable part;
-  ordered that way, per-workspace prefixes are cached across every document in a batch and read at
-  roughly a tenth of input cost. A prefix must reach 512 tokens to cache at all on this model, which
-  a taxonomy plus curator rules comfortably clears.
-- **Size `max_tokens` for thinking plus output.** Thinking is on by default on this model and
-  counts against the same ceiling, so a limit sized only for the expected `ClassificationResult`
-  will truncate.
+The value is a single Pydantic AI model string carrying provider and model together
+(`openai:<model-id>`), so switching provider is the same operation as switching model and no code
+path branches on provider. That is what keeps `00` §3's neutrality real rather than nominal: the
+Platform has no OpenAI-specific code, only an OpenAI-specific configuration value.
 
-Confidence remains self-reported in the structured output per §9 — Pydantic AI's typed result
-models are how both agents return it.
+Splitting the two roles matters because their economics differ — the Classifier runs once per
+source over a short summary with a constrained structured output, while the Curator writes whole
+pages. An organization that later wants a cheaper classifier can change one config value without
+touching curation.
 
-**Spec touch-point** (applied): `08` §2's LLM-layer row names the default model, and `08` §3's
-LLM-layer notes record the caching and `max_tokens` guidance.
+### Why flagship for both, as the default
+
+The Classifier's output gates the pipeline (`03` §3 step 6): a wrong `document_type` routes a
+source to the wrong workspace, and a miscalibrated confidence either floods the review queue or
+waves bad classifications through. The Curator's output *is* the product — the wiki pages users
+read and cite. At `06` §6's ingestion rate of 10–100 documents/hour neither is a high-volume
+workload, so the LLM line is small next to the engineering time a weaker classifier costs in
+review-queue volume. Trading down is a decision to make once real classification-accuracy data
+exists — §9's calibration loop is what produces that data — not a default to assume up front.
+
+### What is *not* configurable here
+
+**Credentials never live in `SCHEMA.md`.** The provider API key follows §13's pattern: a
+`credential_ref` into the deployment's secrets manager, resolved at call time. `SCHEMA.md` is
+versioned, admin-editable, and part of the wiki export (`02` §2) — a workspace-editable model name
+belongs there, a secret does not.
+
+### Consequences of making it configurable
+
+- **A model change resets that workspace's confidence calibration.** §9 tunes
+  `thresholds.classification.min_confidence` against admin resolutions from a *specific* model's
+  self-reported confidence; a different model reports on a different scale. Changing
+  `llm.classifier.model` therefore invalidates the tuned threshold, and the calibration window
+  restarts from the change. Because `SCHEMA.md` is versioned and its edits land in
+  `admin_action_log` (`05` §6, `02` §5), the change is already dated — the calibration analysis
+  reads that date rather than needing a new field.
+- **Prompts must be ordered stable-prefix-first regardless of model.** Both agents send a large
+  stable prefix and a small variable suffix — the Classifier its system prompt plus the
+  document-type taxonomy (`01` §3), the Curator its `SCHEMA.md` rules and tone (`01` §7, §6 above)
+  — with the source document last. Prompt caching is prefix-based across providers, so the stable
+  part must physically precede the variable part; ordered that way the per-workspace prefix is
+  reused across every document in a batch. The mechanism differs by provider (some cache
+  automatically above a size threshold, others require explicit markers) but the ordering
+  requirement does not, which is why it belongs in the provider-neutral prompt construction rather
+  than in provider-specific code.
+- **Size the output-token ceiling for reasoning plus visible output.** On reasoning-capable models
+  the reasoning tokens are billed as output and count against the same cap, so a ceiling sized only
+  for the expected `ClassificationResult` truncates. This is per-model, so it belongs alongside the
+  model in configuration rather than as a constant.
+- **Confidence stays self-reported** (§9). That decision was taken to avoid depending on
+  provider-specific log-probability APIs, and it is what makes the model swappable without
+  reworking `03` §3's routing gate.
+
+**Spec touch-point** (applied): §6 above's `SCHEMA.md` template gains an optional `llm:` block;
+`08` §2's LLM-layer row and §3's notes record the resolution order and the prompt-ordering
+requirement.
 
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)
