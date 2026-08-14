@@ -70,6 +70,12 @@ remain correct regardless of which implementation is built against them.
   in [02](02-storage-and-indexing.md) §1 (AWS S3, GCS, Azure Blob, MinIO, Cloudflare R2) through
   one API — each workspace's `storage_binding` ([01](01-architecture-and-data-model.md) §3) is just
   a URL (`s3://...`, `gs://...`, `az://...`, `file://...`).
+- **The binding must be identical across every process group.** fsspec resolves a relative
+  `file://` URL against the process's working directory, so a Wiki Service and a worker started
+  from different directories would silently use different object stores and the worker would fail
+  to read the diffs the writer produced ([06](06-api-mcp-and-scaling.md) §5 runs them as separate
+  process groups). A relative path is therefore a single-process development convenience only;
+  every deployed process is given the same absolute path or the same `s3://`-style URL.
 - fsspec backends can be FUSE-mounted, directly enabling the "file-based agent access" path
   described in [02](02-storage-and-indexing.md) §2 — an agent gets real filesystem/grep access to
   the wiki export regardless of the underlying object store.
