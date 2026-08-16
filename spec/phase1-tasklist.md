@@ -6,6 +6,10 @@ from this phase (per the roadmap, they're Phase 2+): multi-workspace routing, co
 Maintenance Advisor (staleness/orphan/dedup *background* detectors), full API+MCP surface,
 horizontal-scaling infra, fine-grained RBAC.
 
+**Status (2026-08-16): 1a and 1b complete** (steps 1–15), plus step 16 pulled forward from 1c —
+see the note at that step for why. 1c's remaining steps (17, 18, 19, 20, 21) are next. Implementation
+lives in [`src/karpwiki/`](../src/karpwiki/); see the [README](../README.md) for how to run it.
+
 ## 0 — Readiness Items (settle before the step they block)
 
 Found by cross-checking the steps below against the specs they cite. **All six are now closed** —
@@ -31,24 +35,41 @@ Accepted for Phase 1, no action needed — recorded so they aren't rediscovered 
   steps 3–4, but the Curator's structured-data treatment is
   [07](07-additional-features-and-roadmap.md) §1.3, outside Phase 1 — so step 12 treats every
   source as `narrative` while still storing those fields.
+- **Pipeline stages are not wired as automatic background jobs.** Step 5 stands up the Celery
+  queue infrastructure, but nothing enqueues a task on submission — classification, dedup, and
+  curation are explicit function calls (driven by tests/the API's own steps 9–15), never
+  triggered by a worker. Step 15's own verification runs the same way. Real async orchestration —
+  respecting [03](03-ingestion-and-review-workflows.md) §1's per-stage retry states rather than
+  bolting a call chain onto a Celery task — is its own piece of work, deliberately deferred rather
+  than done as part of a verification step.
+- **No `index.md` catalog or `page_link` cross-reference parsing.** Step 16's line below names
+  `index.md` catalog indexing, but no code writes an actual `index.md` wiki page, and nothing
+  parses markdown cross-references into `page_link` rows. Neither was named as its own step
+  anywhere in 1a/1b, so both are gaps carried forward rather than decisions made — flagged here so
+  they're not rediscovered as surprises when 1c or search needs them.
 
 ## 1a — Core Architecture & Data Layer
 
 1. Stand up PostgreSQL (Metadata DB) + object store (fsspec, local/S3 backend) —
    [02](02-storage-and-indexing.md) §2–3, [08](08-implementation-stack.md) §2.
+   **Done** — [`docker-compose.yml`](../docker-compose.yml), [`db.py`](../src/karpwiki/db.py),
+   [`objectstore.py`](../src/karpwiki/objectstore.py).
 2. Implement the core schema: `workspace`, `raw_source`, `wiki_page`, `page_version`, `page_link`,
    `index_status`, `review_item`, `access_policy` — [02](02-storage-and-indexing.md) §3 field list.
    Single workspace row is enough for Phase 1; `access_policy` carries the three roles from
    [06](06-api-mcp-and-scaling.md) §3 per [09](09-implementation-notes.md) §15.
+   **Done** — [`models.py`](../src/karpwiki/models.py).
 3. Implement the versioning model: every page write creates a `page_version`,
    `wiki_page.current_version_id` as a pointer, non-destructive rollback —
-   [01](01-architecture-and-data-model.md) §5.
+   [01](01-architecture-and-data-model.md) §5. **Done** — [`versioning.py`](../src/karpwiki/versioning.py).
 4. Implement required frontmatter validation (`status`, page type, etc.) —
-   [01](01-architecture-and-data-model.md) §6.
+   [01](01-architecture-and-data-model.md) §6. **Done** — [`frontmatter.py`](../src/karpwiki/frontmatter.py).
 5. Stand up the async job queue (Celery + Redis) — [01](01-architecture-and-data-model.md) §1,
-   [08](08-implementation-stack.md) §2.
+   [08](08-implementation-stack.md) §2. **Done** — [`tasks.py`](../src/karpwiki/tasks.py) (queues
+   defined; nothing enqueued onto them yet — see the accepted-simplifications note above).
 6. **Verify**: can create a workspace, write a `wiki_page` + `page_version` directly (no ingestion
-   yet), and read it back with correct version pointer.
+   yet), and read it back with correct version pointer. **Done** —
+   [`test_versioning.py`](../tests/test_versioning.py).
 
 ## 1b — Basic Ingestion (no Advisor, no connectors)
 
@@ -58,31 +79,49 @@ Accepted for Phase 1, no action needed — recorded so they aren't rediscovered 
    enforcement against `access_policy` (pluggable authenticator, trusted-header provider for
    Phase 1 — [09](09-implementation-notes.md) §15), and the API conventions in
    [09](09-implementation-notes.md) §14 (cursor pagination, error envelope, `Idempotency-Key`).
+   **Done** — [`api.py`](../src/karpwiki/api.py), [`auth.py`](../src/karpwiki/auth.py).
 8. Implement the pipeline state machine on `raw_source.pipeline_state` —
    [03](03-ingestion-and-review-workflows.md) §1, [09](09-implementation-notes.md) §3
    (9-state enum as a denormalized pointer + `ingestion_log` history).
+   **Done** — [`pipeline.py`](../src/karpwiki/pipeline.py).
 9. Build the Classifier step (LLM-based `document_type` + confidence via Pydantic AI) —
    [03](03-ingestion-and-review-workflows.md) §3, [08](08-implementation-stack.md) §2.
-   Single-workspace case simplifies workspace resolution (only one target).
+   Single-workspace case simplifies workspace resolution (only one target). **Done** —
+   [`classify.py`](../src/karpwiki/classify.py), `classify_source()` in
+   [`ingestion.py`](../src/karpwiki/ingestion.py).
 10. Implement low-confidence routing to `pending_review` —
-    [03](03-ingestion-and-review-workflows.md) §1, §3.
+    [03](03-ingestion-and-review-workflows.md) §1, §3. **Done** — the routing gate in
+    [`classify.py`](../src/karpwiki/classify.py).
 11. Implement duplicate detection at `duplicate_check` (lexical similarity against existing
-    pages) — [03](03-ingestion-and-review-workflows.md) §4.
+    pages) — [03](03-ingestion-and-review-workflows.md) §4. **Done** —
+    [`dedup.py`](../src/karpwiki/dedup.py).
 12. Implement the Curator Agent's ingest step: raw source → concept/entity wiki pages,
-    `overview.md`, `log.md` updates — [03](03-ingestion-and-review-workflows.md) §6.
+    `overview.md`, `log.md` updates — [03](03-ingestion-and-review-workflows.md) §6. **Done** —
+    [`curate.py`](../src/karpwiki/curate.py), `curate_source()` in
+    [`ingestion.py`](../src/karpwiki/ingestion.py).
 13. Implement the placeholder `source` page lifecycle ("processing" → "awaiting review"/
     "rejected"/"error" → final) — [03](03-ingestion-and-review-workflows.md) §1 note on UI
-    labels vs. frontmatter `status`.
+    labels vs. frontmatter `status`. **Done** — `placeholder_label()` in
+    [`pipeline.py`](../src/karpwiki/pipeline.py); creation/finalization in
+    [`ingestion.py`](../src/karpwiki/ingestion.py) ([09](09-implementation-notes.md) §18).
 14. Implement the `submission` and `classification` review items (always-on notice +
     low-confidence gate) — [03](03-ingestion-and-review-workflows.md) §5,
-    [02](02-storage-and-indexing.md) §3 `review_item`.
+    [02](02-storage-and-indexing.md) §3 `review_item`. **Done** — including `duplicate` items too,
+    not just the two named here: step 15's own verification goal ("a review item if it's a
+    duplicate/low-confidence") needs the third kind to be checkable at all.
+    [`review.py`](../src/karpwiki/review.py) ([09](09-implementation-notes.md) §19).
 15. **Verify**: submit a real document end-to-end and get a published, cited wiki page — or a
-    review item if it's a duplicate/low-confidence.
+    review item if it's a duplicate/low-confidence. **Done** —
+    [`test_end_to_end.py`](../tests/test_end_to_end.py); live-verified against the real API and
+    model, not only stubbed.
 
 ## 1c — Lexical Search & Basic Admin Console
 
 16. Build the Full-Text Index (PostgreSQL `tsvector`/GIN) over curated wiki pages + `index.md`
     catalog — [02](02-storage-and-indexing.md) §4, [04](04-search-and-retrieval.md) §1–2.
+    **Done** — [`search.py`](../src/karpwiki/search.py), pulled forward from 1c: step 11's
+    near-duplicate check queries this index, so it had to exist before 1b could finish. The
+    `index.md` catalog page itself was not built — see the accepted-simplifications note above.
 17. Implement single-stage lexical retrieval with catalog-match boost —
     [04](04-search-and-retrieval.md) §1, §3. (Skip §4 federated/cross-workspace merge — single
     workspace only.)

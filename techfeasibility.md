@@ -15,7 +15,7 @@ each area.
 | Pipeline-state storage (§1) | `spec/09` §3 |
 | Classifier confidence calibration (§1) | `spec/09` §9 |
 | MCP on-behalf-of delegation (§2) | `spec/09` §5 |
-| API contract details (§3) | Deferred — API design phase, not spec-level |
+| API contract details (§3) | `spec/09` §14 (general conventions — pagination, error envelope, idempotency, partial-failure, rate-limit headers); endpoint-specific detail lands as each endpoint is implemented |
 | `SCHEMA.md` example (§4) | `spec/09` §6 |
 | `query_log` retention/anonymization (§4) | `spec/09` §8 |
 | Retention defaults / `legal_hold` (§4) | `spec/09` §8 |
