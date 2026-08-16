@@ -208,12 +208,15 @@ ingestion as a distinct source — use when the similarity is coincidental).
 ## 5. Submission Review Item (always created)
 
 Independent of the duplicate/classification checks, **every** new submission creates a
-`kind=submission` review item the moment the `raw_source` record exists (state `submitted`).
-This satisfies *"a review item should be added for the admin staff so that they know [about the]
-addition of new document"* — it is informational by default (`status=open` until resolved with
-`resolved_action=acknowledge`, a one-click no-op resolution), but admins can open it to see the
-placeholder `source` page, reassign workspace, or halt processing if something looks wrong before
-`ingesting` completes.
+`kind=submission` review item the moment the `raw_source` record exists (state `submitted`) —
+before a workspace is known, so `workspace_id` is unset on the item at this point
+([09](09-implementation-notes.md) §19; §1's placeholder `source` page doesn't exist yet either,
+[09](09-implementation-notes.md) §18). This satisfies *"a review item should be added for the
+admin staff so that they know [about the] addition of new document"* — it is informational by
+default (`status=open` until resolved with `resolved_action=acknowledge`, a one-click no-op
+resolution), but admins can open it to reassign workspace or halt processing if something looks
+wrong before `ingesting` completes, and — once classification has run — to see the placeholder
+`source` page.
 
 | Review item kind | Created when | Blocks pipeline? | Default `resolved_action` |
 |---|---|---|---|

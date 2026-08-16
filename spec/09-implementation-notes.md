@@ -9,10 +9,10 @@ design decisions, in the same spirit as `08`'s reference-implementation choices.
 calibration, relevance-test ownership, taxonomy bulk-move safeguards, and FUSE access scope —
 using values supplied by the organization adopting this spec. A third pass (§13) closes the
 connector credential/security gap left open by §4, which covered connector *execution* only. A
-fourth pass (§14–18) settles what Phase 1's endpoints need as they're actually built — API
+fourth pass (§14–19) settles what Phase 1's endpoints need as they're actually built — API
 conventions, the baseline auth scope, the LLM model default, the near-duplicate metric, and the
-placeholder page's creation timing. NFR targets specifically are recorded in
-[06](06-api-mcp-and-scaling.md) §6, the placeholder table designated for that purpose.
+creation timing of the placeholder page and of review items. NFR targets specifically are recorded
+in [06](06-api-mcp-and-scaling.md) §6, the placeholder table designated for that purpose.
 
 Unlike `08` (which only picks libraries for roles `00`–`07` already define), several of the
 decisions below imply a small addition to `00`–`07`'s conceptual data model or prose. Each item
@@ -38,6 +38,7 @@ below notes its **spec touch-point** where relevant — these have since been ap
 | Baseline auth scope for Phase 1 | [06](06-api-mcp-and-scaling.md) §3, `phase1-tasklist.md` | Authorization (`access_policy` + three roles) ships in Phase 1; authentication is a pluggable provider, trusted-header first and OIDC/SAML in Phase 2 |
 | Near-duplicate similarity metric | [02](02-storage-and-indexing.md) §4, [03](03-ingestion-and-review-workflows.md) §4, §6 below | Lexeme containment over the FTS index, not `ts_rank` (unbounded, length-dependent); `near_duplicate_score` recalibrated from 0.85 to 0.60 against measured scores |
 | Placeholder source page timing | [03](03-ingestion-and-review-workflows.md) §1 | Created once classification resolves the workspace, not literally at `submitted` — no `wiki_page` row is legal to write before then; UI labels are derived from `pipeline_state` at read time, never stored as page content |
+| Review item workspace timing | [02](02-storage-and-indexing.md) §3, [03](03-ingestion-and-review-workflows.md) §3, §5 | `workspace_id` nullable, unlike the placeholder page — `submission`/`classification` items are created at their literal spec-stated moments, before a workspace may exist |
 | LLM model selection | [00](00-overview.md) §3, [08](08-implementation-stack.md) §2 | Configurable per agent role: workspace `SCHEMA.md` override, else platform default. One Pydantic AI `provider:model` string; `openai:gpt-5-nano` in every environment, cost-first with curation quality as the watched risk; credentials stay in the secrets manager |
 
 ## 3. Pipeline-State Storage
@@ -633,6 +634,41 @@ source hits this same code path again. The placeholder write finds-or-creates by
 immediately" — it now describes the placeholder as created once classification resolves the
 workspace, with a forward pointer here. A new note states the uncovered window and that
 `raw_source`/the status endpoint cover it.
+
+## 19. Review Item Workspace Timing
+
+`02` §3 lists `workspace_id` as a `review_item` field with no nullability noted, and `03` §5 says
+the `submission` review item is created "the moment the `raw_source` record exists (state
+`submitted`)" — before classification has run. Both `submission` and `classification` items
+(`03` §3, §5) can therefore need to exist before a workspace is known, the same timing conflict
+§18 resolved for the placeholder page.
+
+**Decision**: unlike §18, don't defer creation — make `review_item.workspace_id` nullable and
+create these items at their literal spec-stated moments, leaving `workspace_id` unset until (if
+ever) one resolves.
+
+This is a deliberate departure from §18's resolution of the same-shaped conflict, not an
+inconsistency: the two artifacts differ in what pre-workspace existence is *for*. The placeholder
+page is workspace-partitioned wiki content — before a workspace exists there is nothing coherent to
+show, so deferring costs nothing. A review item is an admin task-queue entry, and `03` §5 states
+its purpose includes letting an admin "reassign workspace... before `ingesting` completes" —
+deferring creation until a workspace is resolved would silently remove the one capability the
+spec names first. For `classification` items specifically, a workspace may never resolve
+automatically at all: resolving the item — an admin picking a `document_type` (`03` §3) — is
+what assigns one. Nullable-with-optional-backfill isn't a new pattern here; it's the same shape
+`raw_source.workspace_id` already uses (`09` §3), applied to a second table for the same reason.
+
+`duplicate` items don't share this conflict — `03` §4 runs `duplicate_check` only after a
+workspace is resolved, so they always carry one at creation.
+
+**What does *not* get a review item.** `03` §7: a `gated` workspace with no duplicate concerns
+still parks at `pending_review`, but this is policy gating, not a finding — no dedicated item kind
+exists for it, and none is created. The always-open `submission` item, already created at
+`submitted`, is what an admin uses to notice and act on that source; inventing a second item would
+duplicate what the first already covers.
+
+**Spec touch-point** (applied): `02` §3's `review_item` row now marks `workspace_id` nullable; `03`
+§5 notes it may be unset at creation.
 
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

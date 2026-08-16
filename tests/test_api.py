@@ -72,6 +72,23 @@ async def test_submission_opens_the_ingestion_log(client, session):
     assert history[0].from_state is None
 
 
+async def test_submission_always_creates_a_review_item(client, session):
+    """03 §5: every submission, unconditionally, informational."""
+    from sqlalchemy import select
+
+    from karpwiki.models import ReviewItem, ReviewKind, ReviewStatus
+
+    r = await client.post("/sources", headers=CONTRIBUTOR, data={"text": "x"})
+    result = await session.execute(
+        select(ReviewItem).where(ReviewItem.subject_ref == r.json()["source_id"])
+    )
+    item = result.scalar_one()
+    assert item.kind is ReviewKind.submission
+    assert item.status is ReviewStatus.open
+    assert item.workspace_id is None  # no workspace resolved yet
+    assert item.proposed_action is None
+
+
 async def test_unauthenticated_requests_are_refused(client):
     r = await client.post("/sources", data={"text": "x"})
     assert r.status_code == 401

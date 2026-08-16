@@ -92,6 +92,40 @@ async def test_low_confidence_parks_the_source_unrouted(session, workspace):
     assert source.object_key == staged
 
 
+async def test_low_confidence_creates_a_classification_review_item(session, workspace):
+    """03 §5's table: default resolved_action is None — the admin picks, nothing pre-filled."""
+    from sqlalchemy import select
+
+    from karpwiki.models import ReviewItem, ReviewKind
+
+    source = await _submitted(session)
+    await ingestion.classify_source(session, source=source, workspace=workspace, call=_returns(confidence=0.2))
+    await session.commit()
+
+    result = await session.execute(
+        select(ReviewItem).where(ReviewItem.subject_ref == str(source.source_id))
+    )
+    item = result.scalar_one()
+    assert item.kind is ReviewKind.classification
+    assert item.workspace_id is None
+    assert item.proposed_action is None
+
+
+async def test_a_successful_classification_creates_no_review_item(session, workspace):
+    from sqlalchemy import select
+
+    from karpwiki.models import ReviewItem
+
+    source = await _submitted(session)
+    await ingestion.classify_source(session, source=source, workspace=workspace, call=_returns())
+    await session.commit()
+
+    result = await session.execute(
+        select(ReviewItem).where(ReviewItem.subject_ref == str(source.source_id))
+    )
+    assert result.scalar_one_or_none() is None
+
+
 async def test_a_disagreement_parks_the_source_with_both_candidates(session, workspace):
     """The filename says runbook; the model says design-doc. A human decides."""
     source = await _submitted(session, filename="restart-worker-runbook.md")

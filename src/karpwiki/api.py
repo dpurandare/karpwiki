@@ -18,10 +18,10 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import objectstore, pipeline
+from . import objectstore, pipeline, review
 from .auth import Authenticator, Principal, TrustedHeaderAuthenticator, any_workspace_with_role
 from .db import SessionLocal
-from .models import IdempotencyRecord, PipelineState, RawSource, Role
+from .models import IdempotencyRecord, PipelineState, RawSource, ReviewKind, Role
 
 SUBMIT_ENDPOINT = "POST /sources"
 
@@ -210,6 +210,12 @@ async def _store(
             actor=submitted_by,
             detail={"object_key": object_key},
         )
+    )
+    # 03 §5: every submission gets an always-on informational review item, unconditionally
+    # and regardless of what happens downstream. No workspace yet — none is resolved until
+    # classification succeeds.
+    await review.create(
+        session, kind=ReviewKind.submission, subject_ref=str(source.source_id)
     )
     await session.flush()
     return source

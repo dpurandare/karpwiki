@@ -12,7 +12,7 @@ from typing import Protocol
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import classify, curate, dedup, llm, objectstore, pipeline, versioning
+from . import classify, curate, dedup, llm, objectstore, pipeline, review, versioning
 from .models import (
     PageStatus,
     PageType,
@@ -20,6 +20,7 @@ from .models import (
     PipelineState,
     RawSource,
     RawSourceStatus,
+    ReviewKind,
     VersionTrigger,
     WikiPage,
     Workspace,
@@ -122,14 +123,21 @@ async def classify_source(
     }
 
     if not routing.accepted:
-        # Step 10: the gate refuses, so a human decides. The `classification` review item
-        # itself is step 14; the pipeline state is what parks the source meanwhile.
+        # Step 10: the gate refuses, so a human decides.
         await pipeline.transition(
             session,
             source=source,
             to_state=PipelineState.pending_review,
             actor="system:classifier",
             detail={**detail, "candidates": list(routing.candidates)},
+        )
+        # No workspace_id: classification never resolved one, and resolving this item —
+        # an admin picking a document_type (03 §3) — may be exactly what does.
+        # No proposed_action: 03 §5's table is explicit that classification has none —
+        # the admin picks, there's nothing to pre-fill. The refusal reason and candidate
+        # labels are already in the ingestion_log detail written above.
+        await review.create(
+            session, kind=ReviewKind.classification, subject_ref=str(source.source_id)
         )
         return PipelineState.pending_review
 
@@ -245,6 +253,14 @@ async def check_duplicates(
                     {"path": h.path, "score": round(h.score, 4)} for h in finding.page_hits
                 ],
             },
+        )
+        await review.create(
+            session,
+            kind=ReviewKind.duplicate,
+            subject_ref=str(source.source_id),
+            workspace_id=source.workspace_id,
+            severity=finding.severity,
+            proposed_action=finding.proposed_action,
         )
         return PipelineState.pending_review
 

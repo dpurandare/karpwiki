@@ -252,7 +252,12 @@ class ReviewItem(Base):
     __tablename__ = "review_item"
 
     review_id: Mapped[uuid.UUID] = _uuid_pk()
-    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspace.workspace_id"), index=True)
+    # Nullable: a submission or classification review item (03 §5, §3) can exist before a
+    # workspace is resolved — for classification specifically, resolving it may be exactly
+    # what assigns the workspace, so there may never be an automatic value to backfill.
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace.workspace_id"), index=True
+    )
     kind: Mapped[ReviewKind] = mapped_column(Enum(ReviewKind, name="review_kind"))
     severity: Mapped[str | None] = mapped_column(String(32))
     subject_ref: Mapped[str] = mapped_column(String(512))

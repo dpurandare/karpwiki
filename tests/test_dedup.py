@@ -226,6 +226,37 @@ async def test_a_clean_source_still_waits_under_gated_policy(session, workspace)
     assert state is PipelineState.pending_review
 
 
+async def test_gated_but_clean_creates_no_duplicate_review_item(session, workspace):
+    """03 §7: only duplicate/classification review items are always raised — gating alone
+    is not a "concern" to report. The always-open submission item (03 §5) already covers
+    an admin noticing a gated source; nothing new is needed here."""
+    from sqlalchemy import select
+
+    from karpwiki.models import ReviewItem
+
+    source = await _source(session, workspace)
+    await ingestion.check_duplicates(
+        session, source=source, summary="Nothing alike.", ingestion_policy="gated"
+    )
+    result = await session.execute(
+        select(ReviewItem).where(ReviewItem.subject_ref == str(source.source_id))
+    )
+    assert result.scalar_one_or_none() is None
+
+
+async def test_a_clean_source_under_auto_policy_creates_no_review_item(session, workspace):
+    from sqlalchemy import select
+
+    from karpwiki.models import ReviewItem
+
+    source = await _source(session, workspace)
+    await ingestion.check_duplicates(session, source=source, summary="Nothing alike.")
+    result = await session.execute(
+        select(ReviewItem).where(ReviewItem.subject_ref == str(source.source_id))
+    )
+    assert result.scalar_one_or_none() is None
+
+
 async def test_a_duplicate_blocks_even_under_auto_policy(session, workspace):
     """03 §4: scores above threshold always block; policy governs only the clean path."""
     await _indexed_page(session, workspace, title="Restarting Payments", body=BODY)
@@ -241,3 +272,22 @@ async def test_a_duplicate_blocks_even_under_auto_policy(session, workspace):
     last = (await pipeline.history(session, source.source_id))[-1]
     assert last.detail["reason"] == "duplicate: near"
     assert last.detail["similar_pages"][0]["path"] == "concepts/restarting-payments.md"
+
+
+async def test_a_duplicate_creates_a_review_item_carrying_the_findings_severity(session, workspace):
+    from sqlalchemy import select
+
+    from karpwiki.models import ReviewItem, ReviewKind
+
+    await _indexed_page(session, workspace, title="Restarting Payments", body=BODY)
+    source = await _source(session, workspace)
+    await ingestion.check_duplicates(session, source=source, summary=BODY, ingestion_policy="auto")
+
+    result = await session.execute(
+        select(ReviewItem).where(ReviewItem.subject_ref == str(source.source_id))
+    )
+    item = result.scalar_one()
+    assert item.kind is ReviewKind.duplicate
+    assert item.workspace_id == workspace.workspace_id  # known by this point, unlike classification
+    assert item.severity == "medium"
+    assert item.proposed_action == "merge_or_supersede_or_keep_both"
