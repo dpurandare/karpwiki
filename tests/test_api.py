@@ -3,46 +3,12 @@
 import hashlib
 import uuid
 
-import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
-
 from karpwiki import objectstore
-from karpwiki.api import create_app
-from karpwiki.models import AccessPolicy, PipelineState, RawSource, Role
+from karpwiki.models import PipelineState, RawSource
 
 CONTRIBUTOR = {"X-Karpwiki-User": "deepak"}
 READER = {"X-Karpwiki-User": "casey"}
 VIA_GROUP = {"X-Karpwiki-User": "morgan", "X-Karpwiki-Groups": "group:eng, group:ops"}
-
-
-@pytest_asyncio.fixture
-async def client(session, workspace):
-    """The app shares the test's session so assertions see uncommitted writes."""
-    import karpwiki.api as api_module
-
-    async def _one_session():
-        yield session
-
-    app = create_app()
-    app.dependency_overrides[api_module._session] = _one_session
-
-    session.add_all(
-        [
-            AccessPolicy(
-                workspace_id=workspace.workspace_id, principal="deepak", role=Role.contributor
-            ),
-            AccessPolicy(workspace_id=workspace.workspace_id, principal="casey", role=Role.reader),
-            AccessPolicy(
-                workspace_id=workspace.workspace_id, principal="group:eng", role=Role.contributor
-            ),
-        ]
-    )
-    await session.flush()
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://gateway"
-    ) as http:
-        yield http
 
 
 async def test_submission_is_accepted_without_naming_a_workspace(client, session):

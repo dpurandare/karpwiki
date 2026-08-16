@@ -3,9 +3,10 @@ import uuid
 
 import pytest
 import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from karpwiki.models import Base, Workspace, WorkspaceStatus
+from karpwiki.models import AccessPolicy, Base, Role, Workspace, WorkspaceStatus
 
 TEST_DATABASE_URL = os.environ.get(
     "KARPWIKI_TEST_DATABASE_URL",
@@ -60,3 +61,38 @@ async def workspace(session):
 async def other_workspace(session):
     """A second workspace, for asserting that queries never cross the boundary."""
     return await _workspace(session, "policies", ["policy.hr"])
+
+
+@pytest_asyncio.fixture
+async def client(session, workspace):
+    """The app shares the test's session so assertions see uncommitted writes.
+
+    Grants `deepak` (contributor), `casey` (reader), and `group:eng` (contributor) on
+    `workspace` by default — the set every existing caller of this fixture relies on.
+    """
+    import karpwiki.api as api_module
+    from karpwiki.api import create_app
+
+    async def _one_session():
+        yield session
+
+    app = create_app()
+    app.dependency_overrides[api_module._session] = _one_session
+
+    session.add_all(
+        [
+            AccessPolicy(
+                workspace_id=workspace.workspace_id, principal="deepak", role=Role.contributor
+            ),
+            AccessPolicy(workspace_id=workspace.workspace_id, principal="casey", role=Role.reader),
+            AccessPolicy(
+                workspace_id=workspace.workspace_id, principal="group:eng", role=Role.contributor
+            ),
+        ]
+    )
+    await session.flush()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://gateway"
+    ) as http:
+        yield http
