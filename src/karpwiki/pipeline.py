@@ -64,6 +64,26 @@ for _state in FAILABLE:
     TRANSITIONS[_state] = TRANSITIONS[_state] | {PipelineState.error}
 
 
+# 03 §1's UI-visibility column, explicitly distinct from the page frontmatter `status`
+# field (draft|published|archived) — these are presentation labels for the placeholder
+# `source` page, derived from pipeline_state rather than stored on the page itself.
+PLACEHOLDER_LABELS: dict[PipelineState, str] = {
+    PipelineState.submitted: "processing",
+    PipelineState.classifying: "processing",
+    PipelineState.classified: "processing",
+    PipelineState.duplicate_check: "processing",
+    PipelineState.pending_review: "awaiting review",
+    PipelineState.ingesting: "processing",
+    PipelineState.ingested: "published",
+    PipelineState.error: "error",
+    PipelineState.rejected: "rejected",
+}
+
+
+def placeholder_label(state: PipelineState) -> str:
+    return PLACEHOLDER_LABELS[state]
+
+
 class IllegalTransition(ValueError):
     """The requested transition is not an edge in 03 §1's state machine."""
 

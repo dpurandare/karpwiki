@@ -19,6 +19,7 @@ from .models import (
     PageVersion,
     PipelineState,
     RawSource,
+    RawSourceStatus,
     VersionTrigger,
     WikiPage,
     Workspace,
@@ -134,6 +135,7 @@ async def classify_source(
 
     source.workspace_id = workspace.workspace_id
     _relocate(source, workspace.workspace_id)
+    await _create_placeholder_source_page(session, source=source, workspace=workspace)
     await pipeline.transition(
         session,
         source=source,
@@ -142,6 +144,69 @@ async def classify_source(
         detail={**detail, "document_type": routing.document_type},
     )
     return PipelineState.classified
+
+
+PLACEHOLDER_SOURCE_BODY = "This document has been submitted and is being processed."
+
+
+async def _create_placeholder_source_page(
+    session: AsyncSession, *, source: RawSource, workspace: Workspace
+) -> None:
+    """03 §1's placeholder `source` page — created once the workspace is known, not
+    literally at `submitted`. A page needs a workspace (partition key) and required
+    frontmatter including `workspace_id` (01 §6), neither of which exist before
+    classification resolves the workspace; that earlier window has no title or workspace
+    to show, so there is nothing meaningful to display anyway.
+
+    `status=draft` per 03 §1's note: this label is UI presentation, not the frontmatter
+    `status` field, which only becomes `published` when the Curator finalizes the page.
+    """
+    await _upsert_singleton(
+        session,
+        workspace_id=workspace.workspace_id,
+        path=f"sources/{source.source_id}.md",
+        page_type=PageType.source,
+        title=f"Processing: {source.filename}",
+        description="Submission awaiting curation.",
+        tags=["source", "processing"],
+        body=PLACEHOLDER_SOURCE_BODY,
+        status=PageStatus.draft,
+    )
+
+
+async def reject_source(
+    session: AsyncSession, *, source: RawSource, reason: str, actor: str = "user:admin"
+) -> PipelineState:
+    """Admin declines a `pending_review` source (03 §1's `rejected` row).
+
+    The one transition where both status axes move together: `pipeline_state` to
+    `rejected` and `raw_source.status` to `rejected` (02 §3's retention axis) — every
+    other transition leaves `raw_source.status` at `active` (09 §3).
+    """
+    await pipeline.transition(
+        session,
+        source=source,
+        to_state=PipelineState.rejected,
+        actor=actor,
+        detail={"reason": reason},
+    )
+    source.status = RawSourceStatus.rejected
+
+    if source.workspace_id is not None:
+        # A source rejected before classification ever resolved a workspace (e.g. still
+        # `pending_review` from low confidence) has no placeholder page to finalize.
+        await _upsert_singleton(
+            session,
+            workspace_id=source.workspace_id,
+            path=f"sources/{source.source_id}.md",
+            page_type=PageType.source,
+            title=f"Rejected: {source.filename}",
+            description="This submission was rejected.",
+            tags=["source", "rejected"],
+            body=f"This submission was rejected.\n\n**Reason:** {reason}",
+            status=PageStatus.draft,
+        )
+    return PipelineState.rejected
 
 
 async def check_duplicates(
@@ -315,18 +380,19 @@ async def _existing_concept_entity_pages(
 async def _write_source_page(
     session: AsyncSession, *, source: RawSource, workspace: Workspace, content: curate.CuratedContent
 ) -> None:
+    """Finalize the source page (03 §6 step 2): if step 13's placeholder already exists
+    (the normal case — classify_source creates it before curate_source ever runs), this
+    updates that same page rather than creating a duplicate."""
     body = curate.render_source_body(content, filename=source.filename)
-    await versioning.create_page(
+    await _upsert_singleton(
         session,
         workspace_id=workspace.workspace_id,
         path=f"sources/{source.source_id}.md",
         page_type=PageType.source,
         title=content.source_title,
         description=content.source_description,
-        date=date.today(),
         tags=["source", str(source.content_shape.value if source.content_shape else "narrative")],
         body=body,
-        author="system:curator",
         status=PageStatus.published,
     )
 
@@ -416,27 +482,46 @@ async def _refresh_log(session: AsyncSession, *, workspace_id: str) -> None:
 
 
 async def _upsert_singleton(
-    session: AsyncSession, *, workspace_id: str, path: str, page_type: PageType, title: str, body: str
-) -> None:
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    path: str,
+    page_type: PageType,
+    title: str,
+    body: str,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    status: PageStatus = PageStatus.published,
+) -> WikiPage:
+    """Find-or-create a page by (workspace_id, path); update in place if it exists.
+
+    Used for overview.md/log.md (same path, refreshed every ingest) and for the source
+    placeholder (step 13): created once classification resolves a workspace, finalized by
+    the Curator. Must be idempotent rather than create-once, because 03 §1 allows a failed
+    classification to be retried (`pending_review -> classifying`), which would otherwise
+    hit this path a second time for the same source.
+    """
+    resolved_description = description or f"Workspace {page_type.value} page."
+    resolved_tags = tags or [page_type.value, "workspace"]
+
     result = await session.execute(
         select(WikiPage).where(WikiPage.workspace_id == workspace_id, WikiPage.path == path)
     )
     existing = result.scalar_one_or_none()
     if existing is None:
-        await versioning.create_page(
+        return await versioning.create_page(
             session,
             workspace_id=workspace_id,
             path=path,
             page_type=page_type,
             title=title,
-            description=f"Workspace {page_type.value} page.",
+            description=resolved_description,
             date=date.today(),
-            tags=[page_type.value, "workspace"],
+            tags=resolved_tags,
             body=body,
             author="system:curator",
-            status=PageStatus.published,
+            status=status,
         )
-        return
 
     await versioning.write_version(
         session,
@@ -445,7 +530,14 @@ async def _upsert_singleton(
         author="system:curator",
         trigger=VersionTrigger.ingest,
         change_summary=f"Regenerated {path}.",
+        frontmatter_updates={
+            "title": title,
+            "description": resolved_description,
+            "tags": resolved_tags,
+        },
+        status=status,
     )
+    return existing
 
 
 async def _count(session: AsyncSession, page_type: PageType, *, workspace_id: str) -> int:

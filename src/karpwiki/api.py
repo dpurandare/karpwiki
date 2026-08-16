@@ -167,6 +167,9 @@ def _register_routes(app: FastAPI) -> None:
             "status": source.status.value,
             "workspace_id": source.workspace_id,
             "filename": source.filename,
+            # 03 §1's UI label for the placeholder source page — distinct from
+            # `pipeline_state` (the raw enum) and from the page's own frontmatter status.
+            "label": pipeline.placeholder_label(source.pipeline_state),
         }
 
 

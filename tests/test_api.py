@@ -138,6 +138,7 @@ async def test_status_reads_the_denormalized_pointer(client):
     assert r.status_code == 200
     assert r.json()["pipeline_state"] == PipelineState.submitted.value
     assert r.json()["workspace_id"] is None
+    assert r.json()["label"] == "processing"  # 03 §1's UI label, distinct from pipeline_state
 
 
 async def test_another_principals_source_is_indistinguishable_from_a_missing_one(client):
