@@ -41,7 +41,11 @@ Accepted for Phase 1, no action needed — recorded so they aren't rediscovered 
   triggered by a worker. Step 15's own verification runs the same way. Real async orchestration —
   respecting [03](03-ingestion-and-review-workflows.md) §1's per-stage retry states rather than
   bolting a call chain onto a Celery task — is its own piece of work, deliberately deferred rather
-  than done as part of a verification step.
+  than done as part of a verification step. It's also the gating prerequisite for writing real
+  install/scaling documentation ([06](06-api-mcp-and-scaling.md) §4–5): "worker pools scale
+  independently per job type" isn't a demonstrable property until a worker does something, so
+  that doc waits on this piece landing (and, for the multi-workspace-partitioning half of §4,
+  on Phase 2).
 - **No `index.md` catalog or `page_link` cross-reference parsing.** Step 16's line below names
   `index.md` catalog indexing, but no code writes an actual `index.md` wiki page, and nothing
   parses markdown cross-references into `page_link` rows. Neither was named as its own step
