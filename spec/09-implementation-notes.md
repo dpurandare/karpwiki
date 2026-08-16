@@ -9,9 +9,10 @@ design decisions, in the same spirit as `08`'s reference-implementation choices.
 calibration, relevance-test ownership, taxonomy bulk-move safeguards, and FUSE access scope —
 using values supplied by the organization adopting this spec. A third pass (§13) closes the
 connector credential/security gap left open by §4, which covered connector *execution* only. A
-fourth pass (§14–17) settles what Phase 1's first endpoints need before they can be written — API
-conventions, the baseline auth scope, the LLM model default, and the near-duplicate metric. NFR
-targets specifically are recorded in [06](06-api-mcp-and-scaling.md) §6, the placeholder table designated for that purpose.
+fourth pass (§14–18) settles what Phase 1's endpoints need as they're actually built — API
+conventions, the baseline auth scope, the LLM model default, the near-duplicate metric, and the
+placeholder page's creation timing. NFR targets specifically are recorded in
+[06](06-api-mcp-and-scaling.md) §6, the placeholder table designated for that purpose.
 
 Unlike `08` (which only picks libraries for roles `00`–`07` already define), several of the
 decisions below imply a small addition to `00`–`07`'s conceptual data model or prose. Each item
@@ -36,6 +37,7 @@ below notes its **spec touch-point** where relevant — these have since been ap
 | API conventions | [06](06-api-mcp-and-scaling.md) §1 | Cursor pagination; one error envelope keyed by a stable `type`; `Idempotency-Key` on submit/resolve; partial search flagged explicitly; `RateLimit-*` headers |
 | Baseline auth scope for Phase 1 | [06](06-api-mcp-and-scaling.md) §3, `phase1-tasklist.md` | Authorization (`access_policy` + three roles) ships in Phase 1; authentication is a pluggable provider, trusted-header first and OIDC/SAML in Phase 2 |
 | Near-duplicate similarity metric | [02](02-storage-and-indexing.md) §4, [03](03-ingestion-and-review-workflows.md) §4, §6 below | Lexeme containment over the FTS index, not `ts_rank` (unbounded, length-dependent); `near_duplicate_score` recalibrated from 0.85 to 0.60 against measured scores |
+| Placeholder source page timing | [03](03-ingestion-and-review-workflows.md) §1 | Created once classification resolves the workspace, not literally at `submitted` — no `wiki_page` row is legal to write before then; UI labels are derived from `pipeline_state` at read time, never stored as page content |
 | LLM model selection | [00](00-overview.md) §3, [08](08-implementation-stack.md) §2 | Configurable per agent role: workspace `SCHEMA.md` override, else platform default. One Pydantic AI `provider:model` string; `openai:gpt-5-nano` in every environment, cost-first with curation quality as the watched risk; credentials stay in the secrets manager |
 
 ## 3. Pipeline-State Storage
@@ -584,6 +586,53 @@ near-duplicate judgement precisely because a lexical score is a candidate genera
 
 **Spec touch-point** (applied): §6 above's `SCHEMA.md` template now reads
 `near_duplicate_score: 0.60` and names the metric.
+
+## 18. Placeholder Source Page Timing
+
+`03` §1 says the placeholder `source` page is created "immediately" at `submitted`, so that "the
+document is 'in the wiki'" from the moment of upload. Implementing this literally isn't possible:
+a `wiki_page` row needs `workspace_id` as its partition key (`01` §3) and required frontmatter
+including `workspace_id` (`01` §6), and neither exists until classification resolves the workspace
+— which for a submission `03` §2 deliberately accepts in the target-undetermined state.
+
+**Decision**: the placeholder is created once classification resolves the workspace — the first
+moment a `wiki_page` row is legal to write — not literally at `submitted`. Concretely, this lands
+right before the `classifying → classified` transition, using the same title/description/tags
+every time (`status: draft`, tagged `processing`) so the write carries no information beyond "this
+exists and is in progress." The window this leaves uncovered is `submitted` and the portion of
+`classifying` before the workspace resolves — sub-second in the normal case, and genuinely without
+a page in the two cases where classification never resolves a workspace at all (a low-confidence or
+cross-check-disagreement routing straight to `pending_review`, `03` §3). In both, `raw_source` and
+`GET /sources/{id}` (`06` §1) remain the visibility mechanism — the caller can always see
+`pipeline_state`, just not yet as a wiki page.
+
+**Alternatives considered**: a real workspace-less placeholder, making `wiki_page.workspace_id`
+nullable (mirroring `raw_source.workspace_id`, `09` §3) and relaxing required frontmatter to permit
+a missing `workspace_id`. Rejected — it loosens two schema invariants everywhere to serve a
+sub-second window with no title, no workspace, and nothing meaningful to show. Also considered:
+no `wiki_page` row until `ingested`, with visibility satisfied entirely by the status endpoint.
+Rejected as a bigger departure from `03` §1's stated table, which has every state (bar the
+uncovered window above) showing a "placeholder `source` page."
+
+**UI labels are derived, not stored.** `03` §1's "processing" / "awaiting review" / "rejected" /
+"error" markings are explicitly *not* the page's frontmatter `status` (the note already in this
+section says as much) — they are computed from `pipeline_state` by a pure mapping
+(`PipelineState → label`) at read time, not written as page content on every transition. Writing a
+new `page_version` each time the label changes would churn `index_status` to `stale` on every
+transition (`02` §7) for content that never actually changed, and would duplicate `pipeline_state`,
+which is already `06` §1's authoritative read path (`09` §3). The placeholder gets exactly two real
+content writes: creation (draft, generic body) and finalization — either the Curator's content on
+`ingested`, or a rejection notice carrying the admin's reason on `rejected`.
+
+**Creation must be idempotent, not create-once.** `03` §1 allows `pending_review → classifying`
+(an admin retrying a failed classification), so a second successful classification for the same
+source hits this same code path again. The placeholder write finds-or-creates by
+`(workspace_id, path)` and updates in place rather than colliding with the first attempt.
+
+**Spec touch-point** (applied): `03` §1's table row for `submitted` no longer says "created
+immediately" — it now describes the placeholder as created once classification resolves the
+workspace, with a forward pointer here. A new note states the uncovered window and that
+`raw_source`/the status endpoint cover it.
 
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

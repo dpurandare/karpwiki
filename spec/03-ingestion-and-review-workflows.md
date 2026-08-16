@@ -33,8 +33,8 @@ stateDiagram-v2
 
 | State | Meaning | Raw source status | Wiki visibility |
 |---|---|---|---|
-| `submitted` | Source stored in object store, `raw_source` record created | `active` | A placeholder `source` page is created immediately (marked "processing") — the document is "in the wiki" from this point, per the requirement that submissions are added right away. |
-| `classifying` | Classifier assigns `document_type` (+ confidence) and resolves `workspace_id` | `active` | placeholder `source` page |
+| `submitted` | Source stored in object store, `raw_source` record created | `active` | No `wiki_page` row is legal to write yet — a page needs `workspace_id` (`01` §3, §6), not resolved until classification succeeds. `raw_source`/`GET /sources/{id}` (`06` §1) are the visibility mechanism for this state, per the requirement that submissions are added right away. |
+| `classifying` | Classifier assigns `document_type` (+ confidence) and resolves `workspace_id` | `active` | placeholder `source` page, created the moment `workspace_id` resolves (`09` §18) — not present for the part of this state before that, or if it never resolves (routes to `pending_review` instead, §3 below) |
 | `classified` | Type + workspace confirmed (confidence ≥ threshold) | `active` | placeholder `source` page |
 | `duplicate_check` | Compare against existing content in target workspace | `active` | placeholder `source` page |
 | `pending_review` | A review item blocks further automatic processing | `active` | placeholder `source` page, marked "awaiting review" |
@@ -74,7 +74,10 @@ identifies the resume point.
 "rejected", "error") describe how the placeholder `source` page is presented in the UI during the
 pipeline — they are not values of the page frontmatter `status` field (`draft|published|archived`,
 [01](01-architecture-and-data-model.md) §6), which remains `draft` until the Curator Agent's
-finalization step (§6 step 2) sets it to `published` on `ingested`.
+finalization step (§6 step 2) sets it to `published` on `ingested`. They are computed from
+`pipeline_state` at read time and never stored as page content, so a state change never by itself
+produces a new `page_version` — see [09](09-implementation-notes.md) §18 for why, and for exactly
+when the placeholder page starts existing.
 
 ## 2. Submission
 
