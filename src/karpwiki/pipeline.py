@@ -107,3 +107,19 @@ async def history(session: AsyncSession, source_id: uuid.UUID) -> list[Ingestion
         .order_by(IngestionLog.created_at, IngestionLog.entry_id)
     )
     return list(result.scalars())
+
+
+async def recent_ingested(
+    session: AsyncSession, *, workspace_id: str, limit: int = 20
+) -> list[IngestionLog]:
+    """Most recent `-> ingested` transitions in a workspace, newest first (log.md, 03 §6)."""
+    result = await session.execute(
+        select(IngestionLog)
+        .where(
+            IngestionLog.workspace_id == workspace_id,
+            IngestionLog.to_state == PipelineState.ingested,
+        )
+        .order_by(IngestionLog.created_at.desc(), IngestionLog.entry_id.desc())
+        .limit(limit)
+    )
+    return list(result.scalars())
