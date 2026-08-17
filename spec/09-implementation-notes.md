@@ -1581,5 +1581,36 @@ live run, unlike the worker-pool claim next to it.
 **Spec touch-point**: none — this section documents this repo's current state against `06` §4's
 existing design; no spec wording changes needed.
 
+## 38. 2b Track Verification — Real Async Job Dispatch Closes Out (Phase 2 Step 35)
+
+Closes track 2b, the same shape as `09` §24 (Phase 1 close) and §32 (2a close): a committed,
+fast, deterministic test plus a real live run.
+
+**`tests/test_end_to_end_2b.py`** submits through the real gateway, then *drains exactly the
+dispatch chain the real wiring produced* — pops each `.delay()` call the autouse `dispatched`
+fixture recorded and runs the corresponding real task body (`tasks._classify`/`_curate`/
+`_reindex`) in turn, a stand-in for a worker process rather than a reimplementation of one. Mocked
+LLM, no live broker — the fast, CI-safe counterpart to the live run below, verifying the *wiring*
+is exactly right (classify dispatches curate, curate dispatches reindex for the page it wrote) with
+no network calls.
+
+**Live run** (not committed): real HTTP against a running gateway, real broker, real worker
+containers, real `gpt-5-nano`, real dev Postgres/MinIO — a shipping-manifest document submitted
+with nothing manually driven from that point on reached `ingested` in **36.5s** and was searchable
+at the same poll (both well inside a 90s bound, chosen generously above every real run this track's
+live checks have seen — the slowest, `curate_source` with several sequential LLM-touched page
+writes, has taken up to ~30s). No new bugs found — track 2b's prior steps (30-34) each already
+live-verified their own piece as it landed, so this closing run exercises the same wiring those
+did, just as the single, formal, tasklist-named "submit and confirm, nothing manual, bounded time"
+check rather than another ad hoc one.
+
+**Track 2b (Real Async Job Dispatch) is complete**: real Celery tasks (step 30), worker containers
+(step 31), dispatch wired end-to-end (step 32), retry/idempotency semantics (step 33), install/
+scaling docs (step 34), and this closing verification (step 35). `00` §7's traceability rows for
+async job dispatch and worker-pool scaling are now met.
+
+**Spec touch-point**: none — this section is the closing verification record for 2b, not a new
+decision.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

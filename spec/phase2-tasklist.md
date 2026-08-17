@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-17): steps 22–34 done, track 2a complete, track 2b in progress.** Phase 1 (steps 1–21,
+**Status (2026-08-17): steps 22–35 done, tracks 2a and 2b complete.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -194,7 +194,11 @@ is a real Authenticator implementation using that pick, not a library search.
     wiring (step 32) had quietly made false. See [09](09-implementation-notes.md) §37.
 35. **Verify**: submit a document via the API with nothing manually driving the pipeline forward —
     confirm it reaches `ingested` and becomes searchable on its own, purely via workers, within a
-    bounded time.
+    bounded time. **Done** — [`tests/test_end_to_end_2b.py`](../tests/test_end_to_end_2b.py) (new,
+    committed) drains the real dispatch chain with a mocked LLM/no broker; a live run over real
+    HTTP/broker/workers/`gpt-5-nano` reached `ingested` and became searchable in 36.5s, well inside
+    a 90s bound. No new bugs found. See [09](09-implementation-notes.md) §38. **Track 2b (Real
+    Async Job Dispatch) is complete.**
 
 ## 2c — Maintenance Advisor
 
