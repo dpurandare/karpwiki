@@ -195,7 +195,7 @@ async def _accept_classification(
     (`resolve_classification` below, 09 §22), since both do exactly the same work from
     that point on."""
     source.workspace_id = workspace.workspace_id
-    _relocate(source, workspace.workspace_id)
+    relocate(source, workspace.workspace_id)
     await _create_placeholder_source_page(session, source=source, workspace=workspace)
     await pipeline.transition(
         session,
@@ -958,13 +958,17 @@ async def _count_all_pages(session: AsyncSession, *, workspace_id: str) -> int:
     return result.scalar_one()
 
 
-def _relocate(source: RawSource, workspace_id: str) -> None:
+def relocate(source: RawSource, workspace_id: str) -> None:
     """Move the object under its workspace prefix (readiness item 0.6).
 
     02 §2's per-workspace prefix is what drives retention lifecycle rules, access
     boundaries, and physical bucket separation, so a source cannot stay in `_inbox` once
     its workspace is known. Copy, then repoint, then delete: a crash between any two steps
     leaves an orphan object, never a lost source.
+
+    Public (not module-private): `bulk_move.py` (phase2-tasklist.md step 27, 09 §11) reuses
+    this exact copy-repoint-delete sequence when re-homing a source to a different
+    workspace after ingestion, not just at classification time.
     """
     staged = source.object_key
     final = f"/{workspace_id}/sources/{source.source_id}/{source.filename}"

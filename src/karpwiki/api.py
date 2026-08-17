@@ -9,9 +9,11 @@ pagination, 09 §14, actually lands), step 20 (05 §6's Version Browser: `pages/
 versions` list/get/diff and `pages/{id}/rollback`), and phase2-tasklist.md steps 22
 (05 §7's document-type taxonomy CRUD: `document-types` list/create/update/delete), 23
 (`workspaces` create/update/archive/list/get, plus access-policy grant/revoke — 05 §7,
-06 §1, §3), and 25 (`GET /search` — federated resolution, the taxonomy pre-filter, and
+06 §1, §3), 25 (`GET /search` — federated resolution, the taxonomy pre-filter, and
 `query_log` writes are gateway concerns per 01 §2, so they live here around a call into
-`search.py` rather than in that module).
+`search.py` rather than in that module), and 27 (`workspaces/{id}/bulk-move` preview and
+execute — 05 §7, 09 §11 — the batch-loop/commit-per-batch boundary belongs here, not in
+`bulk_move.py`, matching every other module's "caller commits" convention).
 
 Not implemented here, deliberately: the rate limiter is 07 §3, a later phase (phase2-
 tasklist.md step 48). `pages` get/list (06 §1's other row) isn't built either — out of this
@@ -32,6 +34,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import (
+    bulk_move,
     classify,
     dedicated_index,
     document_types,
@@ -260,6 +263,23 @@ class GrantAccessRequest(BaseModel):
 
     principal: str
     role: Role
+
+
+class BulkMoveRequest(BaseModel):
+    """POST /workspaces/{id}/bulk-move(/preview) body (05 §7, 09 §11) — {id} in the path is
+    the source workspace; `target_workspace_id` is where `page_ids`/`source_ids` move to."""
+
+    target_workspace_id: str
+    page_ids: list[uuid.UUID] = []
+    source_ids: list[uuid.UUID] = []
+
+
+def _move_item_body(item: bulk_move.MoveItem) -> dict[str, Any]:
+    return {"id": str(item.id), "label": item.label}
+
+
+def _skipped_item_body(item: bulk_move.SkippedItem) -> dict[str, Any]:
+    return {"id": str(item.id), "reason": item.reason}
 
 
 def _workspace_body(workspace: Workspace) -> dict[str, Any]:
@@ -834,6 +854,118 @@ def _register_routes(app: FastAPI) -> None:
         await _admin_workspace(session, principal, workspace_id)
         await workspaces.revoke(session, workspace_id=workspace_id, principal=revoked_principal)
         await session.commit()
+
+    async def _admin_both_workspaces(
+        session: AsyncSession, principal: Principal, source_workspace_id: str, payload: BulkMoveRequest
+    ) -> None:
+        """A bulk move needs admin in *both* workspaces — the source it drains and the
+        target it fills — same rule as reassigning a document type's workspace (05 §7,
+        `update_document_type` above) and on-behalf-of submission (09 §5)."""
+        if payload.target_workspace_id == source_workspace_id:
+            raise ApiError(
+                400, "invalid_request", "target_workspace_id must differ from the source workspace."
+            )
+        if await session.get(Workspace, payload.target_workspace_id) is None:
+            raise ApiError(404, "not_found", f"No workspace {payload.target_workspace_id!r}.")
+        if not await has_role(
+            session,
+            principal=principal,
+            workspace_id=payload.target_workspace_id,
+            required=Role.admin,
+        ):
+            raise ApiError(
+                403,
+                "forbidden",
+                "Moving into this workspace requires the admin role there.",
+                {"workspace_id": payload.target_workspace_id},
+            )
+
+    @app.post("/workspaces/{workspace_id}/bulk-move/preview")
+    async def bulk_move_preview(
+        workspace_id: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        payload: BulkMoveRequest,
+    ):
+        """Dry run, no writes (09 §11) — safe to call repeatedly while deciding what to
+        move."""
+        await _admin_workspace(session, principal, workspace_id)
+        await _admin_both_workspaces(session, principal, workspace_id, payload)
+        result = await bulk_move.preview(
+            session,
+            source_workspace_id=workspace_id,
+            target_workspace_id=payload.target_workspace_id,
+            page_ids=payload.page_ids,
+            source_ids=payload.source_ids,
+        )
+        return {
+            "pages": [_move_item_body(i) for i in result.pages],
+            "sources": [_move_item_body(i) for i in result.sources],
+            "skipped_pages": [_skipped_item_body(i) for i in result.skipped_pages],
+            "skipped_sources": [_skipped_item_body(i) for i in result.skipped_sources],
+        }
+
+    @app.post("/workspaces/{workspace_id}/bulk-move")
+    async def bulk_move_execute(
+        workspace_id: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        payload: BulkMoveRequest,
+    ):
+        """Batched execute (09 §11). No Idempotency-Key: a retry with the same id lists is
+        already safe on its own — `execute_batch` skips anything no longer in the source
+        workspace — and per-batch commits (below) don't compose with the single-commit
+        idempotency-record pattern the other mutating endpoints use.
+
+        A failed batch halts the loop without rolling back batches already committed
+        (09 §11) — the `except` below is that spec-mandated halt, not incidental error
+        handling.
+        """
+        await _admin_workspace(session, principal, workspace_id)
+        await _admin_both_workspaces(session, principal, workspace_id, payload)
+
+        items: list[tuple[str, uuid.UUID]] = [("page", i) for i in payload.page_ids] + [
+            ("source", i) for i in payload.source_ids
+        ]
+        moved_page_ids: list[uuid.UUID] = []
+        moved_source_ids: list[uuid.UUID] = []
+        batch_count = 0
+        error: str | None = None
+        for start in range(0, len(items), bulk_move.BATCH_SIZE):
+            chunk = items[start : start + bulk_move.BATCH_SIZE]
+            chunk_page_ids = [item_id for kind, item_id in chunk if kind == "page"]
+            chunk_source_ids = [item_id for kind, item_id in chunk if kind == "source"]
+            try:
+                batch = await bulk_move.execute_batch(
+                    session,
+                    source_workspace_id=workspace_id,
+                    target_workspace_id=payload.target_workspace_id,
+                    page_ids=chunk_page_ids,
+                    source_ids=chunk_source_ids,
+                    actor=f"user:{principal.id}",
+                )
+            except Exception as exc:  # noqa: BLE001 — 09 §11's halt-without-rollback
+                await session.rollback()
+                error = str(exc)
+                break
+            await session.commit()
+            batch_count += 1
+            moved_page_ids.extend(batch.moved_page_ids)
+            moved_source_ids.extend(batch.moved_source_ids)
+
+        # 05 §6: same as rollback, a bulk move is logged to log.md as well as
+        # admin_action_log (09 §23) — for both workspaces it touched.
+        await ingestion.refresh_log(session, workspace_id=workspace_id)
+        await ingestion.refresh_log(session, workspace_id=payload.target_workspace_id)
+        await session.commit()
+
+        return {
+            "completed": error is None,
+            "error": error,
+            "batch_count": batch_count,
+            "moved_page_ids": [str(i) for i in moved_page_ids],
+            "moved_source_ids": [str(i) for i in moved_source_ids],
+        }
 
     @app.get("/search")
     async def search_endpoint(

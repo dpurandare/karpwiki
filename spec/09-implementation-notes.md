@@ -1136,5 +1136,65 @@ technology choice; this note records the backend-scope decision (one shared inde
 dedup's system of record regardless of search backend), the async client-lifecycle bug and fix, and
 the admin-toggle gap found and closed.
 
+## 30. Taxonomy Bulk-Move — What "A Set of Pages/Sources" Actually Means (Phase 2 Step 27)
+
+`11` already settled the execution model (dry-run preview, batched execute, failed batch halts
+without rolling back completed ones). What it left open, because no code existed yet to force the
+question: **how is "the set of pages/sources" identified?** `raw_source` and `wiki_page` carry only
+`workspace_id`, never the `document_type` a source was originally classified under — that field is
+never persisted past the classification step. So a bulk move triggered by "reassign a type's target
+workspace" cannot filter *by that type* after the fact; there is nothing left to filter on. Decision:
+`bulk_move.py` takes an explicit `page_ids`/`source_ids` list from the caller rather than deriving a
+set from a document-type reassignment — the admin identifies what should move (via `pages`/`sources`
+listing/search, not built by this step) and hands the gateway concrete ids. This is narrower than "a
+type's content moves automatically," but matches what `05` §7 actually says: a *separate* admin
+action the operator invokes "if needed," not an automatic consequence of reassignment.
+
+**Module never commits; `api.py` owns the batch/commit loop — the one deliberate exception to this
+codebase's "modules never call `session.commit()`" convention, forced by the spec's own requirement.**
+`11`'s "failed batch halts without rolling back completed batches" is only real if each batch is its
+own durable transaction — a single `execute()` call that processes everything and lets the *caller*
+commit once at the end (`api.py`'s usual pattern) can't express that. `bulk_move.execute_batch`
+moves exactly the ids it's given and never touches the session's transaction state; `api.py`'s
+`bulk_move_execute` slices the request into `BATCH_SIZE`-sized chunks, calling `execute_batch` and
+committing after each, catching an exception to stop the loop (rolling back only that batch) while
+prior commits stand. `BATCH_SIZE = 100` — no existing default anywhere to inherit; picked so `11`'s
+5,000–50,000-page/workspace ceiling stays in the tens-to-hundreds of batches, not thousands.
+
+**Resumability is per-item idempotency, not a resume token.** `11`: "the admin resumes or retries
+the remaining batches." Rather than tracking operation state server-side, `execute_batch` silently
+skips any id no longer in the *source* workspace (already moved, or never valid) instead of erroring
+— calling the execute endpoint again with the exact same `page_ids`/`source_ids` after a partial
+failure is safe and correct by construction. `preview` reports this case explicitly as
+`already_at_target` so an admin re-previewing mid-operation sees accurate progress.
+
+**No `Idempotency-Key` support on the execute endpoint — a deliberate omission, not an oversight.**
+Every other mutating endpoint (`09` §14) pairs a single commit with an `IdempotencyRecord` write in
+the same transaction. Bulk-move's multi-commit batch loop has no single point to attach one, and
+doesn't need it: the resumability property above already makes a bare retry safe.
+
+**A page leaving a dedicated workspace needed an explicit OpenSearch cleanup — a real, pre-existing
+gap this step's first design pass surfaced, not introduced by it.** `search.index_page` (`09` §29)
+only ever *adds* a page to OpenSearch when its current workspace is dedicated; nothing ever removed
+one when a page's workspace changed away from dedicated — impossible before this step, since nothing
+could previously change `wiki_page.workspace_id` at all. Fixing `index_page` itself (delete when not
+dedicated, on every reindex) was rejected: it would make **every** reindex call, including every
+non-dedicated workspace's, touch OpenSearch, expanding the test-suite's OpenSearch dependency (`09`
+§29's scoped-to-`test_dedicated_index.py`/`test_federated_search_api.py` note) to nearly the whole
+suite for a cleanup only bulk-move can currently trigger. Scoped instead to `bulk_move.execute_batch`:
+when the *source* workspace is dedicated, it calls `dedicated_index.delete_page` directly after
+moving a page out. The equivalent gap from simply toggling `dedicated_index` off a workspace (no
+page move involved) stays exactly as `09` §29 already documented and accepted — "future writes only,
+no retroactive migration" — since that is a different, already-decided trade-off this step didn't
+reopen.
+
+**`ingestion._relocate` made public as `relocate`.** Re-homing a `raw_source` needs the identical
+copy-repoint-delete sequence classification-time routing already uses (`02` §2's per-workspace
+object-store prefix) — reused rather than duplicated, so `bulk_move.py` imports it directly.
+
+**Spec touch-point**: none new — `05` §7 and `09` §11 already described dry-run + batched execute;
+this note records what "the set" concretely means given the schema, the module/API commit-boundary
+split, and the OpenSearch cleanup gap found and closed.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

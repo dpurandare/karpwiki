@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-17): steps 22–26 done**, 2a in progress. Phase 1 (steps 1–21,
+**Status (2026-08-17): steps 22–27 done**, 2a in progress. Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -105,8 +105,20 @@ is a real Authenticator implementation using that pick, not a library search.
     Verified live against a real running OpenSearch throughout, including a genuine async
     client-lifecycle bug caught and fixed before it shipped — see
     [09](09-implementation-notes.md) §29 for the full set of decisions.
-27. Taxonomy bulk-move admin action — dry-run + batched execute, fully designed already
-    ([09](09-implementation-notes.md) §11).
+27. **Done.** Taxonomy bulk-move admin action — dry-run + batched execute
+    ([`bulk_move.py`](../src/karpwiki/bulk_move.py), `api.py`'s
+    `workspaces/{id}/bulk-move/preview` + `workspaces/{id}/bulk-move`). Takes an explicit
+    `page_ids`/`source_ids` list rather than deriving a set from a document-type reassignment — the
+    schema doesn't retain which type a page/source was originally classified under, so there's
+    nothing to filter on after the fact. Batching and per-batch commit live in `api.py`, not the
+    module (the one deliberate exception to this codebase's "modules never commit" convention,
+    forced by "a failed batch halts without rolling back completed ones"); resumability falls out of
+    `execute_batch` silently skipping anything no longer in the source workspace, so a bare retry of
+    the same request is safe. Also fixed a real, pre-existing gap this step's design surfaced: a page
+    leaving a dedicated workspace now gets its stale OpenSearch document explicitly deleted, which
+    was impossible to trigger before this step (nothing could previously change a page's
+    `workspace_id`). Verified live against the real dev Postgres DB and real MinIO S3 (not the test
+    suite's temp-dir object store) — see [09](09-implementation-notes.md) §30.
 28. `page_link` cross-reference parsing (carried forward from Phase 1's accepted-simplifications
     note in [`phase1-tasklist.md`](phase1-tasklist.md)) — load-bearing now that cross-workspace
     links ([01](01-architecture-and-data-model.md) §3) are possible, and feeds 2c's Orphan
