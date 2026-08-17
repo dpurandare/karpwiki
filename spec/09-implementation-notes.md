@@ -1284,5 +1284,57 @@ assumption like this gets caught.
 decision; `00` §7's traceability rows for multi-workspace routing, federated search, and the
 taxonomy bulk-move admin action are now met.
 
+## 33. Real Celery Tasks — One "Curation" Task Bundles Dedup and Curate (Phase 2 Step 30)
+
+`§21` deliberately deferred real async dispatch for every pipeline stage rather than wiring
+indexing alone. This step closes that gap for the task-registration half of it (dispatch — who
+calls `.delay()` and when — is step 32; `docker-compose.yml` worker services are step 31): three
+real `@app.task`s in [`tasks.py`](../src/karpwiki/tasks.py) wrap the existing pure orchestration
+functions — `classify_source` (queue `classification`), `curate_source` (queue `curation`),
+`search.reindex` (queue `indexing`) — using the routing `tasks.py` already defined.
+
+**Decision: `check_duplicates` (dedup) is not its own task.** The tasklist names exactly three
+tasks to register, matching `QUEUES`'s four fixed queues (classification/curation/indexing/
+maintenance — no `dedup` queue). Step 32's "acceptance enqueues dedup then curate" is read as one
+dispatch — the `curation` task itself runs `check_duplicates`, and only calls `curate_source` if
+the verdict is `ingesting` (a duplicate or a `gated` policy parks it at `pending_review` instead,
+same as `tests/test_end_to_end_2a.py`'s existing manual `classify_source` -> `check_duplicates` ->
+`curate_source` sequence already does by hand). Two chained tasks were the alternative — closer to
+"dedup then curate" read literally as two enqueues — but adds a queue hop and a dispatch-time
+decision for a step that's cheap, synchronous, and has nowhere else to route to; better one task
+matching the tasklist's own enumeration than inventing a fourth queue this session's tasklist
+didn't ask for.
+
+**`check_duplicates` needs the Classifier's `summary`** (03 §4: the near-duplicate query text),
+which `classify_source` never returns — only `PipelineState`. Rather than widen that return type
+or add a column, the curation task reads it back off `ingestion_log`'s `classified` transition
+detail, the same pattern `ingestion._duplicate_evidence` already uses for duplicate evidence. Empty
+when classification was admin-assigned (`resolve_classification`, 09 §22) rather than run by the
+model — there was no classifier call to have produced one, so the near-duplicate check simply finds
+nothing, which is the correct degrade rather than an error.
+
+**Async-in-sync**: every pipeline function is `async`, but a Celery worker calls task bodies
+synchronously (09 §21's other module-level-async-client lesson, from step 26's dedicated-index
+work, doesn't apply here — each task call opens its own `db.session_scope()` per invocation, no
+long-lived client). Each `@app.task` is a thin sync wrapper doing `asyncio.run(...)` over an async
+inner function (`_classify`/`_curate`/`_reindex`) that does the real work; the inner functions are
+what tests call directly, and what step 32's dispatch call sites will eventually pass IDs to.
+
+**Test-only `call` seam on the inner functions**: `_classify`/`_curate` accept an optional `call`
+keyword (defaulting to the real `ingestion.call_model`/`call_curator_model`), never passed by the
+`@app.task` wrapper — the same injectable-`Protocol` pattern `ingestion.py` already uses throughout
+for the same reason, one layer up, rather than a new mocking approach for this layer alone.
+
+**Live-verified** (`tests/test_tasks.py`'s five tests use mocked classify/curate calls against the
+real test DB; a companion, not-committed live script separately drove the same three tasks with no
+`call` override — real `gpt-5-nano`, real dev Postgres, real MinIO object store — one document
+through `_classify` -> `_curate` -> `_reindex`, confirming it reached `ingested`, produced source/
+concept/entity pages plus refreshed `overview.md`/`log.md`, indexed, and became searchable. No
+bugs found).
+
+**Spec touch-point**: none — `06` §4 and `tasks.py`'s own docstring already describe the queue
+split; this section records how the three tasks were shaped and why dedup rides inside `curation`
+rather than getting a fourth.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

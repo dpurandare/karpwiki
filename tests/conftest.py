@@ -120,3 +120,20 @@ async def client(session, workspace):
         transport=ASGITransport(app=app), base_url="http://gateway"
     ) as http:
         yield http
+
+
+@pytest_asyncio.fixture
+async def task_db(monkeypatch, session):
+    """Points `karpwiki.db.SessionLocal` at the same test database, via its own
+    connection pool — the same relationship a real Celery worker's session has to the
+    Wiki Service's (phase2-tasklist.md step 30). Depends on `session` only for fixture
+    ordering, so the schema already exists; task code must go through `session.commit()`
+    on the `session` fixture's own session to see anything, same as a real worker only
+    sees committed writes."""
+    import karpwiki.db as db_module
+
+    engine = create_async_engine(TEST_DATABASE_URL)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(db_module, "SessionLocal", factory)
+    yield
+    await engine.dispose()

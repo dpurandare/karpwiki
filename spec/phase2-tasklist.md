@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-17): steps 22–29 done, track 2a complete.** Phase 1 (steps 1–21,
+**Status (2026-08-17): steps 22–30 done, track 2a complete, track 2b started.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -148,7 +148,12 @@ is a real Authenticator implementation using that pick, not a library search.
 30. Register real Celery tasks wrapping the existing pure orchestration functions: classification
     (`ingestion.classify_source`), curation (`ingestion.curate_source`), indexing
     (`search.reindex`) — the gap [09](09-implementation-notes.md) §21 named when it deliberately
-    deferred this.
+    deferred this. **Done** — [`tasks.py`](../src/karpwiki/tasks.py) (`classify_source`,
+    `curate_source`, `reindex` tasks on their respective queues), tested in
+    [`tests/test_tasks.py`](../tests/test_tasks.py) and against real `gpt-5-nano`/dev Postgres/
+    MinIO via a live script — see [09](09-implementation-notes.md) §33 for why dedup rides inside
+    the `curation` task rather than getting a fourth task, and how the async/sync boundary is
+    handled. Dispatch (who calls these) is still step 32; worker services are step 31.
 31. `docker-compose.yml` worker services, one per queue (classification, curation, indexing,
     maintenance — [06](06-api-mcp-and-scaling.md) §4, [`tasks.py`](../src/karpwiki/tasks.py)'s
     `QUEUES`).
