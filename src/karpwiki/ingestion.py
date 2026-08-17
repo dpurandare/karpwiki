@@ -11,6 +11,7 @@ kept separate to avoid a circular import (`review.py` cannot depend back on this
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import date
@@ -38,6 +39,60 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+# 03 §1: "a rate-limited or timed-out LLM call ... is retried inside the worker with
+# backoff. Only exhausted retries transition to error." No specific count/backoff is given
+# anywhere in spec/ (phase2-tasklist.md step 33), so these are this implementation's
+# defaults — 3 attempts, doubling from 1s, caps a stuck call at ~3s of backoff before
+# giving up rather than blocking a worker slot indefinitely.
+LLM_RETRY_ATTEMPTS = 3
+LLM_RETRY_BASE_DELAY_S = 1.0
+
+
+class TransientCallFailed(Exception):
+    """Every attempt failed. `attempts` and the chained `__cause__` (the last underlying
+    exception) are what classify_source/curate_source/_resolve_merge's except blocks read
+    to fill in `ingestion_log`'s "attempt count and failure context" (03 §1)."""
+
+    def __init__(self, attempts: int):
+        super().__init__(f"exhausted {attempts} attempts")
+        self.attempts = attempts
+
+
+async def _retry_transient(fn):
+    """Retry an external call with exponential backoff — wraps only the three real LLM
+    calls below (`call_model`/`call_curator_model`/`call_merge_model`), never the generic
+    `call`/`workspace` parameters callers inject, so the test suite's fakes stay a single,
+    fast, deterministic call. Retries on any exception rather than a specific provider's
+    error types: Pydantic AI abstracts the provider (08 §2), so pinning to e.g. OpenAI's
+    `RateLimitError` would be brittle across providers and isn't asked for anywhere in
+    spec/ — a permanent failure just costs a few wasted attempts before giving up, same as
+    a transient one exhausting its budget."""
+    for attempt in range(1, LLM_RETRY_ATTEMPTS + 1):
+        try:
+            return await fn()
+        except Exception as exc:
+            if attempt == LLM_RETRY_ATTEMPTS:
+                raise TransientCallFailed(attempt) from exc
+            delay = LLM_RETRY_BASE_DELAY_S * 2 ** (attempt - 1)
+            logger.warning(
+                "transient call failure (attempt %d/%d): %s — retrying in %.1fs",
+                attempt,
+                LLM_RETRY_ATTEMPTS,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+
+def _failure_detail(step: str, exc: Exception) -> dict:
+    """Shared shape for the `error` transition's detail (03 §1) — `attempts` only appears
+    when a `TransientCallFailed` really did retry; a test's directly-injected failure (no
+    retry wrapper involved) keeps the plain `{"step", "error"}` shape it always has."""
+    detail = {"step": step, "error": type(exc.__cause__ or exc).__name__}
+    if isinstance(exc, TransientCallFailed):
+        detail["attempts"] = exc.attempts
+    return detail
+
 # 09 §6's SCHEMA.md default, used when the workspace sets no threshold.
 DEFAULT_MIN_CONFIDENCE = 0.75
 
@@ -59,7 +114,8 @@ class ClassifierCall(Protocol):
 async def call_model(
     *, model: str, text: str, filename: str, document_types: list[str]
 ) -> classify.ClassificationResult:
-    """Real Classifier call via Pydantic AI (08 §2)."""
+    """Real Classifier call via Pydantic AI (08 §2). Transient failures retried with
+    backoff (03 §1, `_retry_transient`) — only an exhausted run propagates."""
     from pydantic_ai import Agent
 
     agent = Agent(
@@ -72,7 +128,7 @@ async def call_model(
             "ambiguous.\n\nTaxonomy: " + ", ".join(document_types)
         ),
     )
-    result = await agent.run(f"Filename: {filename}\n\n{text}")
+    result = await _retry_transient(lambda: agent.run(f"Filename: {filename}\n\n{text}"))
     return result.output
 
 
@@ -124,7 +180,7 @@ async def classify_source(
             source=source,
             to_state=PipelineState.error,
             actor="system:classifier",
-            detail={"step": "classify", "error": type(exc).__name__},
+            detail=_failure_detail("classify", exc),
         )
         return PipelineState.error
 
@@ -538,7 +594,7 @@ async def _resolve_merge(
             source=source,
             to_state=PipelineState.error,
             actor=actor,
-            detail={"step": "merge", "error": type(exc).__name__},
+            detail=_failure_detail("merge", exc),
         )
         return PipelineState.error
 
@@ -607,7 +663,8 @@ class CuratorCall(Protocol):
 async def call_curator_model(
     *, model: str, source_text: str, filename: str, existing_titles: list[str]
 ) -> curate.CuratedContent:
-    """Real Curator call via Pydantic AI (08 §2)."""
+    """Real Curator call via Pydantic AI (08 §2). Transient failures retried with backoff
+    (03 §1, `_retry_transient`) — only an exhausted run propagates."""
     from pydantic_ai import Agent
 
     catalog = "\n".join(f"- {t}" for t in existing_titles) or "(none yet)"
@@ -624,7 +681,7 @@ async def call_curator_model(
             f"Existing concept/entity pages in this workspace:\n{catalog}"
         ),
     )
-    result = await agent.run(f"Filename: {filename}\n\n{source_text}")
+    result = await _retry_transient(lambda: agent.run(f"Filename: {filename}\n\n{source_text}"))
     return result.output
 
 
@@ -639,7 +696,9 @@ class MergeCall(Protocol):
 async def call_merge_model(
     *, model: str, existing_body: str, new_source_text: str, filename: str
 ) -> curate.MergedPage:
-    """Real merge call via Pydantic AI — 03 §4's `merge` duplicate resolution."""
+    """Real merge call via Pydantic AI — 03 §4's `merge` duplicate resolution. Transient
+    failures retried with backoff (03 §1, `_retry_transient`) — only an exhausted run
+    propagates."""
     from pydantic_ai import Agent
 
     agent = Agent(
@@ -654,9 +713,11 @@ async def call_merge_model(
             "change summary noting that this update came from a merge."
         ),
     )
-    result = await agent.run(
-        f"Existing page body:\n\n{existing_body}\n\n---\n\n"
-        f"Newly submitted document ({filename}):\n\n{new_source_text}"
+    result = await _retry_transient(
+        lambda: agent.run(
+            f"Existing page body:\n\n{existing_body}\n\n---\n\n"
+            f"Newly submitted document ({filename}):\n\n{new_source_text}"
+        )
     )
     return result.output
 
@@ -699,7 +760,7 @@ async def curate_source(
             source=source,
             to_state=PipelineState.error,
             actor="system:curator",
-            detail={"step": "curate", "error": type(exc).__name__},
+            detail=_failure_detail("curate", exc),
         )
         return PipelineState.error
 

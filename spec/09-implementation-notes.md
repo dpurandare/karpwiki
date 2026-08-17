@@ -1478,5 +1478,73 @@ containers within seconds.
 literally true end-to-end, not just modeled as explicit-call stand-ins (09 §21's original framing) —
 no wording changes needed, since both already described this as the eventual, intended behavior.
 
+## 36. Task Retry/Idempotency Semantics (Phase 2 Step 33)
+
+03 §1: transient failures (a rate-limited/timed-out LLM call) are "retried inside the worker with
+backoff. Only exhausted retries transition to error. ... The attempt count and failure context go
+in the ingestion_log entry's detail." No count or backoff schedule is specified anywhere in
+`spec/` — this step's implementation-readiness decision: 3 attempts, delay doubling from 1s.
+
+**Retry lives inside the three real LLM-calling functions, not around the pipeline functions that
+call them.** `ingestion.classify_source`/`curate_source`/`_resolve_merge` each wrap exactly one
+external call in a `try`/`except` that writes the `error` transition — and that whole function,
+not just the call, is not safe to retry as a unit: its first action is a `pipeline.transition` to
+`classifying`/etc., and retrying the *whole* function on a second pass would hit that transition
+again from a state that's already moved past `submitted`, raising `IllegalTransition`. So
+`_retry_transient` (new, `ingestion.py`) wraps only `call_model`/`call_curator_model`/
+`call_merge_model`'s own `agent.run(...)` — never the generic `call`/`workspace` parameters a
+caller (including every existing test) injects, so the ~300 existing tests that pass a
+single-shot fake `call` stay exactly as fast and deterministic as before. Retries on *any*
+exception rather than specific provider error types (`openai.RateLimitError` etc.) — Pydantic AI
+abstracts the provider (08 §2), so pinning to one SDK's exception hierarchy would be brittle, and
+nothing in `spec/` asks for that precision; a permanent failure just costs a few wasted attempts
+before giving up, same as a transient one exhausting its budget.
+
+**Attempt count reaches `ingestion_log` without widening classify_source/curate_source's
+control flow.** `_retry_transient` raises a `TransientCallFailed(attempts)` once exhausted,
+chained (`raise ... from exc`) onto the real underlying exception. A shared `_failure_detail(step,
+exc)` helper builds `{"step", "error"}` from `exc.__cause__ or exc` (so the *real* exception type
+still shows, not `TransientCallFailed` itself) and adds `"attempts"` only when the exception really
+is a `TransientCallFailed` — a test's directly-injected failure (no retry involved) keeps the exact
+`{"step", "error"}` shape two existing tests (`test_ingestion.py`, `test_curate_orchestration.py`)
+already assert on unchanged.
+
+**The other half of "retried inside the worker": a worker dying mid-task must not silently lose
+the job.** `tasks.py` now sets `task_acks_late = True` (a task is only acked once it finishes, not
+when a worker picks it up) and `task_reject_on_worker_lost = True`. No blanket `autoretry_for` on
+top of this: an *ordinary* exception surfacing from a task (an `IllegalTransition`, an
+`InvalidResolutionError`) is a real bug or a race, not a transient failure — retrying it would
+fail identically every time, for no benefit. What actually makes a redelivered/duplicate task
+execution *safe* rather than corrupting is `pipeline.TRANSITIONS`'s own guard, already built:
+re-entering a stage that already advanced past raises `IllegalTransition` loudly rather than
+silently duplicating work (`tasks._curate`'s `classified`/`ingesting` branch, 09 §35, already
+no-ops cleanly on the one redelivery shape that's actually still legal — resuming right where a
+crash left off). That existing guard, not a new idempotency-key/lock mechanism, is what step 33
+leans on.
+
+**A real gap found live, not by any test**: `acks_late` alone turned out to be close to a no-op.
+Verified by killing `worker-classification` (`docker kill`, not a graceful stop) mid-task, right
+in the middle of a live classify call's ~8s network wait, then restarting the container. The
+source sat at `submitted` for minutes afterward — Celery's Redis transport doesn't detect a
+dropped consumer and requeue immediately the way RabbitMQ does; it tracks unacked messages in a
+Redis hash and only restores one to its queue once `broker_transport_options.visibility_timeout`
+elapses, which **defaults to 3600 seconds**. Fixed by setting it to 600s explicitly (comfortably
+above the slowest real path today — `curate_source`'s several sequential LLM-touched page writes —
+while keeping genuine-crash recovery bounded to minutes rather than up to an hour). Re-verified
+with the timeout temporarily lowered to 15s for a fast repro: the same killed task's source reached
+`ingested` entirely on its own once the window elapsed and the restarted worker picked it back up
+— no test in the suite can exercise this (it needs a real process kill and a real broker), so this
+was a pure live-check finding, exactly the kind step 33's own framing exists to catch.
+
+**Explicitly out of scope**: a sweep to detect/recover a source stuck mid-pipeline with genuinely
+no task ever redelivered for it (e.g., a message lost before the broker ever recorded it unacked,
+or a permanent single-attempt task-level exception that isn't a transient LLM-call failure). That's
+operational tooling in the shape of 05 §3's Maintenance Advisor `reindex`-review-item pattern, not
+something `spec/03` §1's transient-retry language asks this step to build — flagged the same way
+`09` has flagged other track-2c-shaped gaps rather than silently building or silently skipping it.
+
+**Spec touch-point**: none — `03` §1's transient-retry paragraph is now implemented as described;
+no wording changes needed.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

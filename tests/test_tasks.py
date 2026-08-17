@@ -60,6 +60,17 @@ def test_queue_routing_registers_all_three_tasks():
     assert routes["karpwiki.indexing.*"]["queue"] == "indexing"
 
 
+def test_acks_late_is_set_so_a_crashed_worker_redelivers_the_task():
+    """Step 33: a worker process dying mid-task (OOM, SIGKILL) must not silently lose the
+    job — acks_late + reject_on_worker_lost means the broker redelivers it instead."""
+    assert tasks.app.conf.task_acks_late is True
+    assert tasks.app.conf.task_reject_on_worker_lost is True
+    # Live-verified (09 §36): acks_late alone is close to a no-op on the Redis transport
+    # without also tuning this down from its 3600s default — a killed-mid-task worker's job
+    # only came back once this was set to something in the minutes range, not left default.
+    assert tasks.app.conf.broker_transport_options["visibility_timeout"] == 600
+
+
 async def test_classify_task_routes_a_source(client, session, workspace, task_db):
     submitted = await client.post("/sources", headers=CONTRIBUTOR, data={"text": "runbook text"})
     source_id = uuid.UUID(submitted.json()["source_id"])

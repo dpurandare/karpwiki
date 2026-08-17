@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-17): steps 22–32 done, track 2a complete, track 2b in progress.** Phase 1 (steps 1–21,
+**Status (2026-08-17): steps 22–33 done, track 2a complete, track 2b in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -175,7 +175,16 @@ is a real Authenticator implementation using that pick, not a library search.
     manually driving the pipeline.
 33. Task retry/idempotency semantics — [03](03-ingestion-and-review-workflows.md) §1's "transient
     failures retried inside the worker" framing has assumed a real worker since Phase 1; this is
-    where one exists to do it.
+    where one exists to do it. **Done** — [`ingestion.py`](../src/karpwiki/ingestion.py)'s
+    `_retry_transient` wraps the three real LLM calls with backoff (3 attempts, doubling from 1s),
+    recording the attempt count in `ingestion_log` once exhausted;
+    [`tasks.py`](../src/karpwiki/tasks.py) sets `task_acks_late`/`task_reject_on_worker_lost` so a
+    crashed worker's task gets redelivered rather than silently lost. A real gap found only by a
+    live kill-and-restart check, not by any test: `acks_late` alone barely helps on the Redis
+    transport without also tuning `visibility_timeout` down from its 3600s default — see
+    [09](09-implementation-notes.md) §36 for the full story, the idempotency reasoning (the
+    transition table's own `IllegalTransition` guard, not a new lock), and what's explicitly
+    excluded (a stuck-job recovery sweep — Maintenance Advisor territory, track 2c).
 34. Write the install/scaling docs explicitly gated on this landing since Phase 1
     ([`phase1-tasklist.md`](phase1-tasklist.md)'s accepted-simplifications note).
 35. **Verify**: submit a document via the API with nothing manually driving the pipeline forward —

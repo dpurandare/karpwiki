@@ -35,6 +35,24 @@ app.conf.task_routes = {
     "karpwiki.indexing.*": {"queue": "indexing"},
     "karpwiki.maintenance.*": {"queue": "maintenance"},
 }
+# Step 33's other half of "retried inside the worker" (03 §1): a worker process that dies
+# mid-task (OOM, SIGKILL, container restart) must not silently lose the job — acks_late
+# means the broker only drops a task once it's actually finished, so a crash redelivers it
+# to another worker instead. No blanket `autoretry_for` on top of this: an ordinary
+# exception (an `IllegalTransition`, an `InvalidResolutionError`) is a real bug or a race,
+# not a transient failure, and retrying it would just fail identically every time — see 09
+# §36 for why the transition table's own guard, not a broker-level retry, is what makes a
+# redelivered/duplicate execution safe rather than corrupting.
+app.conf.task_acks_late = True
+app.conf.task_reject_on_worker_lost = True
+# acks_late is close to a no-op without this: Celery's Redis transport doesn't notice a
+# dropped consumer and requeue immediately (unlike RabbitMQ) — it tracks unacked messages
+# and only restores one to the queue after `visibility_timeout` elapses, which defaults to
+# **3600 seconds**. Found live (killed a worker mid-task, restarted it, and the task simply
+# never came back at the default) — 09 §36 has the full story. 600s comfortably covers the
+# slowest real path today (curate_source: several sequential LLM-touched page writes) with
+# margin, while keeping a genuine crash's recovery bounded to minutes, not up to an hour.
+app.conf.broker_transport_options = {"visibility_timeout": 600}
 
 
 @app.task(name="karpwiki.curation.ping")
