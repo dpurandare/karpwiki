@@ -1546,5 +1546,40 @@ something `spec/03` §1's transient-retry language asks this step to build — f
 **Spec touch-point**: none — `03` §1's transient-retry paragraph is now implemented as described;
 no wording changes needed.
 
+## 37. Install/Scaling Docs (Phase 2 Step 34)
+
+Phase 1's accepted-simplifications note gated this doc on real async dispatch existing — "'worker
+pools scale independently per job type' isn't a demonstrable property until a worker does
+something." Steps 30–33 made it demonstrable; this step writes it up, in the README rather than a
+new file (the README is already this repo's operational doc — quickstart, volumes, config — spec/
+is the vendor-neutral design, not a deployment runbook for this specific reference implementation).
+
+**Live-verified before writing the claim, not assumed from the design**: two `worker-classification`
+replicas (`docker compose up -d --scale worker-classification=2 worker-classification`), four
+documents dispatched in one burst — each replica's log showed it picked up exactly two, both
+finished correctly, no duplicate or dropped work. Celery's own consumer-group semantics over the
+shared Redis broker are what does this, not anything this codebase adds — worth confirming live
+anyway, since `-n classification@%h`'s worker name (`tasks.py`) depends on each replica getting a
+distinct Docker-assigned hostname, which was never exercised before this step. Also
+literally re-ran the exact `--scale worker-classification=3 worker-classification` line the README
+now prints, rather than writing a plausible-looking command that was never actually typed.
+
+**README also had two stale claims from before dispatch was wired, fixed while here**: the
+"`curl` alone won't take a document all the way to a published, searchable page" line (step 32
+made this false) and `spec/09-implementation-notes.md`'s section count frozen at Phase 1's close
+("24 sections") despite the file being 36 sections deep by now, both corrected — the kind of drift
+this project's own discipline treats as a bug to fix on sight, not scope creep.
+
+**What the new Scaling section deliberately does *not* claim**: Metadata DB partitioning and the
+optional cache ([06](06-api-mcp-and-scaling.md) §4, [02](02-storage-and-indexing.md) §6) are named
+in spec's scaling table but not built anywhere in this repo — flagged explicitly as `07` roadmap
+items rather than silently omitted, so a reader doesn't infer they exist from their absence. The
+Gateway's own multi-instance story is described but not load-tested (no real load balancer stood up
+here) — called out as the one claim in the section resting on architecture/reasoning rather than a
+live run, unlike the worker-pool claim next to it.
+
+**Spec touch-point**: none — this section documents this repo's current state against `06` §4's
+existing design; no spec wording changes needed.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-17): steps 22–33 done, track 2a complete, track 2b in progress.** Phase 1 (steps 1–21,
+**Status (2026-08-17): steps 22–34 done, track 2a complete, track 2b in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -186,7 +186,12 @@ is a real Authenticator implementation using that pick, not a library search.
     transition table's own `IllegalTransition` guard, not a new lock), and what's explicitly
     excluded (a stuck-job recovery sweep — Maintenance Advisor territory, track 2c).
 34. Write the install/scaling docs explicitly gated on this landing since Phase 1
-    ([`phase1-tasklist.md`](phase1-tasklist.md)'s accepted-simplifications note).
+    ([`phase1-tasklist.md`](phase1-tasklist.md)'s accepted-simplifications note). **Done** —
+    [`README.md`](../README.md)'s new "Scaling" section, grounded in
+    [06](06-api-mcp-and-scaling.md) §4, states plainly what's real (per-queue worker scaling,
+    live-verified with two replicas correctly splitting a burst of dispatched work) versus
+    roadmap-only (Metadata DB partitioning, the cache). Also fixed two stale README claims dispatch
+    wiring (step 32) had quietly made false. See [09](09-implementation-notes.md) §37.
 35. **Verify**: submit a document via the API with nothing manually driving the pipeline forward —
     confirm it reaches `ingested` and becomes searchable on its own, purely via workers, within a
     bounded time.
