@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-17): steps 22–30 done, track 2a complete, track 2b started.** Phase 1 (steps 1–21,
+**Status (2026-08-17): steps 22–31 done, track 2a complete, track 2b in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -156,7 +156,12 @@ is a real Authenticator implementation using that pick, not a library search.
     handled. Dispatch (who calls these) is still step 32; worker services are step 31.
 31. `docker-compose.yml` worker services, one per queue (classification, curation, indexing,
     maintenance — [06](06-api-mcp-and-scaling.md) §4, [`tasks.py`](../src/karpwiki/tasks.py)'s
-    `QUEUES`).
+    `QUEUES`). **Done** — [`Dockerfile`](../Dockerfile) (new — this repo's first), four services
+    in [`docker-compose.yml`](../docker-compose.yml) sharing one built image. Live dispatch through
+    the real broker to the real containers caught and fixed a real cross-event-loop bug in
+    [`tasks.py`](../src/karpwiki/tasks.py) (a second task in the same worker process crashed
+    reusing `db.engine`'s pool across a fresh `asyncio.run()` loop) — see
+    [09](09-implementation-notes.md) §34.
 32. Wire dispatch: submission enqueues classification; acceptance enqueues dedup then curate; a
     page write enqueues reindex — [02](02-storage-and-indexing.md) §7's "always automatic"
     reindex, finally literal rather than an explicit test/admin call.

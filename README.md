@@ -58,12 +58,14 @@ kind (including duplicate `merge`, `supersede`, and `keep_both`) and roll back a
 through the gateway. Phase 2+ scope (multi-workspace routing, connectors, the Maintenance Advisor,
 MCP, horizontal scaling) is [`07-additional-features-and-roadmap.md`](spec/07-additional-features-and-roadmap.md).
 
-Pipeline stages are not wired as automatic background jobs — the Celery queues from step 5 exist,
-but nothing enqueues onto them, and the same is true of the indexing lifecycle (step 18).
-Classification, dedup, curation, and reindexing are explicit function calls today, driven by the
-API layer's own request handling and by tests; see the task list's accepted-simplifications note
-for why that's deliberate rather than an oversight, and what gates building the install/scaling
-docs that assume it's solved.
+Pipeline stages are not yet wired as *automatic* background jobs — nothing in the API layer
+enqueues onto the classification/curation/indexing queues on its own (phase2-tasklist.md step 32).
+Real Celery tasks and worker containers exist now (steps 30–31: `karpwiki/tasks.py`,
+`docker compose up -d worker-classification worker-curation worker-indexing worker-maintenance`),
+so classification, dedup, curation, and reindexing *can* run as real background jobs today — a
+test, an admin action, or a manual `.delay()` call drives them, same as the explicit-function-call
+path always has. See the task list for what step 32 still needs to close the loop, and what gates
+building the install/scaling docs that assume it's solved.
 
 ```bash
 cp .env.example .env                     # then fill in OPENAI_API_KEY

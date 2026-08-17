@@ -17,7 +17,7 @@ from celery import Celery
 
 from . import ingestion, pipeline, search
 from .config import CELERY_BROKER_URL
-from .db import session_scope
+from .db import engine, session_scope
 from .models import PipelineState, RawSource, Workspace
 
 logger = logging.getLogger(__name__)
@@ -91,16 +91,31 @@ async def _reindex(page_id: uuid.UUID) -> None:
         await search.reindex(session, page_id)
 
 
+async def _run_and_release(coro) -> None:
+    """`db.engine`'s connection pool is a process-level singleton, but each `@app.task`
+    below gets its own `asyncio.run()` — a fresh event loop per call — and an asyncpg
+    connection can't outlive the loop it was opened on (09 §21's OpenSearch-client lesson,
+    same failure mode: a live dispatch through a real worker hit `RuntimeError: ... attached
+    to a different loop` on a second task in the same worker process). Disposing the pool at
+    the end of every call, not just after fork, means the next task always finds it empty
+    and reconnects fresh under its own loop — see 09 §34 for the full story and the
+    persistent-loop alternative it costs against."""
+    try:
+        await coro
+    finally:
+        await engine.dispose()
+
+
 @app.task(name="karpwiki.classification.classify_source")
 def classify_source(source_id: str) -> None:
-    asyncio.run(_classify(uuid.UUID(source_id)))
+    asyncio.run(_run_and_release(_classify(uuid.UUID(source_id))))
 
 
 @app.task(name="karpwiki.curation.curate_source")
 def curate_source(source_id: str) -> None:
-    asyncio.run(_curate(uuid.UUID(source_id)))
+    asyncio.run(_run_and_release(_curate(uuid.UUID(source_id))))
 
 
 @app.task(name="karpwiki.indexing.reindex")
 def reindex(page_id: str) -> None:
-    asyncio.run(_reindex(uuid.UUID(page_id)))
+    asyncio.run(_run_and_release(_reindex(uuid.UUID(page_id))))

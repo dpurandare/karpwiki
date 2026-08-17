@@ -1336,5 +1336,72 @@ bugs found).
 split; this section records how the three tasks were shaped and why dedup rides inside `curation`
 rather than getting a fourth.
 
+## 34. Worker Containers, and a Real Cross-Event-Loop Bug in the Live Check (Phase 2 Step 31)
+
+**New: this repo's first `Dockerfile`.** Nothing containerized the app itself before this step —
+`docker-compose.yml` ran only infra (Postgres/Redis/MinIO/OpenSearch), and the README's own
+install instructions run the app from a local venv. Step 31 needs a buildable image to give the
+four worker services (06 §4's per-queue pools: classification, curation, indexing, maintenance)
+something real to run, so a minimal `Dockerfile` (`python:3.14-slim`, matching the dev venv's
+tested version, installs the package, runs as a non-root user, default `CMD` is a plain `celery
+worker`) was added alongside it — flagged to the user as a real fork before building, since
+step 34 (install/scaling docs) will end up describing this image and it's worth getting the shape
+right rather than revising it later. `docker-compose.yml` gets one service per queue, each
+overriding `command:` with `-Q <queue>`; only `worker-classification` declares `build:` and the
+other three reference the same `karpwiki-worker:local` tag, so `docker compose build` doesn't
+rebuild the identical image four times. A `worker-maintenance` service exists even though no real
+task fills that queue yet (Maintenance Advisor is track 2c) — the tasklist names all four queues,
+and an idle consumer on an empty queue costs nothing. Container-network hostnames
+(`postgres`/`redis`/`minio`/`opensearch`) are set explicitly per service via an `x-worker-env`
+YAML anchor, since `.env`'s `localhost`-based URLs are for a host-run app talking to these same
+containers over published ports (02 §2's "every process group must agree on one path/URL" — inside
+the compose network that's the service hostnames, not `localhost`); only the LLM model strings and
+`OPENAI_API_KEY` are pulled from the project `.env` Compose auto-loads.
+
+**A real bug, caught only because this step's live check dispatched through the actual broker to
+the actual containers** (`tasks.classify_source.delay(...)` etc., not a direct call like step 30's
+live script): the *second* task processed by a given worker process crashed with `RuntimeError:
+Task ... got Future ... attached to a different loop`. Root cause: `db.engine` (`db.py`) is
+a process-level singleton whose connection pool holds asyncpg connections bound to whichever
+asyncio event loop was running when they were opened; every `@app.task` wrapper runs its own
+`asyncio.run(...)` (step 30 §33 — a fresh event loop *per call*), so a pooled connection opened
+during task 1's loop can't be reused during task 2's loop in the same long-lived worker process.
+This is the exact failure mode `09 §21`'s OpenSearch-client note already named and asked to watch
+for on "a second long-lived async external-service client" — it showed up for the DB engine
+instead, under Celery's prefork model rather than pytest's per-test event loop. **Step 30's own
+tests and live script never hit it**: both drive `_classify`/`_curate`/`_reindex` directly inside
+one shared `asyncio.run()` (one test function, one script's `main()`), so no loop boundary was ever
+crossed — only a real dispatch through independent per-task `asyncio.run()` calls exposes it. This
+is itself evidence for why 09's "live-verify before calling a step done" discipline exists as a
+per-step requirement, not just a phase-boundary one.
+
+**Fix**: `_run_and_release(coro)` in `tasks.py` wraps every task body and disposes `db.engine`'s
+pool in a `finally` block after every single call, not just after fork — the next task, whatever
+process handles it, always finds an empty pool and reconnects fresh under its own loop. Considered
+and rejected: disposing only in a `worker_process_init` post-fork signal handler, which fixes the
+*first* task in a fresh child but not the second (the pool is a process, not a fork, boundary
+here) — the bug reproduced with prefork's persistent child processes reusing the exact same
+`ForkPoolWorker` across three sequential classify calls in the live check, confirming a per-fork
+fix alone would have been insufficient. Also considered: one persistent event loop per worker
+process (via `worker_process_init`, reused for every task instead of a fresh `asyncio.run()` each
+time), which would let the pool's connections actually get reused across tasks instead of
+reconnecting every time — real, but more architecture than this step needs; a candidate to revisit
+if per-task reconnect latency ever matters at the concurrency step 33 introduces.
+
+**Live-verified**: after the fix, the same live-check script dispatched `classify_source.delay()`
+-> `curate_source.delay()` -> `reindex.delay()` through the real broker to the real containers
+(`docker compose up -d worker-classification worker-curation worker-indexing worker-maintenance`),
+polling `raw_source.pipeline_state`/`index_status.state` in Postgres for completion (no Celery
+result backend is configured — 09/`docker-compose.yml`'s own comment already says queued-job state
+is meant to be re-derivable from Postgres, so polling the DB rather than adding a backend is the
+existing intent, not a new decision). One document round-tripped end to end through three separate
+container processes, on the correct dedicated queue each time, and became searchable — the
+`worker-classification` container's log confirms the same forked child process handled three
+consecutive tasks cleanly post-fix. No further bugs found.
+
+**Spec touch-point**: `06` §5's deployment topology ("independently scalable container/process
+groups") now has its first real container in this repo, matching the shape that section describes;
+no wording changes needed there.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

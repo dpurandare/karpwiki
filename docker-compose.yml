@@ -1,3 +1,21 @@
+# Shared by all four worker services below — container-network hostnames rather than the
+# `localhost` ones `.env`/`.env.example` use for a host-run app talking to these same
+# containers via published ports (02 §2's note: every process group must agree on one
+# object-store path/URL, which inside the compose network means `minio:9000`, not
+# `localhost:9000`). The LLM settings and API key still come from the project `.env`
+# Compose auto-loads for `${...}` substitution.
+x-worker-env: &worker-env
+  KARPWIKI_DATABASE_URL: postgresql+asyncpg://karpwiki:karpwiki@postgres:5432/karpwiki
+  KARPWIKI_OBJECT_STORE_URL: s3://karpwiki/objectstore
+  AWS_ACCESS_KEY_ID: karpwiki
+  AWS_SECRET_ACCESS_KEY: karpwiki-dev-secret
+  AWS_ENDPOINT_URL: http://minio:9000
+  KARPWIKI_CELERY_BROKER_URL: redis://redis:6379/0
+  KARPWIKI_OPENSEARCH_URL: http://opensearch:9200
+  KARPWIKI_LLM_CLASSIFIER_MODEL: ${KARPWIKI_LLM_CLASSIFIER_MODEL:-openai:gpt-5-nano}
+  KARPWIKI_LLM_CURATOR_MODEL: ${KARPWIKI_LLM_CURATOR_MODEL:-openai:gpt-5-nano}
+  OPENAI_API_KEY: ${OPENAI_API_KEY}
+
 services:
   postgres:
     image: postgres:16
@@ -75,6 +93,65 @@ services:
       retries: 30
     volumes:
       - opensearch-data:/usr/share/opensearch/data
+
+  # Worker pool per job type (06 §4, phase2-tasklist.md step 31) — one process group per
+  # queue so classification/curation (LLM-bound) scale independently from indexing/
+  # maintenance (compute-bound), per tasks.py's QUEUES. Only `worker-classification`
+  # declares `build:`; the other three reuse the same tagged image rather than rebuilding
+  # it three more times, since all four run the identical `Dockerfile`.
+  worker-classification:
+    build: .
+    image: karpwiki-worker:local
+    command: celery -A karpwiki.tasks worker -Q classification --loglevel=info -n classification@%h
+    environment: *worker-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  worker-curation:
+    image: karpwiki-worker:local
+    command: celery -A karpwiki.tasks worker -Q curation --loglevel=info -n curation@%h
+    environment: *worker-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  worker-indexing:
+    image: karpwiki-worker:local
+    command: celery -A karpwiki.tasks worker -Q indexing --loglevel=info -n indexing@%h
+    environment: *worker-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      opensearch:
+        condition: service_healthy
+
+  # No real task fills this queue yet (Maintenance Advisor is track 2c, steps 36+) — the
+  # worker is here because step 31 asks for one per queue in `QUEUES`, and an idle
+  # consumer on an empty queue is harmless.
+  worker-maintenance:
+    image: karpwiki-worker:local
+    command: celery -A karpwiki.tasks worker -Q maintenance --loglevel=info -n maintenance@%h
+    environment: *worker-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
 
 volumes:
   pgdata:
