@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-17): steps 22–27 done**, 2a in progress. Phase 1 (steps 1–21,
+**Status (2026-08-17): steps 22–28 done**, 2a in progress. Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -119,10 +119,17 @@ is a real Authenticator implementation using that pick, not a library search.
     was impossible to trigger before this step (nothing could previously change a page's
     `workspace_id`). Verified live against the real dev Postgres DB and real MinIO S3 (not the test
     suite's temp-dir object store) — see [09](09-implementation-notes.md) §30.
-28. `page_link` cross-reference parsing (carried forward from Phase 1's accepted-simplifications
-    note in [`phase1-tasklist.md`](phase1-tasklist.md)) — load-bearing now that cross-workspace
-    links ([01](01-architecture-and-data-model.md) §3) are possible, and feeds 2c's Orphan
-    Detector (step 39).
+28. **Done.** `page_link` cross-reference parsing
+    ([`page_links.py`](../src/karpwiki/page_links.py), wired into
+    `versioning.create_page`/`write_version`) — carried forward from Phase 1's
+    accepted-simplifications note in [`phase1-tasklist.md`](phase1-tasklist.md), now load-bearing
+    since cross-workspace links ([01](01-architecture-and-data-model.md) §3) are possible and it
+    feeds 2c's Orphan Detector (step 39). Same-workspace targets match `wiki_page.path` directly;
+    cross-workspace targets use `/{workspace_id}/{path}`, matching `objectstore.py`'s existing
+    fully-qualified-path convention — the one concrete precedent for what `01` §6's
+    "fully-qualified workspace-relative path" phrasing means. Parsing runs synchronously on every
+    version write (cheap — no LLM call), not as an explicit-call lifecycle like reindexing. See
+    [09](09-implementation-notes.md) §31.
 29. **Verify**: two documents of different `document_type`s route to different workspaces with no
     workspace named in the submission; one search query returns ranked results merged from both;
     a taxonomy bulk-move relocates a batch of pages/sources with per-batch progress.

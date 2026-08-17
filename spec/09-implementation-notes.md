@@ -1196,5 +1196,62 @@ object-store prefix) — reused rather than duplicated, so `bulk_move.py` import
 this note records what "the set" concretely means given the schema, the module/API commit-boundary
 split, and the OpenSearch cleanup gap found and closed.
 
+## 31. `page_link` Parsing — What "Fully-Qualified Workspace-Relative" Means (Phase 2 Step 28)
+
+`01` §6 defines the link convention but not its exact syntax: "Cross-references use standard
+markdown links; links that target another workspace are written as fully-qualified
+workspace-relative paths." Two concrete choices this step had to make, neither spec'd literally:
+
+**Same-workspace target = an exact `wiki_page.path` match.** `[text](concepts/foo.md)` resolves
+against `WikiPage.path` within the linking page's own `workspace_id`, string-for-string — no
+directory-relative resolution (`../`, etc.), since pages aren't served from an actual filesystem
+tree a browser or renderer would resolve relative links against; `path` is just a flat identifying
+string per workspace (`01` §5).
+
+**Cross-workspace target = `/{workspace_id}/{path}`.** No other convention for "fully-qualified
+workspace-relative" exists anywhere in the spec, but this codebase already has exactly one
+precedent for what a fully-qualified per-workspace path looks like:
+`objectstore.py`'s `/{workspace_id}/sources/{source_id}/{filename}` and
+`/{workspace_id}/diffs/{version_id}.diff` (`02` §2, `09` §7). Reused the identical shape rather than
+inventing a second convention: `/{workspace_id}/{page.path}`.
+
+**Parsed automatically inside every version write, not as a separate explicit-call lifecycle.**
+Unlike reindexing (`09` §18, deliberately explicit/deferred because it's LLM-adjacent-cost), `02`
+§3 says these rows are "(re)written ... whenever a page's cross-references are parsed during a
+write" — read as synchronous-with-the-write, and cheap enough (a regex plus a handful of
+point lookups, no LLM call) to just do inline. `page_links.sync` runs inside both
+`versioning.create_page` and `write_version`, alongside the existing `_mark_stale` call —
+`rollback` and `bulk_move`'s page re-home (`09` §30) both go through `write_version`, so they pick
+this up automatically with no extra wiring.
+
+**Delete-then-reinsert per write, mirroring `search.index_page`'s existing pattern for `page_index`.**
+A version's outbound links fully replace whatever the previous version pointed to; there's no
+"unchanged link" case worth preserving row identity for.
+
+**Excluded on purpose**: image embeds (`![alt](src)`, via a negative lookbehind on `!`), footnote
+citations (`[^1]`, which have no `(...)` target at all so the pattern never matches them), and
+reference-style links (`[text][ref]` + a separate `[ref]: url` definition) — `01` §6 says "standard
+markdown links" without specifying inline vs. reference style; scoped to inline only since nothing
+in this codebase generates reference-style links today. A dangling link (target doesn't resolve to
+any `wiki_page.path`) or an external URL both simply produce no row — not an error, since citation
+footnotes and external references are legitimate content this table was never meant to track.
+
+**Read-time link resolution is out of scope — no caller exists yet.** `01` §3's table requires the
+gateway to re-check AuthZ against a link's *target* workspace before resolving it for a reader, but
+that's a concern for whatever endpoint serves rendered page content with links resolved, and
+`pages/{id}` get isn't built (`06` §1 — deferred to 2d). This step only keeps `page_link` rows
+correct; resolving them at read time is the future endpoint's job, the same "wire the caller when
+the caller exists" gap `09` §20 already accepted for the catalog-match boost.
+
+**No separate live-verification script.** Every other Phase 2 step needing one touched a backend
+pytest doesn't exercise identically to production (a real LLM call, OpenSearch's async client
+lifecycle, real S3 object moves against MinIO vs. the test suite's `file://` temp dir). This step
+touches only Postgres, and the test suite already runs against a real, unmocked Postgres instance
+with no behavioral gap from production — so the pytest run itself *is* the live verification here.
+
+**Spec touch-point**: none new — `01` §6 and `02` §3 already specify the behavior; this note records
+the two concrete syntax choices ("fully-qualified" and same-workspace path matching) and the
+automatic-not-explicit wiring decision.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)
