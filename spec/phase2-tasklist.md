@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-17): steps 22–23 done**, 2a in progress. Phase 1 (steps 1–21,
+**Status (2026-08-17): steps 22–24 done**, 2a in progress. Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -69,6 +69,14 @@ is a real Authenticator implementation using that pick, not a library search.
     ([03](03-ingestion-and-review-workflows.md) §3: "routes submissions to a workspace/document
     type") — the routing this track is named for. Today `classify_source`/`resolve_classification`
     both take one `workspace` param the caller already picked.
+    **Done** — [`document_types.py`](../src/karpwiki/document_types.py) (`list_active`,
+    `workspace_for_type`), [`ingestion.py`](../src/karpwiki/ingestion.py) (`classify_source`/
+    `resolve_classification` no longer take a `workspace` parameter; they resolve it via the
+    taxonomy), [`api.py`](../src/karpwiki/api.py) (`ResolveRequest.workspace_id` removed —
+    the resolve endpoint derives and authorizes the target workspace from the chosen
+    `document_type`). Verified live against the real model: a taxonomy spanning two workspaces,
+    correctly routed with no workspace named anywhere in the call — see
+    [09](09-implementation-notes.md) §27.
 25. `GET /search` endpoint (`search.py` has no HTTP endpoint yet) + a `query_log` table
     ([02](02-storage-and-indexing.md) §5, retention per [09](09-implementation-notes.md) §8) —
     workspace resolution defaults to "all accessible," with an optional taxonomy pre-filter

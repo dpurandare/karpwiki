@@ -116,13 +116,13 @@ class ResolveRequest(BaseModel):
     """POST /review-items/{id}/resolve body (06 §1, 05 §1).
 
     `action` means different things per `kind`: for `submission` it's always
-    `"acknowledge"`; for `classification` it's the chosen `document_type`; for `duplicate`
-    it's one of `reject`/`keep_both`/`supersede`/`merge` (03 §4). `workspace_id` is
-    required only for `classification` — every other kind already has one, or none applies.
+    `"acknowledge"`; for `classification` it's the chosen `document_type` — the workspace
+    is derived from it via the taxonomy's routing table (phase2-tasklist.md step 24), not
+    supplied separately; for `duplicate` it's one of `reject`/`keep_both`/`supersede`/
+    `merge` (03 §4).
     """
 
     action: str
-    workspace_id: str | None = None
     note: str | None = None
 
 
@@ -410,7 +410,10 @@ def _register_routes(app: FastAPI) -> None:
     ):
         """Execute a resolution (06 §1, 05 §1) — action semantics depend on `kind`, see
         `ResolveRequest`. Admin-gated against the item's own workspace when it has one;
-        against any workspace the caller administers when it doesn't yet (09 §22)."""
+        against any workspace the caller administers when it doesn't yet (09 §22). A
+        `classification` resolution additionally needs admin in the workspace the chosen
+        `document_type` routes to (09 §27) — that workspace isn't known until `action` is
+        read, so it's checked as a second, more specific gate below."""
         item = await session.get(ReviewItem, review_id)
         if item is None:
             raise ApiError(404, "not_found", f"No review item {review_id}.")
@@ -426,31 +429,30 @@ def _register_routes(app: FastAPI) -> None:
         if not authorized:
             raise ApiError(403, "forbidden", "Resolving this review item requires the admin role.")
 
-        if idempotency_key:
-            replayed = await _replay(session, idempotency_key, principal, RESOLVE_ENDPOINT)
-            if replayed is not None:
-                response.headers["Idempotency-Replayed"] = "true"
-                return replayed
-
-        workspace: Workspace | None = None
-        if payload.workspace_id is not None:
+        if item.kind is ReviewKind.classification:
+            doc_type = await session.get(DocumentType, payload.action)
+            if doc_type is None:
+                raise ApiError(
+                    400, "invalid_request", f"{payload.action!r} is not a registered document type."
+                )
             if not await has_role(
                 session,
                 principal=principal,
-                workspace_id=payload.workspace_id,
+                workspace_id=doc_type.workspace_id,
                 required=Role.admin,
             ):
                 raise ApiError(
                     403,
                     "forbidden",
                     "Resolving into this workspace requires the admin role there.",
-                    {"workspace_id": payload.workspace_id},
+                    {"workspace_id": doc_type.workspace_id},
                 )
-            workspace = await session.get(Workspace, payload.workspace_id)
-            if workspace is None:
-                raise ApiError(
-                    400, "invalid_request", f"No workspace {payload.workspace_id!r}."
-                )
+
+        if idempotency_key:
+            replayed = await _replay(session, idempotency_key, principal, RESOLVE_ENDPOINT)
+            if replayed is not None:
+                response.headers["Idempotency-Replayed"] = "true"
+                return replayed
 
         try:
             state = await ingestion.resolve_review_item(
@@ -458,7 +460,6 @@ def _register_routes(app: FastAPI) -> None:
                 item=item,
                 action=payload.action,
                 actor=f"user:{principal.id}",
-                workspace=workspace,
                 note=payload.note,
             )
         except review.AlreadyResolvedError as exc:

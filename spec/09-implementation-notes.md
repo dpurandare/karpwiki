@@ -956,5 +956,48 @@ carried-forward gap, flagged here rather than silently built or silently skipped
 **Spec touch-point**: none — `06` §1 and `05` §7 already specify the operations; this note records
 the bootstrap-auth answer and the `schema_ref` scope boundary underneath them.
 
+## 27. Classifier Routing Against the Central Taxonomy (Phase 2 Step 24)
+
+`classify_source` and `resolve_classification` no longer take a `workspace` parameter. `03` §3
+assigns `document_type` from "the central taxonomy" (step 5) and resolves `document_type ->
+workspace_id` "via the taxonomy's routing table" (step 6) — Phase 1's single-workspace shortcut
+had the caller pick the workspace first and classify only against its slice, which is the
+opposite of what "routing" means once more than one workspace exists. `document_types.list_active`
+(the full central taxonomy, every type across every *active* workspace — `01` §3 excludes archived
+workspaces from ingestion routing) replaces `type_codes_for_workspace` at both call sites;
+`document_types.workspace_for_type` (a code -> its active workspace, or `None`) replaces the
+admin-supplied `workspace_id` in resolution.
+
+**Verified against the real model, not just stubs**: a taxonomy spanning two workspaces
+(`eng.runbook`/`eng.design-doc` under one, `policy.hr`/`policy.security` under another), a leave-
+policy document, `gpt-5-nano` correctly picked `policy.hr` and the source landed in the `policies`
+workspace with zero workspace named anywhere in the call — this is the behavior the whole step
+exists to prove, so a live run reading the actual resolved `workspace_id` mattered more than a
+stubbed assertion would have.
+
+**Gate-then-route, not route-then-gate, unlike `03` §3's literal step order.** The spec's steps run
+6 (resolve workspace) before 7 (confidence gate, "the workspace's configured threshold"), implying
+the threshold is workspace-specific. Per `09` §26, no workspace has a real threshold yet — every
+gate still uses the one hardcoded `DEFAULT_MIN_CONFIDENCE`. Since there's no per-workspace value to
+look up, resolving the workspace before the gate would only add a lookup with nothing yet to do
+with it, so the code still gates first (as Phase 1 did) and resolves the workspace only on
+acceptance. This becomes a real ordering question — and needs revisiting — once SCHEMA.md
+thresholds are real; noted here so it isn't mistaken for an oversight before then.
+
+**`resolve_classification`'s workspace-scoped admin check moved into `api.py`, ahead of the call.**
+`ResolveRequest.workspace_id` is gone — the field existed only so an admin could name the target
+workspace for a classification resolution, which the taxonomy table now answers on its own.
+Authorization still needs to happen *before* dispatch, though, and by that point `payload.action`
+(the chosen `document_type`) is all the endpoint has — so it looks up the `DocumentType` row
+itself, checks `has_role` against *its* `workspace_id`, and only then calls
+`ingestion.resolve_review_item`. This preserves the exact security property step 22/23's pattern
+already established (admin must hold the role in the specific workspace being written into, not
+just "admin somewhere") — it just derives that workspace from `action` instead of trusting a
+separate field a caller could otherwise point anywhere.
+
+**Spec touch-point**: none — `03` §3 already specified this routing; this note records why the
+gate still runs before workspace resolution (tied to `09` §26's still-open SCHEMA.md gap) and how
+resolution's authorization was re-derived without an admin-supplied `workspace_id`.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

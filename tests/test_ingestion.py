@@ -46,7 +46,7 @@ async def test_accepted_classification_routes_and_relocates(session, workspace):
     staged = source.object_key
 
     state = await ingestion.classify_source(
-        session, source=source, workspace=workspace, call=_returns()
+        session, source=source, call=_returns()
     )
     await session.commit()
 
@@ -65,7 +65,7 @@ async def test_the_deterministic_pre_step_runs_before_the_model(session, workspa
         session, filename="payments-api.json", payload=b'{"name": "payments-api", "version": "2.1"}'
     )
     await ingestion.classify_source(
-        session, source=source, workspace=workspace, call=_returns(confidence=0.4)
+        session, source=source, call=_returns(confidence=0.4)
     )
     await session.commit()
 
@@ -82,7 +82,7 @@ async def test_low_confidence_parks_the_source_unrouted(session, workspace):
     staged = source.object_key
 
     state = await ingestion.classify_source(
-        session, source=source, workspace=workspace, call=_returns(confidence=0.2)
+        session, source=source, call=_returns(confidence=0.2)
     )
     await session.commit()
 
@@ -99,7 +99,7 @@ async def test_low_confidence_creates_a_classification_review_item(session, work
     from karpwiki.models import ReviewItem, ReviewKind
 
     source = await _submitted(session)
-    await ingestion.classify_source(session, source=source, workspace=workspace, call=_returns(confidence=0.2))
+    await ingestion.classify_source(session, source=source, call=_returns(confidence=0.2))
     await session.commit()
 
     result = await session.execute(
@@ -117,7 +117,7 @@ async def test_a_successful_classification_creates_no_review_item(session, works
     from karpwiki.models import ReviewItem
 
     source = await _submitted(session)
-    await ingestion.classify_source(session, source=source, workspace=workspace, call=_returns())
+    await ingestion.classify_source(session, source=source, call=_returns())
     await session.commit()
 
     result = await session.execute(
@@ -132,7 +132,6 @@ async def test_a_disagreement_parks_the_source_with_both_candidates(session, wor
     await ingestion.classify_source(
         session,
         source=source,
-        workspace=workspace,
         call=_returns(label="eng.design-doc", confidence=0.99),
     )
     await session.commit()
@@ -147,7 +146,7 @@ async def test_a_model_failure_lands_on_error(session, workspace):
     """0.5's outcome: an exhausted Classifier call is representable."""
     source = await _submitted(session)
     state = await ingestion.classify_source(
-        session, source=source, workspace=workspace, call=_raises(TimeoutError("upstream"))
+        session, source=source, call=_raises(TimeoutError("upstream"))
     )
     await session.commit()
 
@@ -160,7 +159,7 @@ async def test_the_summary_is_recorded_for_duplicate_detection(session, workspac
     """03 §4 runs the summary as its near-match query, so it has to survive the step."""
     source = await _submitted(session)
     await ingestion.classify_source(
-        session, source=source, workspace=workspace, call=_returns(summary="Restarts the worker.")
+        session, source=source, call=_returns(summary="Restarts the worker.")
     )
     await session.commit()
 
@@ -171,7 +170,7 @@ async def test_the_summary_is_recorded_for_duplicate_detection(session, workspac
 async def test_history_records_every_step_of_the_attempt(session, workspace):
     source = await _submitted(session)
     await ingestion.classify_source(
-        session, source=source, workspace=workspace, call=_returns()
+        session, source=source, call=_returns()
     )
     await session.commit()
 

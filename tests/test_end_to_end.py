@@ -72,7 +72,7 @@ async def test_a_submitted_document_becomes_a_published_cited_page(session, clie
     assert status.json()["label"] == "processing"
 
     source = await session.get(RawSource, source_id)
-    await ingestion.classify_source(session, source=source, workspace=workspace, call=_classifies_as())
+    await ingestion.classify_source(session, source=source, call=_classifies_as())
     assert source.pipeline_state is PipelineState.classified
 
     state = await ingestion.check_duplicates(session, source=source, summary="a runbook")
@@ -111,7 +111,7 @@ async def test_low_confidence_ends_in_a_review_item_not_a_page(session, client, 
     source = await session.get(RawSource, source_id)
 
     state = await ingestion.classify_source(
-        session, source=source, workspace=workspace, call=_classifies_as(confidence=0.1)
+        session, source=source, call=_classifies_as(confidence=0.1)
     )
     await session.commit()
 
@@ -138,14 +138,14 @@ async def test_a_duplicate_ends_in_a_review_item_not_a_second_page(session, clie
     first = await client.post("/sources", headers=CONTRIBUTOR, data={"text": body})
     first_id = uuid.UUID(first.json()["source_id"])
     first_source = await session.get(RawSource, first_id)
-    await ingestion.classify_source(session, source=first_source, workspace=workspace, call=_classifies_as())
+    await ingestion.classify_source(session, source=first_source, call=_classifies_as())
     await ingestion.check_duplicates(session, source=first_source, summary="a runbook")
     await ingestion.curate_source(session, source=first_source, workspace=workspace, call=_curates_as())
 
     second = await client.post("/sources", headers=CONTRIBUTOR, data={"text": body})
     second_id = uuid.UUID(second.json()["source_id"])
     second_source = await session.get(RawSource, second_id)
-    await ingestion.classify_source(session, source=second_source, workspace=workspace, call=_classifies_as())
+    await ingestion.classify_source(session, source=second_source, call=_classifies_as())
     state = await ingestion.check_duplicates(session, source=second_source, summary="a runbook")
     await session.commit()
 
@@ -172,7 +172,7 @@ async def test_a_rejected_source_ends_with_no_page_at_all(session, client, works
     )
     source_id = uuid.UUID(submitted.json()["source_id"])
     source = await session.get(RawSource, source_id)
-    await ingestion.classify_source(session, source=source, workspace=workspace, call=_classifies_as())
+    await ingestion.classify_source(session, source=source, call=_classifies_as())
     await ingestion.check_duplicates(session, source=source, summary="x", ingestion_policy="gated")
 
     state = await ingestion.reject_source(session, source=source, reason="not relevant to this wiki")

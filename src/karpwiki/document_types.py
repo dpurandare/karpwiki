@@ -9,7 +9,7 @@ see `models.DocumentType`'s docstring for why.
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import DocumentType
+from .models import DocumentType, Workspace, WorkspaceStatus
 
 
 class DuplicateTypeCodeError(ValueError):
@@ -49,6 +49,33 @@ async def list_for_workspaces(
         .order_by(DocumentType.workspace_id, DocumentType.type_code)
     )
     return list(result.scalars())
+
+
+async def list_active(session: AsyncSession) -> list[DocumentType]:
+    """03 §3's central taxonomy: every type across every *active* workspace — an archived
+    workspace is "excluded from... ingestion routing" (01 §3), so its types don't appear
+    here even though the rows still exist. This is what the Classifier now routes against
+    (phase2-tasklist.md step 24), not one caller-selected workspace's slice."""
+    result = await session.execute(
+        select(DocumentType)
+        .join(Workspace, Workspace.workspace_id == DocumentType.workspace_id)
+        .where(Workspace.status == WorkspaceStatus.active)
+        .order_by(DocumentType.type_code)
+    )
+    return list(result.scalars())
+
+
+async def workspace_for_type(session: AsyncSession, *, type_code: str) -> Workspace | None:
+    """03 §3 step 6: resolve `document_type -> workspace_id` via the taxonomy's routing
+    table. `None` if the code isn't registered, or its workspace isn't active — either way
+    there's nowhere to route to."""
+    doc_type = await session.get(DocumentType, type_code)
+    if doc_type is None:
+        return None
+    workspace = await session.get(Workspace, doc_type.workspace_id)
+    if workspace is None or workspace.status is not WorkspaceStatus.active:
+        return None
+    return workspace
 
 
 async def type_codes_for_workspace(session: AsyncSession, *, workspace_id: str) -> list[str]:

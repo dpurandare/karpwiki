@@ -82,7 +82,7 @@ async def _ingest(session, client, workspace, *, text, **curator_overrides):
     source_id = uuid.UUID(submitted.json()["source_id"])
     source = await session.get(RawSource, source_id)
 
-    await ingestion.classify_source(session, source=source, workspace=workspace, call=_classifies_as())
+    await ingestion.classify_source(session, source=source, call=_classifies_as())
     await ingestion.check_duplicates(session, source=source, summary="a runbook")
     await ingestion.curate_source(
         session, source=source, workspace=workspace, call=_curates_as(**curator_overrides)
@@ -144,7 +144,7 @@ async def test_admin_resolves_a_low_confidence_classification_item(session, clie
     source_id = uuid.UUID(submitted.json()["source_id"])
     source = await session.get(RawSource, source_id)
     state = await ingestion.classify_source(
-        session, source=source, workspace=workspace, call=_classifies_as(confidence=0.1)
+        session, source=source, call=_classifies_as(confidence=0.1)
     )
     await session.commit()
     assert state is PipelineState.pending_review
@@ -155,7 +155,7 @@ async def test_admin_resolves_a_low_confidence_classification_item(session, clie
     resolved = await client.post(
         f"/review-items/{item['review_id']}/resolve",
         headers=ADMIN,
-        json={"action": "eng.runbook", "workspace_id": workspace.workspace_id},
+        json={"action": "eng.runbook"},
     )
     assert resolved.status_code == 200
     assert resolved.json()["pipeline_state"] == PipelineState.classified.value
@@ -172,7 +172,7 @@ async def test_admin_resolves_a_duplicate_item(session, client, workspace):
     second = await client.post("/sources", headers=CONTRIBUTOR, data={"text": body})
     second_id = uuid.UUID(second.json()["source_id"])
     second_source = await session.get(RawSource, second_id)
-    await ingestion.classify_source(session, source=second_source, workspace=workspace, call=_classifies_as())
+    await ingestion.classify_source(session, source=second_source, call=_classifies_as())
     state = await ingestion.check_duplicates(session, source=second_source, summary="a runbook")
     await session.commit()
     assert state is PipelineState.pending_review

@@ -135,7 +135,7 @@ async def test_resolve_a_classification_item_via_the_endpoint(client, session, w
     r = await client.post(
         f"/review-items/{item.review_id}/resolve",
         headers=ADMIN,
-        json={"action": "eng.runbook", "workspace_id": workspace.workspace_id},
+        json={"action": "eng.runbook"},
     )
     assert r.status_code == 200
     assert r.json()["pipeline_state"] == PipelineState.classified.value
@@ -172,7 +172,7 @@ async def test_resolving_into_a_workspace_without_admin_there_is_forbidden(
     r = await client.post(
         f"/review-items/{item.review_id}/resolve",
         headers=ADMIN,
-        json={"action": "policy.hr", "workspace_id": other_workspace.workspace_id},
+        json={"action": "policy.hr"},
     )
     assert r.status_code == 403
 

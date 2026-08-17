@@ -80,11 +80,15 @@ async def classify_source(
     session: AsyncSession,
     *,
     source: RawSource,
-    workspace: Workspace,
     call: ClassifierCall = call_model,
     min_confidence: float | None = None,
 ) -> PipelineState:
     """Take a `submitted` source through classification to its next resting state.
+
+    No `workspace` parameter: 03 §3 routes against the full central taxonomy (every
+    `document_type` in every *active* workspace, phase2-tasklist.md step 24), resolving
+    `document_type -> workspace_id` only once a label is chosen — not from a workspace the
+    caller already picked, which was Phase 1's single-workspace simplification.
 
     Returns the state it ended in: `classified` when the gate accepts, `pending_review`
     when it refuses, `error` when the model call failed after the worker's retries.
@@ -101,9 +105,7 @@ async def classify_source(
     source.source_version = version
 
     text = payload.decode("utf-8", errors="replace")
-    types = await document_types.type_codes_for_workspace(
-        session, workspace_id=workspace.workspace_id
-    )
+    types = [dt.type_code for dt in await document_types.list_active(session)]
     lexical = classify.lexical_match(f"{source.filename}\n{text}", types)
 
     try:
@@ -159,6 +161,15 @@ async def classify_source(
             session, kind=ReviewKind.classification, subject_ref=str(source.source_id)
         )
         return PipelineState.pending_review
+
+    # 03 §3 step 6: document_type -> workspace_id via the taxonomy's routing table. `types`
+    # (just fetched from list_active) already constrained `routing.document_type` to a
+    # registered, active-workspace code, so this can't miss within one request/transaction.
+    workspace = await document_types.workspace_for_type(session, type_code=routing.document_type)
+    if workspace is None:
+        raise RuntimeError(
+            f"routing accepted {routing.document_type!r} but its workspace is no longer active"
+        )
 
     return await _accept_classification(
         session,
@@ -228,13 +239,14 @@ async def resolve_classification(
     session: AsyncSession,
     *,
     item: ReviewItem,
-    workspace: Workspace,
     document_type: str,
     actor: str,
 ) -> PipelineState:
     """Admin resolution of a `classification` review item (03 §3, §5): picking a
-    `document_type` is what resolves the workspace the automatic gate couldn't. Runs the
-    same accept path `classify_source` takes when it succeeds on its own."""
+    `document_type` resolves the workspace the same way `classify_source` itself does now
+    (phase2-tasklist.md step 24) — via the taxonomy's routing table, not an admin-supplied
+    `workspace_id`. Runs the same accept path `classify_source` takes when it succeeds on
+    its own."""
     if item.kind is not ReviewKind.classification:
         raise InvalidResolutionError(f"review item {item.review_id} is not a classification item")
 
@@ -243,12 +255,10 @@ async def resolve_classification(
         raise InvalidResolutionError(
             f"source for review item {item.review_id} is not awaiting classification"
         )
-    types = await document_types.type_codes_for_workspace(
-        session, workspace_id=workspace.workspace_id
-    )
-    if document_type not in types:
+    workspace = await document_types.workspace_for_type(session, type_code=document_type)
+    if workspace is None:
         raise InvalidResolutionError(
-            f"{document_type!r} is not in {workspace.workspace_id}'s document_types"
+            f"{document_type!r} is not a registered document type in an active workspace"
         )
 
     state = await _accept_classification(
@@ -548,14 +558,17 @@ async def resolve_review_item(
     item: ReviewItem,
     action: str,
     actor: str,
-    workspace: Workspace | None = None,
     note: str | None = None,
     merge_call: MergeCall | None = None,
 ) -> PipelineState | None:
     """Single entry point the gateway's resolve endpoint calls (05 §1) — dispatches to the
     kind-specific function above by `item.kind`, then leaves the generic bookkeeping
     (`review.resolve`) to whichever one it called. Returns the resulting pipeline state, or
-    `None` for `submission` (nothing pipeline-side happens)."""
+    `None` for `submission` (nothing pipeline-side happens).
+
+    No `workspace` parameter: since phase2-tasklist.md step 24, `resolve_classification`
+    derives the workspace from `action` (the chosen `document_type`) itself.
+    """
     if item.kind is ReviewKind.submission:
         if action != "acknowledge":
             raise InvalidResolutionError("submission items only accept action='acknowledge'")
@@ -567,10 +580,8 @@ async def resolve_review_item(
         raise InvalidResolutionError(f"no source for review item {item.review_id}")
 
     if item.kind is ReviewKind.classification:
-        if workspace is None:
-            raise InvalidResolutionError("classification resolution requires a workspace")
         return await resolve_classification(
-            session, item=item, workspace=workspace, document_type=action, actor=actor
+            session, item=item, document_type=action, actor=actor
         )
 
     if item.kind is ReviewKind.duplicate:

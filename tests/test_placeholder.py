@@ -68,7 +68,7 @@ async def _source_page(session, workspace, source):
 
 async def test_classification_creates_a_draft_placeholder(session, workspace):
     source = await _submitted(session)
-    await ingestion.classify_source(session, source=source, workspace=workspace, call=_classifies_as())
+    await ingestion.classify_source(session, source=source, call=_classifies_as())
     await session.commit()
 
     page = await _source_page(session, workspace, source)
@@ -82,7 +82,7 @@ async def test_no_placeholder_when_confidence_is_too_low(session, workspace):
     """No workspace is resolved on this path, so there is nothing to attach a page to."""
     source = await _submitted(session)
     await ingestion.classify_source(
-        session, source=source, workspace=workspace, call=_classifies_as(confidence=0.1)
+        session, source=source, call=_classifies_as(confidence=0.1)
     )
     await session.commit()
     assert source.workspace_id is None
@@ -93,7 +93,7 @@ async def test_curation_finalizes_the_same_page_not_a_new_one(session, workspace
     """The placeholder created at classification and the page the Curator finalizes must
     be the same row — otherwise there are two source pages for one raw_source."""
     source = await _submitted(session)
-    await ingestion.classify_source(session, source=source, workspace=workspace, call=_classifies_as())
+    await ingestion.classify_source(session, source=source, call=_classifies_as())
     await session.flush()
     placeholder = await _source_page(session, workspace, source)
     placeholder_id = placeholder.page_id
@@ -128,7 +128,7 @@ async def test_retrying_classification_does_not_duplicate_the_placeholder(sessio
     """03 §1 allows `pending_review -> classifying` (retry after error). If classification
     later succeeds on a retry, the placeholder must be updated in place, not duplicated."""
     source = await _submitted(session)
-    await ingestion.classify_source(session, source=source, workspace=workspace, call=_classifies_as())
+    await ingestion.classify_source(session, source=source, call=_classifies_as())
     await session.flush()
     first = await _source_page(session, workspace, source)
 
@@ -154,7 +154,7 @@ async def test_reject_flips_both_pipeline_state_and_raw_source_status(session, w
     """02 §3's retention axis and 09 §3's pipeline axis normally move independently;
     rejection is the one transition where both change together."""
     source = await _submitted(session)
-    await ingestion.classify_source(session, source=source, workspace=workspace, call=_classifies_as())
+    await ingestion.classify_source(session, source=source, call=_classifies_as())
     await ingestion.check_duplicates(session, source=source, summary="x", ingestion_policy="gated")
     assert source.pipeline_state is PipelineState.pending_review
 
@@ -168,7 +168,7 @@ async def test_reject_flips_both_pipeline_state_and_raw_source_status(session, w
 
 async def test_reject_finalizes_the_placeholder_with_the_reason(session, workspace):
     source = await _submitted(session)
-    await ingestion.classify_source(session, source=source, workspace=workspace, call=_classifies_as())
+    await ingestion.classify_source(session, source=source, call=_classifies_as())
     await ingestion.check_duplicates(session, source=source, summary="x", ingestion_policy="gated")
 
     await ingestion.reject_source(session, source=source, reason="duplicate of policy X")
@@ -185,7 +185,7 @@ async def test_rejecting_before_classification_resolved_does_not_crash(session, 
     there is no placeholder to finalize, and reject_source must handle that gracefully."""
     source = await _submitted(session)
     await ingestion.classify_source(
-        session, source=source, workspace=workspace, call=_classifies_as(confidence=0.1)
+        session, source=source, call=_classifies_as(confidence=0.1)
     )
     assert source.workspace_id is None
 

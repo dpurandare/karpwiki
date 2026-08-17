@@ -70,7 +70,7 @@ async def test_resolve_classification_assigns_workspace_and_classifies(session, 
     source, item = await _classification_pending_review(session)
 
     state = await ingestion.resolve_classification(
-        session, item=item, workspace=workspace, document_type="eng.runbook", actor="user:admin"
+        session, item=item, document_type="eng.runbook", actor="user:admin"
     )
     await session.commit()
 
@@ -89,7 +89,7 @@ async def test_resolve_classification_rejects_a_type_outside_the_taxonomy(sessio
     source, item = await _classification_pending_review(session)
     with pytest.raises(ingestion.InvalidResolutionError):
         await ingestion.resolve_classification(
-            session, item=item, workspace=workspace, document_type="not.a.real.type", actor="a"
+            session, item=item, document_type="not.a.real.type", actor="a"
         )
 
 
@@ -97,7 +97,7 @@ async def test_resolve_classification_rejects_the_wrong_kind(session, workspace)
     item = await review.create(session, kind=ReviewKind.submission, subject_ref="src-1")
     with pytest.raises(ingestion.InvalidResolutionError):
         await ingestion.resolve_classification(
-            session, item=item, workspace=workspace, document_type="eng.runbook", actor="a"
+            session, item=item, document_type="eng.runbook", actor="a"
         )
 
 
