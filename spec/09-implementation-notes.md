@@ -670,5 +670,36 @@ duplicate what the first already covers.
 **Spec touch-point** (applied): `02` §3's `review_item` row now marks `workspace_id` nullable; `03`
 §5 notes it may be unset at creation.
 
+## 20. Catalog-Match Boost Without an `index.md` Page
+
+`04` §3 defines the catalog-match boost as: each workspace's `index.md` catalog (one-line
+summaries per page, `01` §4) is itself indexed, and a query matching a page's catalog entry ranks
+that page higher. But no code builds an actual `index.md` wiki page — flagged as an accepted gap
+under phase1-tasklist.md step 16, deliberately carried forward to "when 1c or search needs it."
+Step 17 is that moment.
+
+**Decision**: realize the boost via `page_index`'s existing weight tiers rather than a separate
+catalog page and join. Every page already carries `description` — a required one-sentence summary
+(`01` §6) — which *is* the content an `index.md` entry would hold for that page (`01` §4: "one-line
+summaries per page"). `index_page` now indexes it as its own tier, between title (`'A'`) and body
+(`'D'`): `title 'A' | description 'B' | body 'D'`. A query matching the summary ranks the page above
+one that only matches in body text — the ranking effect `04` §3 describes — falling out of
+Postgres's own weighted `ts_rank_cd`, no separate catalog page, no match-to-target-page join.
+
+**Alternative considered**: build the real `index.md` page now (curate.py maintains one per
+workspace; search indexes it and maps a matched line back to its target page). Matches `04` §3
+literally, but needs markdown-link parsing to associate a matched catalog line with a page —
+`page_link` parsing, the other gap flagged alongside this one — and reaches into curation, past
+what a search-only step needs. Deferred; the gap stands, now scoped specifically to "no browsable
+catalog page exists," not "no catalog-match boost."
+
+**Consequence**: pages indexed before this change won't get the description-tier boost until
+reindexed (`index_page` fully replaces a page's row, so any future reindex — step 18's lifecycle,
+once it lands — picks it up automatically; no backfill migration was written since Phase 1 has no
+production data yet).
+
+**Spec touch-point**: none — `04` §3 already described the desired ranking behavior; this note
+records how it's realized without the literal `index.md` page the prose assumes.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

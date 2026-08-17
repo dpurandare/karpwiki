@@ -6,9 +6,9 @@ from this phase (per the roadmap, they're Phase 2+): multi-workspace routing, co
 Maintenance Advisor (staleness/orphan/dedup *background* detectors), full API+MCP surface,
 horizontal-scaling infra, fine-grained RBAC.
 
-**Status (2026-08-16): 1a and 1b complete** (steps 1–15), plus step 16 pulled forward from 1c —
-see the note at that step for why. 1c's remaining steps (17, 18, 19, 20, 21) are next. Implementation
-lives in [`src/karpwiki/`](../src/karpwiki/); see the [README](../README.md) for how to run it.
+**Status (2026-08-17): 1a and 1b complete** (steps 1–15), plus step 16 pulled forward from 1c.
+Step 17 is also done. 1c's remaining steps (18, 19, 20, 21) are next. Implementation lives in
+[`src/karpwiki/`](../src/karpwiki/); see the [README](../README.md) for how to run it.
 
 ## 0 — Readiness Items (settle before the step they block)
 
@@ -129,6 +129,9 @@ Accepted for Phase 1, no action needed — recorded so they aren't rediscovered 
 17. Implement single-stage lexical retrieval with catalog-match boost —
     [04](04-search-and-retrieval.md) §1, §3. (Skip §4 federated/cross-workspace merge — single
     workspace only.)
+    **Done** — [`search.py`](../src/karpwiki/search.py): the boost is realized as an indexing
+    weight tier (`description`, between title and body) rather than a separate `index.md` page
+    and join — see [09](09-implementation-notes.md) §20 for why, and the still-open gap it leaves.
 18. Implement the indexing lifecycle: write → `index_status` `pending`/`stale` → reindex job →
     `indexed` — [02](02-storage-and-indexing.md) §7–8.
 19. Build the admin console's Review Queue view (list/filter open `review_item`s, resolve

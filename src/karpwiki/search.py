@@ -54,15 +54,21 @@ async def index_page(session: AsyncSession, *, page: WikiPage, version: PageVers
             "INSERT INTO page_index (page_id, workspace_id, version_id, tsv) "
             "VALUES (:page_id, :workspace_id, :version_id, "
             "        setweight(to_tsvector(CAST(:config AS regconfig), :title), 'A') || "
+            "        setweight(to_tsvector(CAST(:config AS regconfig), :description), 'B') || "
             "        setweight(to_tsvector(CAST(:config AS regconfig), :body), 'D'))"
         ).bindparams(
             page_id=page.page_id,
             workspace_id=page.workspace_id,
             version_id=version.version_id,
             config=CONFIG,
-            # The title carries more signal than the body, and weighting it is what makes
-            # 04 §3's catalog-match boost expressible in the index rather than bolted on.
+            # The title carries more signal than the body. `description` (01 §6's required
+            # one-line frontmatter summary — the same content an index.md catalog entry
+            # would hold, 01 §4) sits between the two: this is 04 §3's catalog-match boost,
+            # realized as a weight tier rather than a separate catalog page + join, since no
+            # code yet materializes an actual index.md page to match against (flagged in
+            # phase1-tasklist.md's accepted-gaps note).
             title=str(version.frontmatter.get("title", "")),
+            description=str(version.frontmatter.get("description", "")),
             body=version.content,
         )
     )
@@ -84,7 +90,12 @@ async def search(
     limit: int = 20,
     include_drafts: bool = False,
 ) -> list[Hit]:
-    """Single-stage lexical retrieval (04 §1). No rerank, no synthesis, no LLM."""
+    """Single-stage lexical retrieval with catalog-match boost (04 §1, §3).
+
+    The boost is baked into `index_page`'s weighting (title > description > body), so
+    ranking here is a plain `ts_rank_cd` order — no separate boost step. No rerank, no
+    synthesis, no LLM.
+    """
     if not workspace_ids or not query.strip():
         return []
 

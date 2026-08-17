@@ -6,14 +6,23 @@ from karpwiki import search, versioning
 from karpwiki.models import IndexState, IndexStatus, IndexType, PageStatus, PageType, PageVersion
 
 
-async def _page(session, workspace, *, title, body, path=None, status=PageStatus.published):
+async def _page(
+    session,
+    workspace,
+    *,
+    title,
+    body,
+    description=None,
+    path=None,
+    status=PageStatus.published,
+):
     page = await versioning.create_page(
         session,
         workspace_id=workspace.workspace_id,
         path=path or f"concepts/{title.lower().replace(' ', '-')}.md",
         page_type=PageType.concept,
         title=title,
-        description=f"About {title}.",
+        description=description or f"About {title}.",
         date=date(2026, 8, 14),
         tags=["a", "b"],
         body=body,
@@ -49,6 +58,31 @@ async def test_title_matches_outrank_body_matches(session, workspace):
     hits = await search.search(session, query="jitter", workspace_ids=[workspace.workspace_id])
     assert len(hits) == 2
     assert hits[0].page_id == titled.page_id
+    assert hits[0].score > hits[1].score
+
+
+async def test_catalog_match_boosts_a_description_hit_over_a_body_only_hit(session, workspace):
+    """04 §3: a query matching a page's one-line catalog summary (`description`, the same
+    content an index.md entry would hold) should rank that page above a page that only
+    mentions the term in passing in its body."""
+    described = await _page(
+        session,
+        workspace,
+        title="Retry Backoff",
+        description="Covers exponential jitter for retrying failed requests.",
+        body="See the referenced RFC for details.",
+    )
+    await _page(
+        session,
+        workspace,
+        title="Payments Ledger",
+        description="Double-entry accounting rules.",
+        body="Occasionally a retry introduces jitter into settlement timing.",
+    )
+
+    hits = await search.search(session, query="jitter", workspace_ids=[workspace.workspace_id])
+    assert len(hits) == 2
+    assert hits[0].page_id == described.page_id
     assert hits[0].score > hits[1].score
 
 
