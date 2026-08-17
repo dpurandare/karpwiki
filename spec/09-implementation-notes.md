@@ -701,5 +701,41 @@ production data yet).
 **Spec touch-point**: none — `04` §3 already described the desired ranking behavior; this note
 records how it's realized without the literal `index.md` page the prose assumes.
 
+## 21. Indexing Lifecycle: Explicit, Not Dispatched
+
+`02` §7's state diagram marks `stale -> indexing` "always automatic," and `tasks.py`'s `indexing`
+Celery queue has stood empty since step 5 with a comment that its tasks "arrive in 1b and 1c" —
+1c is where step 18 lands. So implementing the lifecycle raised the same question every prior
+pipeline stage (classification, curation, dedup) already answered the same way: real Celery
+dispatch is a deliberately deferred, separate piece of work (the "async job wiring" gap
+`phase1-tasklist.md`'s accepted-simplifications note names, and what install/scaling docs are
+gated on).
+
+**Decision**: `search.py` gets the full state machine as plain functions —
+`reindex(session, page_id)` runs one page through `pending`/`stale -> indexing -> indexed`/`error`;
+`reindex_pending(session)` sweeps `pending_pages()` through it; `retry_errored(session)` moves
+`error` back to `pending`. Nothing calls these automatically — not from `versioning.create_page`/
+`write_version`, not from `tasks.py`. A page written via the normal ingestion path sits at
+`pending` until a test, an admin action, or (later) a real worker calls `reindex_pending`. This
+keeps every stage in the same state — explicit-call, no real async — rather than closing the gap
+for indexing alone while classification/curation/dedup stay as they are, which would leave the
+codebase's async story split without a good reason. Consequently, the "async job wiring" gap and
+the docs-gating decision it drives (`09` — see the note on install/scaling docs) are unchanged by
+this step; indexing's lifecycle is just one more thing that gap will need to pick up once tackled.
+
+**Alternative considered**: wire `karpwiki.indexing.reindex_page` as a real Celery task, dispatched
+from `create_page`/`write_version`. Matches `02` §7 literally and finally exercises the queue, but
+is materially more scope (retry/idempotency semantics, an eager-mode test harness) for one stage,
+and reopens a decision (deferring async wiring) the user had already settled for the rest of the
+pipeline — better revisited as one piece covering every stage than fragmented across steps.
+
+Also fixed in passing, since it's the same code path: `index_page` never set `last_indexed_at`
+despite the column existing — `02` §8 names it as part of what makes the pending/error backlog
+observable, so a page reaching `indexed` now stamps it.
+
+**Spec touch-point**: none — `02` §7-8 already describe this lifecycle; this note records that
+Phase 1 implements the state machine without the automatic dispatch the diagram assumes, same as
+every other stage so far.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

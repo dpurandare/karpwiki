@@ -7,10 +7,15 @@ the same `page_index` rows; neither uses embeddings, and neither calls an LLM.
 `workspace_id` is a mandatory filter on every query — 02 §4 partitions logically rather
 than physically so a federated search touches one index instead of merging incomparable
 scores across shards.
+
+Also owns the indexing lifecycle (02 §7-8): `pending`/`stale` -> `indexing` -> `indexed`/
+`error`, via `reindex`/`reindex_pending`/`retry_errored`.
 """
 
+import logging
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import bindparam, delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +37,8 @@ CONFIG = "english"
 # A similarity query is built from the candidate text's own lexemes. Long documents would
 # otherwise produce a tsquery with thousands of terms, which is slow and no more accurate.
 MAX_SIMILARITY_TERMS = 60
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -79,6 +86,7 @@ async def index_page(session: AsyncSession, *, page: WikiPage, version: PageVers
         session.add(status)
     status.state = IndexState.indexed
     status.last_content_version = version.version_id
+    status.last_indexed_at = datetime.now(UTC)
     await session.flush()
 
 
@@ -206,3 +214,56 @@ async def pending_pages(session: AsyncSession, limit: int = 100) -> list[uuid.UU
         .limit(limit)
     )
     return list(result.scalars())
+
+
+async def reindex(session: AsyncSession, page_id: uuid.UUID) -> IndexState:
+    """Run one page through the indexing lifecycle's transient `indexing` state (02 §7):
+    `pending`/`stale` -> `indexing` -> `indexed` on success, or -> `error` on failure.
+
+    02 §7 marks the `stale -> indexing` transition always-automatic — nothing dispatches
+    it yet (09 §21), so this is Phase 1's stand-in "reindex job": a caller (a test, an
+    admin action, or `reindex_pending`'s sweep below) invokes it explicitly.
+    """
+    status = await session.get(IndexStatus, (page_id, IndexType.fts))
+    if status is None or status.state not in (IndexState.pending, IndexState.stale):
+        raise ValueError(
+            f"page {page_id} is not pending/stale "
+            f"(state={status.state if status else None})"
+        )
+
+    status.state = IndexState.indexing
+    await session.flush()
+
+    page = await session.get(WikiPage, page_id)
+    version = await session.get(PageVersion, page.current_version_id)
+    try:
+        await index_page(session, page=page, version=version)
+    except Exception:
+        logger.exception("reindex failed for page %s", page_id)
+        status.state = IndexState.error
+        await session.flush()
+        return IndexState.error
+    return IndexState.indexed
+
+
+async def reindex_pending(session: AsyncSession, limit: int = 100) -> list[uuid.UUID]:
+    """Drain `pending_pages()` through `reindex()` — the sweep a scheduled or manually
+    triggered "reindex job" (02 §7) runs. Returns the page_ids that ended `indexed`."""
+    done = []
+    for page_id in await pending_pages(session, limit=limit):
+        if await reindex(session, page_id) is IndexState.indexed:
+            done.append(page_id)
+    return done
+
+
+async def retry_errored(session: AsyncSession, limit: int = 100) -> list[uuid.UUID]:
+    """02 §7: `error -> pending`, so a retried page re-enters `reindex_pending`'s sweep."""
+    result = await session.execute(
+        select(IndexStatus.page_id).where(IndexStatus.state == IndexState.error).limit(limit)
+    )
+    page_ids = list(result.scalars())
+    for page_id in page_ids:
+        status = await session.get(IndexStatus, (page_id, IndexType.fts))
+        status.state = IndexState.pending
+    await session.flush()
+    return page_ids

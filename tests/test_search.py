@@ -1,6 +1,8 @@
-"""Full-Text Index (02 §4, 04 §1-3) — phase1-tasklist step 16."""
+"""Full-Text Index (02 §4, 04 §1-3, §7-8) — phase1-tasklist steps 16-18."""
 
 from datetime import date
+
+import pytest
 
 from karpwiki import search, versioning
 from karpwiki.models import IndexState, IndexStatus, IndexType, PageStatus, PageType, PageVersion
@@ -162,3 +164,86 @@ async def test_reindexing_replaces_rather_than_duplicates(session, workspace):
 
     hits = await search.search(session, query="jitter", workspace_ids=[workspace.workspace_id])
     assert len(hits) == 1
+
+
+async def _unindexed_page(session, workspace, *, title="Retry Backoff", body="jitter"):
+    """A page left at index_status `pending` — versioning.create_page's default, before
+    anything has called search.index_page/reindex on it."""
+    return await versioning.create_page(
+        session,
+        workspace_id=workspace.workspace_id,
+        path=f"concepts/{title.lower().replace(' ', '-')}.md",
+        page_type=PageType.concept,
+        title=title,
+        description=f"About {title}.",
+        date=date(2026, 8, 14),
+        tags=["a", "b"],
+        body=body,
+        author="system:curator",
+        status=PageStatus.published,
+    )
+
+
+async def test_a_new_page_starts_pending(session, workspace):
+    page = await _unindexed_page(session, workspace)
+    status = await session.get(IndexStatus, (page.page_id, IndexType.fts))
+    assert status.state is IndexState.pending
+
+
+async def test_reindex_moves_a_pending_page_to_indexed_and_makes_it_findable(session, workspace):
+    page = await _unindexed_page(session, workspace, body="Uses jitter.")
+
+    assert await search.reindex(session, page.page_id) is IndexState.indexed
+
+    status = await session.get(IndexStatus, (page.page_id, IndexType.fts))
+    assert status.state is IndexState.indexed
+    assert status.last_indexed_at is not None
+
+    hits = await search.search(session, query="jitter", workspace_ids=[workspace.workspace_id])
+    assert [h.page_id for h in hits] == [page.page_id]
+
+
+async def test_reindex_rejects_a_page_that_is_not_pending_or_stale(session, workspace):
+    """02 §7's diagram only admits `indexing` from `pending`/`stale` — calling reindex
+    again on an already-`indexed` page is a misuse, not a no-op retry."""
+    page = await _unindexed_page(session, workspace)
+    await search.reindex(session, page.page_id)
+
+    with pytest.raises(ValueError):
+        await search.reindex(session, page.page_id)
+
+
+async def test_reindex_marks_a_failure_as_error(session, workspace, monkeypatch):
+    page = await _unindexed_page(session, workspace)
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(search, "index_page", _boom)
+
+    assert await search.reindex(session, page.page_id) is IndexState.error
+    status = await session.get(IndexStatus, (page.page_id, IndexType.fts))
+    assert status.state is IndexState.error
+
+
+async def test_reindex_pending_drains_every_pending_page(session, workspace):
+    a = await _unindexed_page(session, workspace, title="Alpha", body="jitter")
+    b = await _unindexed_page(session, workspace, title="Beta", body="jitter")
+
+    done = await search.reindex_pending(session)
+    assert set(done) == {a.page_id, b.page_id}
+    assert await search.pending_pages(session) == []
+
+    hits = await search.search(session, query="jitter", workspace_ids=[workspace.workspace_id])
+    assert {h.page_id for h in hits} == {a.page_id, b.page_id}
+
+
+async def test_retry_errored_reopens_a_page_for_the_next_sweep(session, workspace):
+    page = await _unindexed_page(session, workspace)
+    status = await session.get(IndexStatus, (page.page_id, IndexType.fts))
+    status.state = IndexState.error
+    await session.flush()
+
+    assert await search.retry_errored(session) == [page.page_id]
+    assert status.state is IndexState.pending
+    assert page.page_id in await search.pending_pages(session)
