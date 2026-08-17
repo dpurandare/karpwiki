@@ -1253,5 +1253,36 @@ with no behavioral gap from production — so the pytest run itself *is* the liv
 the two concrete syntax choices ("fully-qualified" and same-workspace path matching) and the
 automatic-not-explicit wiring decision.
 
+## 32. 2a Track Verification — No New Bugs, One Search Semantics Clarification (Phase 2 Step 29)
+
+Closes out track 2a. `tests/test_end_to_end_2a.py` ties steps 22–28 together through the real
+gateway with a mocked LLM (same convention as `09` §24's Phase 1 close): two documents route to
+different workspaces with no workspace named in either submission, one `GET /search` query returns
+merged ranked results from both, and a taxonomy bulk-move relocates a batch of pages with real
+per-batch progress (`BATCH_SIZE` forced to 1 so `batch_count` genuinely reflects multiple batches,
+not a single one trivially succeeding).
+
+A companion live script (not committed, same as `09` §24/§26's) ran the identical flow against the
+**real** LLM (`gpt-5-nano`, both classify and curate) and the real dev Postgres DB — two genuinely
+different documents (a Kubernetes runbook, an HR time-off policy), submitted with no workspace
+named. Unlike `09` §24 and §26, **this run found no new application bugs** — routing, curation,
+reindexing, federated search, and bulk-move all worked correctly against the real model and real
+data on the first attempt.
+
+**One clarification worth recording, surfaced by the live script's own first mistake, not an
+application bug**: `search.py`'s `websearch_to_tsquery` (`09` §28) ANDs bare terms by default — a
+multi-word query like `payments-worker time off` requires *all* those words in one document, and
+correctly returns nothing when two genuinely unrelated documents share no vocabulary. Confirming
+"one query merges results from both workspaces" against two topically unrelated real documents
+needs `websearch_to_tsquery`'s explicit `OR` syntax (`payments-worker OR "time off"`), not a
+concatenation of both documents' distinctive terms. This is pre-existing, correct, standard
+`websearch_to_tsquery` behavior from Phase 1 (`09` §28) — not something this step changed — recorded
+here because it wasn't written down anywhere before and a live check is exactly where an implicit
+assumption like this gets caught.
+
+**Spec touch-point**: none — this section is the closing verification record for 2a, not a new
+decision; `00` §7's traceability rows for multi-workspace routing, federated search, and the
+taxonomy bulk-move admin action are now met.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

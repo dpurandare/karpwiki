@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-17): steps 22–28 done**, 2a in progress. Phase 1 (steps 1–21,
+**Status (2026-08-17): steps 22–29 done, track 2a complete.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -130,9 +130,18 @@ is a real Authenticator implementation using that pick, not a library search.
     "fully-qualified workspace-relative path" phrasing means. Parsing runs synchronously on every
     version write (cheap — no LLM call), not as an explicit-call lifecycle like reindexing. See
     [09](09-implementation-notes.md) §31.
-29. **Verify**: two documents of different `document_type`s route to different workspaces with no
-    workspace named in the submission; one search query returns ranked results merged from both;
-    a taxonomy bulk-move relocates a batch of pages/sources with per-batch progress.
+29. **Done.** Verify: two documents of different `document_type`s route to different workspaces
+    with no workspace named in the submission; one search query returns ranked results merged from
+    both; a taxonomy bulk-move relocates a batch of pages/sources with per-batch progress.
+    [`tests/test_end_to_end_2a.py`](../tests/test_end_to_end_2a.py) proves this through the real
+    gateway with a mocked LLM; a companion live script repeated it against the real LLM (`gpt-5-
+    nano`) and the real dev Postgres DB — two genuinely unrelated real documents (a Kubernetes
+    runbook, an HR policy) routed correctly with no workspace named, one federated search query
+    returned merged results from both, and a bulk-move relocated 3 pages in 3 real batches. No new
+    application bugs found — see [09](09-implementation-notes.md) §32, including one search-
+    semantics clarification the live script's own first mistake surfaced (`websearch_to_tsquery`
+    ANDs bare terms; two topically unrelated documents need explicit `OR` syntax to both match one
+    query). **Track 2a (Multi-Workspace & Taxonomy Routing) is complete.**
 
 ## 2b — Real Async Job Dispatch
 
