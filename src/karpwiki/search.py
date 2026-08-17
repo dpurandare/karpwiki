@@ -1,8 +1,12 @@
 """Full-Text Index (02 §4) — the Platform's only query-time index.
 
-Serves the two workloads 02 §4 names: lexical search and retrieval (04 §1-3), and
-near-duplicate similarity for ingest-time duplicate detection (03 §4). Both run against
-the same `page_index` rows; neither uses embeddings, and neither calls an LLM.
+Serves the two workloads 02 §4 names: lexical search and retrieval (04 §1-3, §6-7 —
+filters and result provenance/citations, phase2-tasklist.md step 25), and near-duplicate
+similarity for ingest-time duplicate detection (03 §4). Both run against the same
+`page_index` rows; neither uses embeddings, and neither calls an LLM. Federated resolution
+(04 §4 — accessible-workspace fan-out, the taxonomy pre-filter) and `query_log` writes
+(04 §8) are gateway concerns, not this module's — `api.py`'s `/search` endpoint does that
+around a call to `search()` here.
 
 `workspace_id` is a mandatory filter on every query — 02 §4 partitions logically rather
 than physically so a federated search touches one index instead of merging incomparable
@@ -13,11 +17,12 @@ Also owns the indexing lifecycle (02 §7-8): `pending`/`stale` -> `indexing` -> 
 """
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
-from sqlalchemy import bindparam, delete, select, text
+from sqlalchemy import ARRAY, String, bindparam, delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import (
@@ -40,6 +45,11 @@ MAX_SIMILARITY_TERMS = 60
 
 logger = logging.getLogger(__name__)
 
+# 01 §6: citations are markdown footnote *definitions* — "[^1]: filename.pdf, p. 4" — at
+# the start of a line. Captures the marker and the definition text separately so callers
+# get the definition text without re-parsing the bracket syntax themselves.
+_FOOTNOTE_DEFINITION = re.compile(r"^\[\^([^\]]+)\]:\s*(.+)$", re.MULTILINE)
+
 
 @dataclass(frozen=True)
 class Hit:
@@ -47,6 +57,28 @@ class Hit:
     workspace_id: str
     path: str
     score: float
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    """04 §7's result-provenance shape — richer than `Hit`, which `find_similar` below
+    still returns unchanged since near-duplicate scoring needs none of this."""
+
+    page_id: uuid.UUID
+    workspace_id: str
+    path: str
+    page_type: str
+    title: str
+    score: float
+    excerpt: str
+    citations: tuple[str, ...]
+
+
+def _extract_citations(content: str) -> tuple[str, ...]:
+    return tuple(
+        f"[^{marker}]: {definition.strip()}"
+        for marker, definition in _FOOTNOTE_DEFINITION.findall(content)
+    )
 
 
 async def index_page(session: AsyncSession, *, page: WikiPage, version: PageVersion) -> None:
@@ -97,12 +129,19 @@ async def search(
     workspace_ids: list[str],
     limit: int = 20,
     include_drafts: bool = False,
-) -> list[Hit]:
-    """Single-stage lexical retrieval with catalog-match boost (04 §1, §3).
+    page_types: list[str] | None = None,
+    tags: list[str] | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> list[SearchResult]:
+    """Single-stage lexical retrieval with catalog-match boost and result provenance
+    (04 §1, §3, §6, §7).
 
     The boost is baked into `index_page`'s weighting (title > description > body), so
     ranking here is a plain `ts_rank_cd` order — no separate boost step. No rerank, no
-    synthesis, no LLM.
+    synthesis, no LLM. Filters (04 §6) apply before ranking; `page_type`/`tags`/`date`
+    read the frontmatter already stored on the indexed version, so no extra join or
+    denormalized column is needed for them.
     """
     if not workspace_ids or not query.strip():
         return []
@@ -110,35 +149,65 @@ async def search(
     statuses = [PageStatus.published.value] + (
         [PageStatus.draft.value] if include_drafts else []
     )
-    stmt = (
-        text(
-            "SELECT i.page_id, i.workspace_id, p.path, "
-            "       ts_rank_cd(i.tsv, q, 32) AS score "
-            "FROM page_index i "
-            "JOIN wiki_page p ON p.page_id = i.page_id, "
-            "     websearch_to_tsquery(CAST(:config AS regconfig), :query) q "
-            "WHERE i.workspace_id IN :workspace_ids "
-            "  AND p.status IN :statuses "
-            "  AND i.tsv @@ q "
-            "ORDER BY score DESC, i.page_id "
-            "LIMIT :limit"
+
+    filters = ["i.workspace_id IN :workspace_ids", "p.status IN :statuses", "i.tsv @@ q"]
+    params: dict = {
+        "config": CONFIG,
+        "query": query,
+        "workspace_ids": workspace_ids,
+        "statuses": statuses,
+        "limit": limit,
+    }
+    binds = [bindparam("workspace_ids", expanding=True), bindparam("statuses", expanding=True)]
+
+    if page_types:
+        filters.append("p.page_type IN :page_types")
+        params["page_types"] = page_types
+        binds.append(bindparam("page_types", expanding=True))
+    if tags:
+        # JSONB `?|` takes one array operand, not an expanded IN-style list of scalars —
+        # `expanding=True` (used above for workspace_ids/page_types) is the wrong shape
+        # here; an explicit ARRAY(String) type tells asyncpg to send a real array.
+        filters.append("pv.frontmatter -> 'tags' ?| :tags")
+        params["tags"] = tags
+        binds.append(bindparam("tags", type_=ARRAY(String)))
+    if date_from is not None:
+        filters.append("(pv.frontmatter ->> 'date')::date >= :date_from")
+        params["date_from"] = date_from
+    if date_to is not None:
+        filters.append("(pv.frontmatter ->> 'date')::date <= :date_to")
+        params["date_to"] = date_to
+
+    stmt = text(
+        "SELECT i.page_id, i.workspace_id, p.path, p.page_type, "
+        "       COALESCE(pv.frontmatter ->> 'title', '') AS title, "
+        "       ts_rank_cd(i.tsv, q, 32) AS score, "
+        "       ts_headline(CAST(:config AS regconfig), pv.content, q, "
+        "                   'MaxFragments=1, MinWords=15, MaxWords=35') AS excerpt, "
+        "       pv.content AS content "
+        "FROM page_index i "
+        "JOIN wiki_page p ON p.page_id = i.page_id "
+        "JOIN page_version pv ON pv.version_id = i.version_id, "
+        "     websearch_to_tsquery(CAST(:config AS regconfig), :query) q "
+        f"WHERE {' AND '.join(filters)} "
+        "ORDER BY score DESC, i.page_id "
+        "LIMIT :limit"
+    ).bindparams(*binds)
+
+    rows = await session.execute(stmt, params)
+    return [
+        SearchResult(
+            page_id=r.page_id,
+            workspace_id=r.workspace_id,
+            path=r.path,
+            page_type=r.page_type,
+            title=r.title,
+            score=float(r.score),
+            excerpt=r.excerpt,
+            citations=_extract_citations(r.content),
         )
-        .bindparams(
-            bindparam("workspace_ids", expanding=True),
-            bindparam("statuses", expanding=True),
-        )
-    )
-    rows = await session.execute(
-        stmt,
-        {
-            "config": CONFIG,
-            "query": query,
-            "workspace_ids": workspace_ids,
-            "statuses": statuses,
-            "limit": limit,
-        },
-    )
-    return [Hit(r.page_id, r.workspace_id, r.path, float(r.score)) for r in rows]
+        for r in rows
+    ]
 
 
 async def find_similar(

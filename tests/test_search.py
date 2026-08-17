@@ -17,16 +17,19 @@ async def _page(
     description=None,
     path=None,
     status=PageStatus.published,
+    page_type=PageType.concept,
+    tags=None,
+    page_date=None,
 ):
     page = await versioning.create_page(
         session,
         workspace_id=workspace.workspace_id,
         path=path or f"concepts/{title.lower().replace(' ', '-')}.md",
-        page_type=PageType.concept,
+        page_type=page_type,
         title=title,
         description=description or f"About {title}.",
-        date=date(2026, 8, 14),
-        tags=["a", "b"],
+        date=page_date or date(2026, 8, 14),
+        tags=tags or ["a", "b"],
         body=body,
         author="system:curator",
         status=status,
@@ -247,3 +250,71 @@ async def test_retry_errored_reopens_a_page_for_the_next_sweep(session, workspac
     assert await search.retry_errored(session) == [page.page_id]
     assert status.state is IndexState.pending
     assert page.page_id in await search.pending_pages(session)
+
+
+# --- result provenance (04 §7) and filters (04 §6) — phase2-tasklist.md step 25 -------
+
+
+async def test_result_carries_title_page_type_and_excerpt(session, workspace):
+    page = await _page(
+        session, workspace, title="Retry Backoff", body="Use exponential backoff and jitter."
+    )
+    hits = await search.search(session, query="jitter", workspace_ids=[workspace.workspace_id])
+    assert len(hits) == 1
+    assert hits[0].title == "Retry Backoff"
+    assert hits[0].page_type == "concept"
+    assert "jitter" in hits[0].excerpt.lower()
+
+
+async def test_result_carries_citations(session, workspace):
+    body = "Drain the queue, then restart. [^1]\n\n## Source\n\n[^1]: restart-runbook.pdf, p. 3"
+    await _page(session, workspace, title="Restart Runbook", body=body)
+    hits = await search.search(session, query="drain", workspace_ids=[workspace.workspace_id])
+    assert hits[0].citations == ("[^1]: restart-runbook.pdf, p. 3",)
+
+
+async def test_a_page_with_no_footnotes_has_no_citations(session, workspace):
+    await _page(session, workspace, title="No Citations", body="Just prose, no footnotes.")
+    hits = await search.search(session, query="prose", workspace_ids=[workspace.workspace_id])
+    assert hits[0].citations == ()
+
+
+async def test_page_type_filter(session, workspace):
+    await _page(session, workspace, title="A Concept", body="shared term", page_type=PageType.concept)
+    await _page(session, workspace, title="An Entity", body="shared term", page_type=PageType.entity)
+
+    hits = await search.search(
+        session, query="shared", workspace_ids=[workspace.workspace_id], page_types=["entity"]
+    )
+    assert [h.title for h in hits] == ["An Entity"]
+
+
+async def test_tags_filter_matches_any(session, workspace):
+    await _page(session, workspace, title="Ops Page", body="shared term", tags=["ops", "infra"])
+    await _page(session, workspace, title="Legal Page", body="shared term", tags=["legal", "compliance"])
+
+    hits = await search.search(
+        session, query="shared", workspace_ids=[workspace.workspace_id], tags=["ops"]
+    )
+    assert [h.title for h in hits] == ["Ops Page"]
+
+
+async def test_date_range_filter(session, workspace):
+    await _page(session, workspace, title="Old Page", body="shared term", page_date=date(2020, 1, 1))
+    await _page(session, workspace, title="New Page", body="shared term", page_date=date(2026, 1, 1))
+
+    hits = await search.search(
+        session,
+        query="shared",
+        workspace_ids=[workspace.workspace_id],
+        date_from=date(2025, 1, 1),
+    )
+    assert [h.title for h in hits] == ["New Page"]
+
+    hits = await search.search(
+        session,
+        query="shared",
+        workspace_ids=[workspace.workspace_id],
+        date_to=date(2021, 1, 1),
+    )
+    assert [h.title for h in hits] == ["Old Page"]

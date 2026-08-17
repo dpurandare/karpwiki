@@ -3,7 +3,8 @@
 Field lists follow 02 §3's conceptual table definitions; enum values follow the states
 defined in 01 §5, 02 §7, and 03 §1. Phase 1 covers the seven core tables plus
 `access_policy` (09 §15); `document_type` arrives with multi-workspace routing (phase2-
-tasklist.md step 22); `connector` arrives with the connector framework in Phase 2.
+tasklist.md step 22); `query_log` arrives with the search endpoint (step 25); `connector`
+arrives with the connector framework in Phase 2.
 """
 
 import enum
@@ -11,6 +12,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    ARRAY,
     DateTime,
     Enum,
     ForeignKey,
@@ -357,6 +359,28 @@ class PageIndex(Base):
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspace.workspace_id"))
     version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("page_version.version_id"))
     tsv: Mapped[str] = mapped_column(TSVECTOR)
+
+
+class QueryLog(Base):
+    """Every `search` call (04 §8, 02 §5): query text, principal, resolved workspaces, and
+    returned page IDs/scores. Feeds the Maintenance Advisor's orphan/low-traffic detector
+    (05 §2) once that exists. Retained 90 days then purged (09 §8) — `query_log.purge_older_than`
+    exists for that; nothing schedules it automatically yet, same as every other still-manual
+    maintenance job before the async layer (phase2-tasklist.md step 30+) is real.
+    """
+
+    __tablename__ = "query_log"
+
+    query_id: Mapped[uuid.UUID] = _uuid_pk()
+    principal: Mapped[str] = mapped_column(String(255), index=True)
+    query_text: Mapped[str] = mapped_column(Text)
+    resolved_workspaces: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
+    # [{"page_id": "<uuid>", "score": <float>}, ...] — a list, not a page_id[] + score[]
+    # pair, so each hit's fields stay together rather than relying on parallel-array indices.
+    results: Mapped[list[dict]] = mapped_column(JSONB, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.clock_timestamp(), index=True
+    )
 
 
 class IdempotencyRecord(Base):

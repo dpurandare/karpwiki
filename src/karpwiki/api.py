@@ -7,27 +7,42 @@ the API conventions of 09 §14), step 19 (05 §1's review queue: `review-items` 
 `review-items/{id}/resolve` — the first list endpoint, so it's also where cursor
 pagination, 09 §14, actually lands), step 20 (05 §6's Version Browser: `pages/{id}/
 versions` list/get/diff and `pages/{id}/rollback`), and phase2-tasklist.md steps 22
-(05 §7's document-type taxonomy CRUD: `document-types` list/create/update/delete) and 23
+(05 §7's document-type taxonomy CRUD: `document-types` list/create/update/delete), 23
 (`workspaces` create/update/archive/list/get, plus access-policy grant/revoke — 05 §7,
-06 §1, §3).
+06 §1, §3), and 25 (`GET /search` — federated resolution, the taxonomy pre-filter, and
+`query_log` writes are gateway concerns per 01 §2, so they live here around a call into
+`search.py` rather than in that module).
 
 Not implemented here, deliberately: the rate limiter is 07 §3, a later phase (phase2-
 tasklist.md step 48). `pages` get/list (06 §1's other row) isn't built either — out of this
 file's steps' citations so far, and version history/rollback only ever take a `page_id`
-path param, never a page-listing call to discover one.
+path param, never a page-listing call to discover one. Dedicated-index score normalization
+(04 §4) is step 26 — this endpoint only ever queries the one shared index.
 """
 
 import hashlib
 import uuid
+from datetime import date
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Form, Header, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, Form, Header, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import document_types, ingestion, objectstore, pipeline, review, versioning, workspaces
+from . import (
+    classify,
+    document_types,
+    ingestion,
+    objectstore,
+    pipeline,
+    query_log,
+    review,
+    search,
+    versioning,
+    workspaces,
+)
 from .auth import (
     Authenticator,
     Principal,
@@ -813,6 +828,94 @@ def _register_routes(app: FastAPI) -> None:
         await _admin_workspace(session, principal, workspace_id)
         await workspaces.revoke(session, workspace_id=workspace_id, principal=revoked_principal)
         await session.commit()
+
+    @app.get("/search")
+    async def search_endpoint(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        q: str,
+        workspace_id: Annotated[list[str] | None, Query()] = None,
+        page_type: Annotated[list[str] | None, Query()] = None,
+        tags: Annotated[list[str] | None, Query()] = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        include_drafts: bool = False,
+        limit: int = 20,
+    ):
+        """04 §1, §4-8: single-stage federated lexical search — any authenticated caller
+        (06 §1). Workspace resolution and the taxonomy pre-filter (04 §4, 01 §2's Workspace
+        Router) and the `query_log` write (04 §8) are gateway concerns handled here; the
+        retrieval itself is `search.search()`. Seeing drafts needs `contributor`, not just
+        `reader` — "elevated scope" per 04 §6 — so resolution uses a stricter role when
+        requested rather than filtering drafts out of a reader-scoped set after the fact.
+        """
+        required_role = Role.contributor if include_drafts else Role.reader
+        accessible = await any_workspace_with_role(
+            session, principal=principal, required=required_role
+        )
+
+        if workspace_id:
+            # Intersected with what the caller can access, never expanded (04 §4).
+            resolved = [w for w in workspace_id if w in accessible]
+        else:
+            resolved = await _taxonomy_prefilter(session, query=q, accessible=accessible)
+
+        results = await search.search(
+            session,
+            query=q,
+            workspace_ids=resolved,
+            limit=limit,
+            include_drafts=include_drafts,
+            page_types=page_type,
+            tags=tags,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+        await query_log.record(
+            session,
+            principal=principal.id,
+            query_text=q,
+            resolved_workspaces=resolved,
+            results=[{"page_id": str(r.page_id), "score": r.score} for r in results],
+        )
+        await session.commit()
+
+        return {"items": [_search_result_body(r) for r in results]}
+
+
+async def _taxonomy_prefilter(
+    session: AsyncSession, *, query: str, accessible: list[str]
+) -> list[str]:
+    """04 §4's optional pre-filter: only applies when the caller didn't already scope the
+    search explicitly (an accessible-workspace default, not a correction to an explicit
+    choice). Reuses the same lexical taxonomy lookup 03 §3 runs at ingest
+    (`classify.lexical_match`), here going from query text to a candidate workspace instead
+    of from a document to one. Never expands beyond `accessible`; falls back to it
+    unchanged on no confident match."""
+    if not accessible:
+        return accessible
+    active_types = [dt.type_code for dt in await document_types.list_active(session)]
+    lexical = classify.lexical_match(query, active_types)
+    if lexical is None:
+        return accessible
+    target = await document_types.workspace_for_type(session, type_code=lexical.label)
+    if target is None or target.workspace_id not in accessible:
+        return accessible
+    return [target.workspace_id]
+
+
+def _search_result_body(result: search.SearchResult) -> dict[str, Any]:
+    return {
+        "page_id": str(result.page_id),
+        "workspace_id": result.workspace_id,
+        "path": result.path,
+        "page_type": result.page_type,
+        "title": result.title,
+        "score": result.score,
+        "excerpt": result.excerpt,
+        "citations": list(result.citations),
+    }
 
 
 def _parse_enum(enum_cls, value: str, field: str):

@@ -999,5 +999,66 @@ separate field a caller could otherwise point anywhere.
 gate still runs before workspace resolution (tied to `09` §26's still-open SCHEMA.md gap) and how
 resolution's authorization was re-derived without an admin-supplied `workspace_id`.
 
+## 28. The Search Endpoint (Phase 2 Step 25)
+
+**`SearchResult` is a new type, not an extension of `Hit`.** `search.search()`'s old return type
+(`Hit`: `page_id`/`workspace_id`/`path`/`score`) is also `find_similar`'s return type, and
+near-duplicate scoring (`03` §4) needs none of `04` §7's provenance (title, `page_type`, excerpt,
+citations). Adding those fields to `Hit` would force `find_similar` to either populate data it
+doesn't need or carry them as always-empty optionals; a second frozen dataclass keeps each
+function's contract honest about what it actually returns. `search()`'s existing callers needed no
+changes — every field they used (`page_id`, `path`, `score`) still exists on the richer type.
+
+**Citations and excerpt come from one query, not a per-hit follow-up.** `page_index.version_id`
+already points at the exact indexed version, so joining `page_version` in the same statement gets
+`content` (for `ts_headline` and footnote parsing) and `frontmatter ->> 'title'` without an N+1.
+Citations are extracted in Python (`_extract_citations`, a regex over `[^N]: definition` lines —
+`01` §6's footnote convention) rather than in SQL, since Postgres has no primitive for "parse
+markdown footnote syntax."
+
+**`ts_headline` runs against the whole `page_version.content`, frontmatter included, not a
+body-only excerpt.** Stripping frontmatter first would need either a second column (schema change)
+or a Python-side split before a *second* SQL round-trip per hit — not worth it against the actual
+risk, which is small: `ts_headline` picks the highest-lexeme-density fragment, so it drifts into
+the YAML block only when a query term matches frontmatter (e.g. a tag) and nothing in the body,
+which is arguably still a reasonable excerpt to show. Noted as a deliberate simplification, not an
+oversight, in case a real query surfaces it as a UX problem worth the extra column later.
+
+**JSONB `?|` needs an explicit `ARRAY(String)` bind, not `expanding=True`.** The `tags` filter's
+`frontmatter -> 'tags' ?| :tags` takes one array operand; `expanding=True` (used for
+`workspace_ids`/`page_types`, both `IN (...)` clauses) instead unrolls the list into scalar
+placeholders, which `?|` can't accept — asyncpg raised `DataError` until the bind carried an
+explicit array type. `page_type`/`date_from`/`date_to` filters needed no equivalent fix.
+
+**The taxonomy pre-filter only runs when the caller didn't already scope the search.** `04` §4
+doesn't explicitly say whether the pre-filter applies to an explicit `workspace_id` list too, but
+auto-narrowing a search the caller already scoped themselves would silently second-guess an
+explicit choice — so `_taxonomy_prefilter` only executes in the "unscoped, defaults to everything
+accessible" branch, reusing `classify.lexical_match` (03 §3's own ingest-time function) run against
+query text instead of a document, then `document_types.workspace_for_type` to map the matched
+label to a workspace — the query-path mirror of step 24's ingest-path routing.
+
+**Draft visibility resolves a stricter workspace set up front, not a post-hoc filter.** `04` §6:
+"admins/API callers with elevated scope may include draft." Rather than resolving with `reader`
+and filtering draft rows after the fact (which would need to know, per row, whether *that*
+workspace individually grants the caller `contributor` — a second per-workspace check the simple
+`workspace_ids IN (...)` query shape doesn't naturally support), `include_drafts=True` resolves the
+accessible-workspace set with `contributor` required from the start. Simpler, and strictly more
+conservative — a caller only ever sees drafts in workspaces they could also submit to.
+
+**No cursor pagination for `/search`, unlike every other list endpoint (`09` §14, §22-23).**
+Ranked results aren't an append-ordered list a cursor was built for — the underlying data and
+ranking can both shift between page fetches, and typical search UX is "top-K, refine the query,"
+not deep pagination through thousands of scored hits. `limit` (default 20, `search()`'s existing
+default) is the only size control.
+
+**`query_log` is written unconditionally, including empty-result and zero-accessible-workspace
+searches** — `04` §8 says "every search call," and a query that found nothing is still a data point
+for the future orphan/low-traffic detector (`05` §2) that consumes this table.
+
+**Spec touch-point**: none — `04` §1, §4-8 already specify this surface; this note records the
+mechanics (types, the JSONB bind fix, pre-filter scope, draft-visibility resolution, and the
+no-cursor-pagination call) underneath it.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

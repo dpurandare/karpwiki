@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-17): steps 22–24 done**, 2a in progress. Phase 1 (steps 1–21,
+**Status (2026-08-17): steps 22–25 done**, 2a in progress. Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -82,6 +82,13 @@ is a real Authenticator implementation using that pick, not a library search.
     workspace resolution defaults to "all accessible," with an optional taxonomy pre-filter
     ([04](04-search-and-retrieval.md) §4, [01](01-architecture-and-data-model.md) §2's Workspace
     Router).
+    **Done** — [`query_log.py`](../src/karpwiki/query_log.py) (`record`, `purge_older_than`),
+    [`search.py`](../src/karpwiki/search.py) (`SearchResult` — title/page_type/excerpt/
+    citations, plus `page_type`/`tags`/`date_range` filters — 04 §6-7), `api.py`
+    (`GET /search`: federated resolution, the taxonomy pre-filter, `query_log` writes — all
+    gateway concerns per 01 §2, so they live there rather than in `search.py`). No cursor
+    pagination (`limit` only) and no dedicated-index support (step 26) yet — see
+    [09](09-implementation-notes.md) §28 for the full set of decisions.
 26. Dedicated-index-per-workspace support for large workspaces, with cross-backend score
     normalization for the federated case ([04](04-search-and-retrieval.md) §4,
     [02](02-storage-and-indexing.md) §4) — [08](08-implementation-stack.md) §2 picks OpenSearch for
