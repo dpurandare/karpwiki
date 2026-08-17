@@ -27,6 +27,15 @@ def object_store(tmp_path_factory):
     return root
 
 
+# No OpenSearch reset fixture (phase2-tasklist.md step 26): every `workspace`/
+# `other_workspace`/`dedicated_workspace` fixture already mints a random `workspace_id`,
+# so cross-test pollution within the shared `karpwiki-pages` index is impossible by
+# construction — every query is workspace_id-filtered to that one test's own value. The
+# index accumulates documents across local test runs (harmless, since old runs' random
+# workspace_ids never match a new test's filter); `docker compose down -v` clears it along
+# with every other named volume if that ever matters.
+
+
 @pytest_asyncio.fixture
 async def session():
     engine = create_async_engine(TEST_DATABASE_URL)
@@ -39,12 +48,15 @@ async def session():
     await engine.dispose()
 
 
-async def _workspace(session, prefix: str, document_types: list[str]) -> Workspace:
+async def _workspace(
+    session, prefix: str, document_types: list[str], *, dedicated: bool = False
+) -> Workspace:
     workspace = Workspace(
         workspace_id=f"{prefix}-{uuid.uuid4().hex[:8]}",
         name=prefix.replace("-", " ").title(),
         status=WorkspaceStatus.active,
         storage_bindings={"object_store": "file://./var/objectstore"},
+        dedicated_index=dedicated,
     )
     session.add(workspace)
     await session.flush()
@@ -65,6 +77,14 @@ async def workspace(session):
 async def other_workspace(session):
     """A second workspace, for asserting that queries never cross the boundary."""
     return await _workspace(session, "policies", ["policy.hr"])
+
+
+@pytest_asyncio.fixture
+async def dedicated_workspace(session):
+    """A workspace on the OpenSearch backend (phase2-tasklist.md step 26), for tests
+    exercising `dedicated_index.py` or the federated merge — never the same object as
+    `workspace`/`other_workspace`, since not every test needs a live OpenSearch round trip."""
+    return await _workspace(session, "large-corp", ["legal.contract"], dedicated=True)
 
 
 @pytest_asyncio.fixture

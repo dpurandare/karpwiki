@@ -55,6 +55,28 @@ services:
       echo 'bucket ready'
       "
 
+  # Dedicated Full-Text Index backend for large/isolated workspaces (02 §4, 08 §2's pick).
+  # Single-node, security plugin disabled: this is a local dev/test convenience, not a
+  # deployment topology recommendation — a real deployment terminates OpenSearch behind
+  # its own auth the same way Phase 1 assumes the gateway sits behind one (09 §15).
+  opensearch:
+    image: opensearchproject/opensearch:2
+    environment:
+      discovery.type: single-node
+      plugins.security.disabled: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+
 volumes:
   pgdata:
   objectstore:
+  opensearch-data:

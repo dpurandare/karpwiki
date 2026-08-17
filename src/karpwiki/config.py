@@ -50,6 +50,10 @@ OBJECT_STORE_URL = _pin_object_store(
 
 CELERY_BROKER_URL = os.environ.get("KARPWIKI_CELERY_BROKER_URL", "redis://localhost:6379/0")
 
+# Dedicated Full-Text Index backend for large/isolated workspaces (02 §4, 08 §2's pick;
+# phase2-tasklist.md step 26). Only read for a workspace with `dedicated_index=True`.
+OPENSEARCH_URL = os.environ.get("KARPWIKI_OPENSEARCH_URL", "http://localhost:9200")
+
 # Platform-default model per agent role, as a Pydantic AI "provider:model" string.
 # A workspace's SCHEMA.md `llm.<role>.model` takes precedence (09 §16); the API key is
 # never configured here — it resolves from the secrets manager at call time (09 §13).

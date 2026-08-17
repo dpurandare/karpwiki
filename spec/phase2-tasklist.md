@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-17): steps 22–25 done**, 2a in progress. Phase 1 (steps 1–21,
+**Status (2026-08-17): steps 22–26 done**, 2a in progress. Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -93,6 +93,18 @@ is a real Authenticator implementation using that pick, not a library search.
     normalization for the federated case ([04](04-search-and-retrieval.md) §4,
     [02](02-storage-and-indexing.md) §4) — [08](08-implementation-stack.md) §2 picks OpenSearch for
     this case (per-language analyzers, §3), package `opensearch-py` (§4).
+    **Done, full integration** — a real `opensearch` service in `docker-compose.yml`, not a
+    simulated second backend. [`dedicated_index.py`](../src/karpwiki/dedicated_index.py) (index/
+    search against OpenSearch, one shared index across every dedicated workspace),
+    [`search_result.py`](../src/karpwiki/search_result.py) (the `SearchResult` type + citation
+    extraction, shared by both backends), [`search.py`](../src/karpwiki/search.py)
+    (`merge_federated` — 04 §4's normalize-then-merge algorithm; `index_page` now dual-writes for a
+    dedicated workspace), `api.py` (`/search` splits by backend and merges),
+    [`workspaces.py`](../src/karpwiki/workspaces.py) + `POST /workspaces/{id}` (the admin toggle —
+    found missing after the rest already worked, since nothing let an admin actually turn it on).
+    Verified live against a real running OpenSearch throughout, including a genuine async
+    client-lifecycle bug caught and fixed before it shipped — see
+    [09](09-implementation-notes.md) §29 for the full set of decisions.
 27. Taxonomy bulk-move admin action — dry-run + batched execute, fully designed already
     ([09](09-implementation-notes.md) §11).
 28. `page_link` cross-reference parsing (carried forward from Phase 1's accepted-simplifications

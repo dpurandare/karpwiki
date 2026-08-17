@@ -1,5 +1,6 @@
 """Full-Text Index (02 §4, 04 §1-3, §7-8) — phase1-tasklist steps 16-18."""
 
+import uuid
 from datetime import date
 
 import pytest
@@ -318,3 +319,68 @@ async def test_date_range_filter(session, workspace):
         date_to=date(2021, 1, 1),
     )
     assert [h.title for h in hits] == ["Old Page"]
+
+
+# --- merge_federated (04 §4) — phase2-tasklist.md step 26, pure logic, no I/O ----------
+
+
+def _result(page_id, workspace_id, score, title="T"):
+    return search.SearchResult(
+        page_id=page_id,
+        workspace_id=workspace_id,
+        path=f"concepts/{title.lower()}.md",
+        page_type="concept",
+        title=title,
+        score=score,
+        excerpt="...",
+        citations=(),
+    )
+
+
+def test_merge_federated_leaves_shared_scores_raw(workspace):
+    shared = [_result(uuid.uuid4(), workspace.workspace_id, 12.5)]
+    merged = search.merge_federated(shared, [])
+    assert merged[0].score == 12.5
+
+
+def test_merge_federated_normalizes_dedicated_scores_to_unit_range():
+    ded_ids = [uuid.uuid4() for _ in range(3)]
+    dedicated = [
+        _result(ded_ids[0], "ded-ws", 4.0),
+        _result(ded_ids[1], "ded-ws", 2.0),
+        _result(ded_ids[2], "ded-ws", 1.0),
+    ]
+    merged = search.merge_federated([], dedicated)
+    scores = {r.page_id: r.score for r in merged}
+    assert scores[ded_ids[0]] == 1.0  # max -> 1.0
+    assert scores[ded_ids[2]] == 0.0  # min -> 0.0
+    assert 0.0 < scores[ded_ids[1]] < 1.0
+
+
+def test_merge_federated_sorts_by_score_descending_across_both():
+    shared_id, ded_id = uuid.uuid4(), uuid.uuid4()
+    shared = [_result(shared_id, "shared-ws", 0.5)]
+    dedicated = [_result(ded_id, "ded-ws", 99.0)]  # normalizes to 1.0, still highest
+
+    merged = search.merge_federated(shared, dedicated)
+    assert [r.page_id for r in merged] == [ded_id, shared_id]
+
+
+def test_merge_federated_ties_break_on_workspace_then_page_id():
+    a, b = sorted([uuid.uuid4(), uuid.uuid4()], key=str)
+    shared = [_result(a, "workspace-a", 1.0, "A"), _result(b, "workspace-a", 1.0, "B")]
+    merged = search.merge_federated(shared, [])
+    assert [r.page_id for r in merged] == [a, b]
+
+
+def test_merge_federated_handles_identical_dedicated_scores():
+    """04 §4 doesn't define min-max normalization's zero-range case; mapping every tied
+    score to 1.0 keeps them all maximally ranked rather than dividing by zero."""
+    ids = [uuid.uuid4(), uuid.uuid4()]
+    dedicated = [_result(ids[0], "ded-ws", 7.0), _result(ids[1], "ded-ws", 7.0)]
+    merged = search.merge_federated([], dedicated)
+    assert all(r.score == 1.0 for r in merged)
+
+
+def test_merge_federated_handles_empty_inputs():
+    assert search.merge_federated([], []) == []

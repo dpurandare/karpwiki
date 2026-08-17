@@ -17,14 +17,14 @@ Also owns the indexing lifecycle (02 §7-8): `pending`/`stale` -> `indexing` -> 
 """
 
 import logging
-import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 
 from sqlalchemy import ARRAY, String, bindparam, delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import dedicated_index
 from .models import (
     IndexState,
     IndexStatus,
@@ -32,8 +32,10 @@ from .models import (
     PageIndex,
     PageStatus,
     PageVersion,
+    Workspace,
     WikiPage,
 )
+from .search_result import SearchResult, extract_citations
 
 # Postgres text-search configuration. A per-workspace analyzer is a multi-language
 # roadmap item (08 §3); one configuration is correct for Phase 1.
@@ -45,11 +47,6 @@ MAX_SIMILARITY_TERMS = 60
 
 logger = logging.getLogger(__name__)
 
-# 01 §6: citations are markdown footnote *definitions* — "[^1]: filename.pdf, p. 4" — at
-# the start of a line. Captures the marker and the definition text separately so callers
-# get the definition text without re-parsing the bracket syntax themselves.
-_FOOTNOTE_DEFINITION = re.compile(r"^\[\^([^\]]+)\]:\s*(.+)$", re.MULTILINE)
-
 
 @dataclass(frozen=True)
 class Hit:
@@ -59,34 +56,23 @@ class Hit:
     score: float
 
 
-@dataclass(frozen=True)
-class SearchResult:
-    """04 §7's result-provenance shape — richer than `Hit`, which `find_similar` below
-    still returns unchanged since near-duplicate scoring needs none of this."""
-
-    page_id: uuid.UUID
-    workspace_id: str
-    path: str
-    page_type: str
-    title: str
-    score: float
-    excerpt: str
-    citations: tuple[str, ...]
-
-
-def _extract_citations(content: str) -> tuple[str, ...]:
-    return tuple(
-        f"[^{marker}]: {definition.strip()}"
-        for marker, definition in _FOOTNOTE_DEFINITION.findall(content)
-    )
-
-
 async def index_page(session: AsyncSession, *, page: WikiPage, version: PageVersion) -> None:
     """(Re)index one page's current version and mark its index_status `indexed` (02 §7).
 
     Cheap by design: no LLM call is involved, which is why 02 §7 says reindexing a single
     page is never the costly part of a reindex.
+
+    Always writes the shared Postgres index, dedicated workspace or not: near-duplicate
+    detection (`find_similar` below, 03 §4) is an internal workload the dedicated-index
+    escape hatch (02 §4, phase2-tasklist.md step 26) was never about — that's a query-
+    serving concern for large/isolated workspaces' user-facing traffic. A dedicated
+    workspace's pages *additionally* go to OpenSearch, which is what `/search` actually
+    queries for that workspace (09 §29) — see that note for the full reasoning.
     """
+    workspace = await session.get(Workspace, page.workspace_id)
+    if workspace is not None and workspace.dedicated_index:
+        await dedicated_index.index_page(page=page, version=version)
+
     await session.execute(delete(PageIndex).where(PageIndex.page_id == page.page_id))
     await session.execute(
         text(
@@ -204,10 +190,38 @@ async def search(
             title=r.title,
             score=float(r.score),
             excerpt=r.excerpt,
-            citations=_extract_citations(r.content),
+            citations=extract_citations(r.content),
         )
         for r in rows
     ]
+
+
+def merge_federated(
+    shared: list[SearchResult], dedicated: list[SearchResult]
+) -> list[SearchResult]:
+    """04 §4: merge the shared index's results with a dedicated backend's — normalizing
+    only the dedicated scores (min-max to `[0,1]`, within this result set) before merging;
+    the shared index's raw `ts_rank_cd` scores are left as-is. Sorted by that score
+    descending, tie-broken by `workspace_id` then `page_id` for deterministic ordering.
+
+    This is the spec's own "approximation, called out explicitly so it's a deliberate
+    tradeoff rather than a surprise" — not a claim the two scales are truly comparable.
+    """
+    merged = list(shared) + _min_max_normalize(dedicated)
+    return sorted(merged, key=lambda r: (-r.score, r.workspace_id, str(r.page_id)))
+
+
+def _min_max_normalize(results: list[SearchResult]) -> list[SearchResult]:
+    if not results:
+        return []
+    scores = [r.score for r in results]
+    lo, hi = min(scores), max(scores)
+    if hi == lo:
+        # Every hit scored identically. 04 §4 doesn't say what to do here; mapping all to
+        # 1.0 (rather than dividing by zero) is the least-surprising reading of "these all
+        # matched equally well" — none should be pushed toward the bottom of the merge.
+        return [replace(r, score=1.0) for r in results]
+    return [replace(r, score=(r.score - lo) / (hi - lo)) for r in results]
 
 
 async def find_similar(

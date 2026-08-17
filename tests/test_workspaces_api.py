@@ -129,3 +129,19 @@ async def test_access_policy_management_requires_admin(client, session, workspac
         json={"principal": "user:morgan", "role": "admin"},
     )
     assert r.status_code == 403
+
+
+async def test_admin_switches_a_workspace_onto_the_dedicated_backend(client, session, workspace):
+    """phase2-tasklist.md step 26: dedicated_index has to be reachable through the API, or
+    an admin has no way to opt a workspace in short of a raw DB write."""
+    await _grant_admin(session, workspace)
+    assert (await session.get(Workspace, workspace.workspace_id)).dedicated_index is False
+
+    r = await client.post(
+        f"/workspaces/{workspace.workspace_id}", headers=ADMIN, json={"dedicated_index": True}
+    )
+    assert r.status_code == 200
+    assert r.json()["dedicated_index"] is True
+
+    stored = await session.get(Workspace, workspace.workspace_id)
+    assert stored.dedicated_index is True

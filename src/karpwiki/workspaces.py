@@ -55,6 +55,7 @@ async def update(
     description: str | None = None,
     schema_ref: str | None = None,
     storage_bindings: dict | None = None,
+    dedicated_index: bool | None = None,
 ) -> Workspace:
     if name is not None:
         workspace.name = name
@@ -64,6 +65,10 @@ async def update(
         workspace.schema_ref = schema_ref
     if storage_bindings is not None:
         workspace.storage_bindings = storage_bindings
+    if dedicated_index is not None:
+        # 02 §4 / 06 §6: an operational decision made once a workspace approaches scale,
+        # not a create-time choice — so it's update-only, not in `create()` above.
+        workspace.dedicated_index = dedicated_index
     await session.flush()
     return workspace
 

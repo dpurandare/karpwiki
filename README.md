@@ -67,11 +67,11 @@ docs that assume it's solved.
 
 ```bash
 cp .env.example .env                     # then fill in OPENAI_API_KEY
-docker compose up -d                     # PostgreSQL + Redis + MinIO
+docker compose up -d                     # PostgreSQL + Redis + MinIO + OpenSearch
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e '.[dev]'                  # Python 3.11+ (tested on 3.14)
 alembic upgrade head                     # create the schema
-pytest                                   # full suite — all of Phase 1
+pytest                                   # full suite
 ```
 
 Then run the API itself:
@@ -81,15 +81,17 @@ uvicorn karpwiki.api:app --reload
 ```
 
 `POST /sources` (file, pasted text, or a URL) accepts a submission; `GET /sources/{id}` polls its
-status. `GET /review-items` lists the admin queue and `POST /review-items/{id}/resolve` acts on one;
-`GET /pages/{id}/versions` (plus `/{version_id}` and `/diff`) and `POST /pages/{id}/rollback` are
-the Version Browser. Interactive API docs (Swagger UI) are at `http://localhost:8000/docs` once
-running — FastAPI generates them from the route definitions, nothing to write by hand. There is no
-endpoint for search itself — `06 §1`'s "full API+MCP surface" is an explicit Phase 1 exclusion, and
-`search.py`'s functions are exercised directly (by tests and the end-to-end script) rather than
-through the gateway. Pipeline stages after submission, and reindexing, still need to be driven
-explicitly (see above) — `curl` alone won't take a document all the way to a published, searchable
-page.
+status. `GET /search` answers ranked, cited queries, federated across every workspace the caller
+can access ([04](spec/04-search-and-retrieval.md) §4) — a workspace with `dedicated_index=true`
+(`POST /workspaces/{id}`, [02 §4](spec/02-storage-and-indexing.md)) is served from OpenSearch
+instead of the shared Postgres index, merged and normalized into one ranked result set
+([09 §29](spec/09-implementation-notes.md)). `GET /review-items` lists the admin queue and
+`POST /review-items/{id}/resolve` acts on one; `GET /pages/{id}/versions` (plus `/{version_id}` and
+`/diff`) and `POST /pages/{id}/rollback` are the Version Browser. Interactive API docs (Swagger UI)
+are at `http://localhost:8000/docs` once running — FastAPI generates them from the route
+definitions, nothing to write by hand. Pipeline stages after submission, and reindexing, still need
+to be driven explicitly (see above) — `curl` alone won't take a document all the way to a
+published, searchable page.
 
 Configuration is environment variables, listed with their defaults in
 [`.env.example`](.env.example). `.env` is gitignored and loaded automatically; real environment
@@ -102,6 +104,7 @@ variables always win over it, so a deployment passes its own and needs no file.
 |---|---|---|
 | `pgdata` | Metadata DB | System of record ([02 §3](spec/02-storage-and-indexing.md)) |
 | `objectstore` | MinIO — raw sources, page-version diffs, assets | Raw sources are immutable originals nothing can regenerate, and every citation points at one |
+| `opensearch-data` | The dedicated Full-Text Index backend ([02 §4](spec/02-storage-and-indexing.md)) | Derived from Postgres (`page_version`), technically rebuildable — but only by reindexing every dedicated workspace's pages, not a `docker compose restart` anyone wants by accident |
 
 Redis has no volume on purpose: it is only the Celery broker here, and queued work is re-derivable
 from `raw_source.pipeline_state` in Postgres ([09 §3](spec/09-implementation-notes.md)).

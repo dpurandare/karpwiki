@@ -1060,5 +1060,81 @@ for the future orphan/low-traffic detector (`05` §2) that consumes this table.
 mechanics (types, the JSONB bind fix, pre-filter scope, draft-visibility resolution, and the
 no-cursor-pagination call) underneath it.
 
+## 29. Dedicated-Index-Per-Workspace via OpenSearch (Phase 2 Step 26)
+
+Deepak chose full OpenSearch integration over the lighter-weight alternative offered (simulating a
+second backend's score scale with a second Postgres query) — a real new infrastructure dependency
+(`docker-compose.yml`'s `opensearch` service, `opensearch-py`), not just new application code.
+
+**One shared OpenSearch index for every dedicated workspace, not one index per workspace.** `08` §2
+says "dedicated index *instance*"; `02` §4 motivates it with both "very large corpora" and
+"stricter isolation requirements." Read here as "a dedicated *backend/technology*," matching how
+the shared Postgres index already partitions logically by `workspace_id` rather than physically
+(`02` §4's own stated principle) — `dedicated_index.py` applies the identical filter, just against
+OpenSearch. Per-workspace physical OpenSearch indices (closer to "stricter isolation" read
+literally) would need dynamic index lifecycle management with no current caller needing it;
+deferred rather than built for a requirement nothing has asked for yet.
+
+**Postgres stays the system of record for near-duplicate detection, regardless of a workspace's
+search backend.** `02` §4 names two workloads the Full-Text Index serves: search/retrieval and
+near-duplicate detection (`03` §4). Diverting a dedicated workspace's pages away from Postgres
+entirely would silently break `find_similar` for exactly the workspaces most likely to have enough
+volume for near-duplicates to matter. Decision: `search.index_page` **always** writes the shared
+Postgres index — dedicated or not — and *additionally* writes OpenSearch for a dedicated workspace.
+OpenSearch is purely a query-serving overlay for search traffic; `find_similar` never looks at it.
+This does mean a dedicated workspace's content isn't actually isolated out of Postgres, which
+sits in tension with `02` §4's "stricter isolation requirements" motivation — flagged plainly
+rather than silently glossed over, since it's a real trade-off: full isolation would need
+`find_similar` to also become backend-aware (an OpenSearch-native near-duplicate metric matching
+the calibrated Postgres containment score, `09` §17, so `SCHEMA.md`'s threshold stays meaningful
+regardless of backend) — real work with no current caller, deferred rather than built speculatively.
+
+**Circular import, broken by extracting the shared type.** `search.py` needs to call
+`dedicated_index.index_page` (the write-dispatch); `dedicated_index.py` needs `search.SearchResult`
+to return a compatible shape. Neither can import the other. `search_result.py` now owns
+`SearchResult` and `extract_citations`, imported by both, importing neither.
+
+**A fresh `AsyncOpenSearch` client per call, not a persistent module singleton — a real bug caught
+before it shipped, not a style preference.** The first implementation created one client at import
+time, matching `db.py`'s `create_async_engine` pattern. It broke every test after the first with
+`RuntimeError: Timeout context manager should be used inside a task`: the client's underlying
+`aiohttp` session binds to whichever asyncio event loop is running on first use, and this test
+suite's default (`asyncio_mode = "auto"`) gives each async test function its own loop — the second
+test's loop couldn't use a session opened under the first test's loop. `db.py` never hits this
+because the `session` test fixture already creates a fresh `AsyncEngine` per test; `dedicated_
+index.py`'s `_client()` async context manager does the same thing per *call* instead, since there's
+no per-request session-scoped fixture equivalent yet in application code. (A global
+`asyncio_default_fixture_loop_scope = "session"` pytest setting was tried and reverted — it worked,
+but changes event-loop behavior for the entire suite to fix one module's lifecycle assumption; the
+per-call client is the more local, surgical fix.)
+
+**Highlight tags aligned across backends.** `ts_headline` (search.py) defaults to `<b>`/`</b>`;
+OpenSearch's highlighter defaults to `<em>`/`<mark>`-style tags depending on version. Explicitly set
+to `<b>`/`</b>` in `dedicated_index.py` so a merged federated result set doesn't mark matches with
+different tags depending on which backend happened to serve them — caught by running the live
+round-trip against a real OpenSearch instance, not assumed.
+
+**`merge_federated`**: normalizes only the dedicated backend's scores (min-max to `[0,1]`, within
+that query's result set — a single tied score maps to `1.0` rather than dividing by zero, `04` §4's
+own "approximation" caveat, not a spec-defined case); the shared index's raw `ts_rank_cd` scores are
+left as-is. Sorted descending, tie-broken `workspace_id` then `page_id`. `limit` is applied by the
+caller (`api.py`) *after* merging both pools, not independently per backend before — taking `limit`
+from each pool first could drop a higher-ranked hit from one pool in favor of a lower-ranked hit
+from the other.
+
+**`dedicated_index` needed an actual admin-facing toggle — caught by asking "is this feature usable
+end-to-end," not by a test.** The column existed and the query-time split worked, but nothing let
+an admin ever set it to `true` short of a raw database write. Added to `workspaces.update`
+(update-only, not `create` — `02` §4 and `06` §6 frame this as an operational decision made once a
+workspace approaches scale, not a creation-time choice) and `POST /workspaces/{id}`. Toggling
+affects **future writes only**, the same scope `05` §7 already gives taxonomy reassignment —
+content indexed before the toggle stays on whichever backend indexed it until the next reindex;
+there is no retroactive migration between backends here, and none was asked for.
+
+**Spec touch-point**: none — `02` §4, `04` §4, and `08` §2 already specify the behavior and the
+technology choice; this note records the backend-scope decision (one shared index, Postgres as
+dedup's system of record regardless of search backend), the async client-lifecycle bug and fix, and
+the admin-toggle gap found and closed.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

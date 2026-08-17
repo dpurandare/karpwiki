@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import (
     classify,
+    dedicated_index,
     document_types,
     ingestion,
     objectstore,
@@ -243,12 +244,15 @@ class CreateWorkspaceRequest(BaseModel):
 
 
 class UpdateWorkspaceRequest(BaseModel):
-    """POST /workspaces/{id} body — only supplied fields change."""
+    """POST /workspaces/{id} body — only supplied fields change. `dedicated_index` switches
+    a workspace onto the OpenSearch backend (02 §4, 06 §6 — no automatic trigger; an admin
+    decides once a workspace approaches scale)."""
 
     name: str | None = None
     description: str | None = None
     schema_ref: str | None = None
     storage_bindings: dict | None = None
+    dedicated_index: bool | None = None
 
 
 class GrantAccessRequest(BaseModel):
@@ -266,6 +270,7 @@ def _workspace_body(workspace: Workspace) -> dict[str, Any]:
         "schema_ref": workspace.schema_ref,
         "status": workspace.status.value,
         "storage_bindings": workspace.storage_bindings,
+        "dedicated_index": workspace.dedicated_index,
     }
 
 
@@ -779,6 +784,7 @@ def _register_routes(app: FastAPI) -> None:
             description=payload.description,
             schema_ref=payload.schema_ref,
             storage_bindings=payload.storage_bindings,
+            dedicated_index=payload.dedicated_index,
         )
         await session.commit()
         return _workspace_body(updated)
@@ -860,10 +866,29 @@ def _register_routes(app: FastAPI) -> None:
         else:
             resolved = await _taxonomy_prefilter(session, query=q, accessible=accessible)
 
-        results = await search.search(
+        # Split by backend (phase2-tasklist.md step 26): a dedicated workspace's traffic
+        # goes to OpenSearch, everything else to the shared Postgres index. Either list can
+        # be empty — both search()/dedicated_index.search() already return [] for that.
+        dedicated_ids = (
+            set(
+                (
+                    await session.execute(
+                        select(Workspace.workspace_id).where(
+                            Workspace.workspace_id.in_(resolved),
+                            Workspace.dedicated_index.is_(True),
+                        )
+                    )
+                ).scalars()
+            )
+            if resolved
+            else set()
+        )
+        shared_ids = [w for w in resolved if w not in dedicated_ids]
+
+        shared_hits = await search.search(
             session,
             query=q,
-            workspace_ids=resolved,
+            workspace_ids=shared_ids,
             limit=limit,
             include_drafts=include_drafts,
             page_types=page_type,
@@ -871,6 +896,20 @@ def _register_routes(app: FastAPI) -> None:
             date_from=date_from,
             date_to=date_to,
         )
+        dedicated_hits = await dedicated_index.search(
+            query=q,
+            workspace_ids=list(dedicated_ids),
+            limit=limit,
+            include_drafts=include_drafts,
+            page_types=page_type,
+            tags=tags,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        # 04 §4: normalize the dedicated backend's scores, merge, sort, truncate to `limit`
+        # only after the two pools are combined — taking `limit` from each independently
+        # first could drop a higher-ranked hit in favor of a lower one from the other pool.
+        results = search.merge_federated(shared_hits, dedicated_hits)[:limit]
 
         await query_log.record(
             session,

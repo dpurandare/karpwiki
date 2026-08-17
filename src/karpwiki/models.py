@@ -146,6 +146,10 @@ class Workspace(Base):
         Enum(WorkspaceStatus, name="workspace_status"), default=WorkspaceStatus.active
     )
     storage_bindings: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # 02 §4: "workspaces with very large corpora or stricter isolation requirements may get
+    # a dedicated index instance" — OpenSearch (08 §2) instead of the shared Postgres FTS
+    # (phase2-tasklist.md step 26). False for every workspace by default.
+    dedicated_index: Mapped[bool] = mapped_column(default=False)
 
 
 class DocumentType(Base):
