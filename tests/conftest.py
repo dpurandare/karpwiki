@@ -6,6 +6,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from karpwiki import tasks
 from karpwiki.models import AccessPolicy, Base, DocumentType, Role, Workspace, WorkspaceStatus
 
 TEST_DATABASE_URL = os.environ.get(
@@ -25,6 +26,23 @@ def object_store(tmp_path_factory):
     karpwiki.config.OBJECT_STORE_URL = f"file://{root}"
     karpwiki.objectstore.OBJECT_STORE_URL = f"file://{root}"
     return root
+
+
+@pytest.fixture(autouse=True)
+def dispatched(monkeypatch):
+    """Neutralizes every `.delay()` call for the duration of a test (phase2-tasklist.md
+    step 32) — without this, api.py's real dispatch calls would publish to the real Redis
+    broker this session's docker-compose infra runs, and this repo's own real worker
+    containers (if up) would pick them up and try the dev DB, where a test's ids never
+    exist (harmless no-ops, but noisy and an unnecessary hard dependency on a live broker
+    for tests that don't care about dispatch). Autouse so every test gets this by default;
+    a test that DOES care about dispatch takes `dispatched` as a fixture and reads the
+    recorded calls straight off it."""
+    calls = {"classify_source": [], "curate_source": [], "reindex": []}
+    monkeypatch.setattr(tasks.classify_source, "delay", lambda arg: calls["classify_source"].append(arg))
+    monkeypatch.setattr(tasks.curate_source, "delay", lambda arg: calls["curate_source"].append(arg))
+    monkeypatch.setattr(tasks.reindex, "delay", lambda arg: calls["reindex"].append(arg))
+    return calls
 
 
 # No OpenSearch reset fixture (phase2-tasklist.md step 26): every `workspace`/

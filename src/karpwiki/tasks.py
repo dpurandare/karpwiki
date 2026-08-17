@@ -5,8 +5,11 @@ and curation are LLM-bound, indexing and the maintenance advisor are compute-bou
 
 Phase 2 step 30 fills the classification/curation/indexing queues by wrapping the pure
 orchestration functions `ingestion.classify_source`/`curate_source` and `search.reindex`
-(09 §21's deliberately deferred gap). Nothing enqueues these yet — that's step 32; this
-step only makes the tasks real and independently runnable.
+(09 §21's deliberately deferred gap). Step 32 wires the dispatch: `api.py` enqueues
+`classify_source` on submission and `curate_source`/`reindex` after an admin resolution or
+a page write it drove directly (rollback, bulk-move); the chained stages below —
+classification's acceptance enqueuing curation, curation's page writes enqueuing reindex —
+dispatch themselves, once their own transaction has committed.
 """
 
 import asyncio
@@ -51,7 +54,12 @@ async def _classify(
         if source is None:
             logger.warning("classify task: no source %s", source_id)
             return
-        await ingestion.classify_source(session, source=source, call=call)
+        state = await ingestion.classify_source(session, source=source, call=call)
+    # Dispatched only after the `async with` block above commits (`session_scope`'s
+    # __aexit__) — the curation task opens its own session and must see this source as
+    # `classified`, not whatever it was mid-transaction.
+    if state is PipelineState.classified:
+        curate_source.delay(str(source_id))
 
 
 async def _classification_summary(session, source_id: uuid.UUID) -> str:
@@ -69,21 +77,46 @@ async def _classification_summary(session, source_id: uuid.UUID) -> str:
 async def _curate(
     source_id: uuid.UUID, *, call: ingestion.CuratorCall = ingestion.call_curator_model
 ) -> None:
-    """09 §21/step 32: acceptance runs dedup, then curate only if dedup clears — one task,
-    since both are cheap/synchronous steps of the same "a classified source becomes pages"
-    job and `tasks.py` has no dedicated dedup queue to dispatch a second hop into.
+    """09 §21/§33/step 32: acceptance runs dedup, then curate only if dedup clears — one
+    task, since both are cheap/synchronous steps of the same "a classified source becomes
+    pages" job and `tasks.py` has no dedicated dedup queue to dispatch a second hop into.
+
+    Entered at `classified` (the normal path, from `_classify`'s dispatch above) or at
+    `ingesting` directly — an admin already resolved dedup themselves (`resolve_duplicate`'s
+    `keep_both`/`supersede`, 09 §22) before dispatching here, so re-running
+    `check_duplicates` would both re-litigate that decision and hit an illegal
+    `ingesting -> duplicate_check` transition (03 §1's edges don't allow it back out of
+    `ingesting`) — curate runs directly instead.
 
     `call` is the same test-only seam as `_classify`'s."""
+    page_ids: list[uuid.UUID] = []
     async with session_scope() as session:
         source = await session.get(RawSource, source_id)
         if source is None:
             logger.warning("curate task: no source %s", source_id)
             return
-        summary = await _classification_summary(session, source_id)
-        state = await ingestion.check_duplicates(session, source=source, summary=summary)
+        if source.pipeline_state is PipelineState.classified:
+            summary = await _classification_summary(session, source_id)
+            state = await ingestion.check_duplicates(session, source=source, summary=summary)
+        elif source.pipeline_state is PipelineState.ingesting:
+            state = PipelineState.ingesting
+        else:
+            logger.warning(
+                "curate task: source %s in unexpected state %s",
+                source_id,
+                source.pipeline_state,
+            )
+            return
         if state is PipelineState.ingesting:
             workspace = await session.get(Workspace, source.workspace_id)
             await ingestion.curate_source(session, source=source, workspace=workspace, call=call)
+            # 02 §7's "a page write enqueues reindex," scoped to this workspace rather than
+            # the exact pages just written — cheap, and every id returned here is
+            # currently pending/stale within this same transaction, so `reindex` (which
+            # requires that state) has something real to do for each one.
+            page_ids = await search.pending_pages(session, workspace_id=source.workspace_id)
+    for page_id in page_ids:
+        reindex.delay(str(page_id))
 
 
 async def _reindex(page_id: uuid.UUID) -> None:

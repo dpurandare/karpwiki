@@ -1403,5 +1403,80 @@ consecutive tasks cleanly post-fix. No further bugs found.
 groups") now has its first real container in this repo, matching the shape that section describes;
 no wording changes needed there.
 
+## 35. Wiring Real Dispatch (Phase 2 Step 32)
+
+Closes the loop steps 30–31 set up: `api.py` now calls `.delay()` at every point step 32 names,
+always strictly *after* the commit that made the referenced row visible (a task opens its own
+session against a separately-connected worker process, so dispatching before commit would race it).
+
+**Submission -> classification**: `submit_source`, right after `_store` + commit.
+
+**Acceptance -> dedup-then-curate — two dispatch sites feeding one task**: `_classify` itself
+dispatches `curate_source` when `ingestion.classify_source` returns `classified` (the automatic
+path — no `api.py` involvement, since nothing there ever calls `classify_source` directly). The
+admin path — `resolve_review_item_endpoint` after a `classification` resolution (always lands at
+`classified`) or a `duplicate` resolution's `keep_both`/`supersede` (land at `ingesting`, dedup
+already resolved by the human) — dispatches the *same* `curate_source` task. This exposed a gap
+step 30's design hadn't needed to consider: `tasks._curate` unconditionally ran `check_duplicates`
+first, correct only for the fresh-classification entry. Resuming at `ingesting` through that same
+path would both re-litigate a decision a human already made and hit an illegal `ingesting ->
+duplicate_check` transition (03 §1's edges don't allow it). Fixed by having `_curate` branch on the
+source's *current* `pipeline_state` at entry — `classified` runs dedup then curate; `ingesting`
+skips straight to curate — rather than adding a second, dedup-free task. Same reasoning as `09`
+§33's original bundling call: one task per tasklist-named queue, not a queue per branch.
+
+**Merge is not "curate"**: `resolve_duplicate`'s `merge` outcome writes directly into the matched
+page (`ingestion._resolve_merge`) and reaches `ingested` synchronously inside the request — no
+curation task involved, so what it needs is a reindex dispatch instead. The written page's id isn't
+returned by `resolve_review_item`, so `resolve_review_item_endpoint` reads it back off the last
+`ingestion_log` entry's `target_page_id` detail (`_resolve_merge`'s own write) — the same read-back
+convention `ingestion._duplicate_evidence` and `tasks._classification_summary` already established,
+reused rather than widening `resolve_review_item`'s return contract for one caller.
+
+**Page write -> reindex, at three different levels of precision**: `rollback_page` and
+`bulk_move_execute` (per batch, right after its own commit) already know the exact page id(s) they
+touched, so they dispatch `reindex` directly for those. `tasks._curate` doesn't track exactly which
+pages `curate_source` wrote (it can create a source page plus several concept/entity pages, some new
+and some upserted into existing ones) — rather than widen `curate_source`'s return contract too, it
+calls the now-workspace-scoped `search.pending_pages(session, workspace_id=...)` (new optional
+filter, additive) right before its own transaction commits and dispatches `reindex` for everything
+that comes back. This can occasionally sweep in an unrelated already-pending page from the same
+workspace, not just ones this call wrote — accepted as correct-enough (reindexing a genuinely
+pending/stale page is never wrong) rather than threading exact page-id tracking through
+`curate_source`'s pure-function contract for one dispatch site.
+
+**A real, reproduced-once bug during live verification, root-caused to this session's own test
+run rather than the dispatch code**: the first live check (submit over real HTTP, poll, nothing
+manually driven) reached `classified` but `curate_source` was never received by the curation worker
+container — no exception, no message on the `curation` Redis queue at all. A manual reproduction
+with temporary debug logging immediately after showed the *identical* code path dispatching
+correctly (a real `AsyncResult`, received by the worker within milliseconds), and two further live
+runs both completed the full submit -> classify -> curate -> reindex -> searchable chain purely via
+dispatch. The likely cause, never fully proven: immediately before the failed run, a *single* full
+pytest run happened to execute with the dispatch code already active but *before* `tests/
+conftest.py`'s `dispatched` autouse fixture existed yet to intercept `.delay()` — every test hitting
+`submit_source`/`resolve_review_item_endpoint`/`rollback_page`/`bulk_move_execute`, plus `tests/
+test_tasks.py`'s direct `_classify`/`_curate` calls, published real messages to the real broker in a
+~30-second burst (confirmed after the fact via worker container logs full of `"no source"`
+warnings for test-DB-only ids arriving at the real, dev-DB-backed workers). One dispatch going
+missing shortly after that burst, with everything working cleanly before and after, points at
+transient broker/connection-pool stress from that flood rather than a logic bug — and the fixture
+added specifically for step 32's own tests (below) permanently prevents any future test run from
+producing that flood again.
+
+**Tests**: `tests/test_dispatch.py` (new) verifies the *wiring* — the right task gets `.delay()`d
+with the right id at the right point — for all six call sites above (submission, classification
+resolve, duplicate keep_both/reject/merge, rollback, bulk-move) plus `_curate`'s own reindex
+dispatch, via an autouse `dispatched` fixture in `conftest.py` that intercepts every `.delay()` call
+so the pytest suite never touches the real broker (previously true by accident, since nothing
+called `.delay()` before this step; now true by design). Live-verified separately (not committed):
+one document submitted over real HTTP to a running gateway, with nothing manually driving any
+pipeline step, reached `ingested` and became searchable purely through the four real worker
+containers within seconds.
+
+**Spec touch-point**: `02` §7's "always automatic" reindex and `03`'s pipeline diagrams are now
+literally true end-to-end, not just modeled as explicit-call stand-ins (09 §21's original framing) —
+no wording changes needed, since both already described this as the eventual, intended behavior.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

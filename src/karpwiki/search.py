@@ -289,13 +289,23 @@ async def mark_stale(session: AsyncSession, page_id: uuid.UUID) -> None:
         status.state = IndexState.stale
 
 
-async def pending_pages(session: AsyncSession, limit: int = 100) -> list[uuid.UUID]:
-    """Pages awaiting (re)index — what the indexing worker pool drains (06 §4)."""
-    result = await session.execute(
-        select(IndexStatus.page_id)
-        .where(IndexStatus.state.in_([IndexState.pending, IndexState.stale]))
-        .limit(limit)
+async def pending_pages(
+    session: AsyncSession, limit: int = 100, *, workspace_id: str | None = None
+) -> list[uuid.UUID]:
+    """Pages awaiting (re)index — what the indexing worker pool drains (06 §4).
+
+    `workspace_id` scopes the sweep to one workspace — phase2-tasklist.md step 32's "a page
+    write enqueues reindex" dispatch uses this right after a curate/bulk-move/rollback write,
+    rather than tracking the exact set of pages a call touched.
+    """
+    query = select(IndexStatus.page_id).where(
+        IndexStatus.state.in_([IndexState.pending, IndexState.stale])
     )
+    if workspace_id is not None:
+        query = query.join(WikiPage, WikiPage.page_id == IndexStatus.page_id).where(
+            WikiPage.workspace_id == workspace_id
+        )
+    result = await session.execute(query.limit(limit))
     return list(result.scalars())
 
 

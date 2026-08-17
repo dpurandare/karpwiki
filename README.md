@@ -58,14 +58,14 @@ kind (including duplicate `merge`, `supersede`, and `keep_both`) and roll back a
 through the gateway. Phase 2+ scope (multi-workspace routing, connectors, the Maintenance Advisor,
 MCP, horizontal scaling) is [`07-additional-features-and-roadmap.md`](spec/07-additional-features-and-roadmap.md).
 
-Pipeline stages are not yet wired as *automatic* background jobs — nothing in the API layer
-enqueues onto the classification/curation/indexing queues on its own (phase2-tasklist.md step 32).
-Real Celery tasks and worker containers exist now (steps 30–31: `karpwiki/tasks.py`,
-`docker compose up -d worker-classification worker-curation worker-indexing worker-maintenance`),
-so classification, dedup, curation, and reindexing *can* run as real background jobs today — a
-test, an admin action, or a manual `.delay()` call drives them, same as the explicit-function-call
-path always has. See the task list for what step 32 still needs to close the loop, and what gates
-building the install/scaling docs that assume it's solved.
+Pipeline stages now run as real automatic background jobs (steps 30–32): submitting a document
+enqueues classification, an accepted classification enqueues dedup-then-curation, and every page
+write enqueues reindexing — no test, admin action, or manual call needs to drive any of it. Start
+the workers alongside the rest of the infra with
+`docker compose up -d worker-classification worker-curation worker-indexing worker-maintenance`
+(each is one process per queue in `karpwiki/tasks.py`'s `QUEUES`). Install/scaling docs
+(phase2-tasklist.md step 34) are still gated on the remaining 2b steps (retry/idempotency
+semantics, then the formal end-to-end verify).
 
 ```bash
 cp .env.example .env                     # then fill in OPENAI_API_KEY

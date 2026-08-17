@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-17): steps 22–31 done, track 2a complete, track 2b in progress.** Phase 1 (steps 1–21,
+**Status (2026-08-17): steps 22–32 done, track 2a complete, track 2b in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -164,7 +164,15 @@ is a real Authenticator implementation using that pick, not a library search.
     [09](09-implementation-notes.md) §34.
 32. Wire dispatch: submission enqueues classification; acceptance enqueues dedup then curate; a
     page write enqueues reindex — [02](02-storage-and-indexing.md) §7's "always automatic"
-    reindex, finally literal rather than an explicit test/admin call.
+    reindex, finally literal rather than an explicit test/admin call. **Done** —
+    [`api.py`](../src/karpwiki/api.py) dispatches at submission, review-item resolution
+    (classification/duplicate), rollback, and bulk-move; [`tasks.py`](../src/karpwiki/tasks.py)'s
+    own tasks self-dispatch the next stage once their transaction commits. Surfaced a real gap in
+    step 30's design (`_curate` needed to skip dedup when resuming from an admin-resolved
+    duplicate) and a reproduced-once broker hiccup traced to this session's own pre-fixture test
+    run, not the dispatch code — see [09](09-implementation-notes.md) §35. Live-verified: a
+    document submitted over real HTTP reached `ingested` and became searchable with nothing
+    manually driving the pipeline.
 33. Task retry/idempotency semantics — [03](03-ingestion-and-review-workflows.md) §1's "transient
     failures retried inside the worker" framing has assumed a real worker since Phase 1; this is
     where one exists to do it.

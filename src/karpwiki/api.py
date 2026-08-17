@@ -44,6 +44,7 @@ from . import (
     query_log,
     review,
     search,
+    tasks,
     versioning,
     workspaces,
 )
@@ -380,6 +381,10 @@ def _register_routes(app: FastAPI) -> None:
                 )
             )
         await session.commit()
+        # 03 §2/phase2-tasklist.md step 32: submission enqueues classification. Dispatched
+        # only after commit — the classification task opens its own session and must see
+        # this source row.
+        tasks.classify_source.delay(str(source.source_id))
         return body
 
     @app.get("/sources/{source_id}")
@@ -507,6 +512,21 @@ def _register_routes(app: FastAPI) -> None:
         except ingestion.InvalidResolutionError as exc:
             raise ApiError(400, "invalid_request", str(exc)) from exc
 
+        # phase2-tasklist.md step 32's "acceptance enqueues dedup then curate": a
+        # `classification` resolution always lands at `classified` (fresh dedup still to
+        # run); `duplicate`'s `keep_both`/`supersede` land at `ingesting` (dedup already
+        # resolved by this admin action — `tasks._curate` skips re-running it, 09 §35).
+        # `merge` writes its target page directly and reaches `ingested` here, so it needs
+        # a reindex dispatch instead — the page it touched isn't returned by
+        # `resolve_review_item`, so it's read back off `ingestion_log` the same way
+        # `ingestion._duplicate_evidence` reads other resolution detail.
+        merge_page_id: uuid.UUID | None = None
+        if item.kind is ReviewKind.duplicate and payload.action == "merge" and state is PipelineState.ingested:
+            for entry in reversed(await pipeline.history(session, uuid.UUID(item.subject_ref))):
+                if entry.detail.get("resolution") == "merge" and "target_page_id" in entry.detail:
+                    merge_page_id = uuid.UUID(entry.detail["target_page_id"])
+                    break
+
         body = {
             "review_id": str(item.review_id),
             "status": item.status.value,
@@ -524,6 +544,10 @@ def _register_routes(app: FastAPI) -> None:
                 )
             )
         await session.commit()
+        if state in (PipelineState.classified, PipelineState.ingesting):
+            tasks.curate_source.delay(item.subject_ref)
+        elif merge_page_id is not None:
+            tasks.reindex.delay(str(merge_page_id))
         return body
 
     @app.get("/pages/{page_id}/versions/diff")
@@ -622,6 +646,9 @@ def _register_routes(app: FastAPI) -> None:
                 )
             )
         await session.commit()
+        # 02 §7/phase2-tasklist.md step 32: a page write enqueues reindex — the exact page
+        # is already known here, no need for a workspace-scoped sweep like `tasks._curate`'s.
+        tasks.reindex.delay(str(page.page_id))
         return body
 
     @app.get("/document-types")
@@ -952,6 +979,11 @@ def _register_routes(app: FastAPI) -> None:
             batch_count += 1
             moved_page_ids.extend(batch.moved_page_ids)
             moved_source_ids.extend(batch.moved_source_ids)
+            # 02 §7/step 32: a page write enqueues reindex — dispatched per batch, right
+            # after its own commit, so an already-committed batch's pages get reindexed
+            # even if a later batch halts the loop.
+            for moved_page_id in batch.moved_page_ids:
+                tasks.reindex.delay(str(moved_page_id))
 
         # 05 §6: same as rollback, a bulk move is logged to log.md as well as
         # admin_action_log (09 §23) — for both workspaces it touched.
