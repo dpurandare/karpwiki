@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-17): step 22 done**, 2a in progress. Phase 1 (steps 1–21,
+**Status (2026-08-17): steps 22–23 done**, 2a in progress. Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -56,6 +56,15 @@ is a real Authenticator implementation using that pick, not a library search.
     [06](06-api-mcp-and-scaling.md) §1) and archive-lifecycle semantics, plus access-policy
     grant/revoke endpoints ([05](05-admin-backend-and-maintenance.md) §7's "Access policy
     management" — `access_policy` rows are only ever written directly today, no admin surface).
+    **Done** — [`workspaces.py`](../src/karpwiki/workspaces.py) (CRUD + grant/revoke/list-access),
+    [`api.py`](../src/karpwiki/api.py) (`GET`/`POST /workspaces`,
+    `GET`/`POST /workspaces/{id}`, `POST /workspaces/{id}/archive`,
+    `GET`/`POST /workspaces/{id}/access-policy`,
+    `DELETE /workspaces/{id}/access-policy/{principal}`) — see
+    [09](09-implementation-notes.md) §26 for the creation bootstrap problem (no target workspace
+    exists yet — reuses `09` §22's answer, plus auto-grants the creator admin so the workspace
+    isn't a dead end), and for why `schema_ref` stays a pointer only (real `SCHEMA.md` storage is
+    carried forward as its own future piece, not built as a CRUD side effect).
 24. Classifier routing across the full active-workspace set, not one pre-selected workspace
     ([03](03-ingestion-and-review-workflows.md) §3: "routes submissions to a workspace/document
     type") — the routing this track is named for. Today `classify_source`/`resolve_classification`

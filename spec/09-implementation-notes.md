@@ -913,5 +913,48 @@ sees every type across every workspace they administer, not a global listing.
 **Spec touch-point**: none — `02` §3 and `05` §7 already specify the fields and the CRUD
 operations; this note records the key design and auth shape underneath them.
 
+## 26. Workspace CRUD, Its Bootstrap Problem, and `schema_ref`'s Scope (Phase 2 Step 23)
+
+**Operation set matches `06` §1 exactly: create, update, archive — no delete, no unarchive.** `01`
+§3 frames deletion as rare, explicit, and gated on an export prerequisite (`05` §7) — a
+substantially bigger, separate piece of work, not a fourth CRUD verb to add here. Archived is
+described as "read-only, excluded from default search/ingestion routing but still queryable,"
+never as reversible, and the operation table doesn't name an unarchive action — so none exists.
+
+**Creating a workspace has no target workspace to check admin against.** Every other admin check
+in this codebase (`document-types`, `pages/{id}/rollback`, `review-items/{id}/resolve`) scopes
+`has_role` to an *existing* workspace. Workspace creation can't — nothing exists yet. Reused the
+same bootstrap answer `09` §22 already gave for workspace-less review items: admin in at least one
+existing workspace is sufficient, rather than building the global-admin grant `09` §22 explicitly
+declined to add. This still leaves the very first workspace in a fresh deployment uncreatable
+through the API (no workspace exists yet to hold the first admin grant) — expected and
+out of scope: seeding the first workspace and its first admin grant is deployment setup, the same
+category of concern as seeding the first Postgres role, not a gateway operation.
+
+**Creating a workspace grants the creator `admin` on it automatically.** Not directly specified,
+but required for the endpoint to not be a dead end: every subsequent mutation (`update`, `archive`,
+granting *other* principals access) requires admin *in that workspace*, and a freshly created
+workspace starts with zero `access_policy` rows. Without this grant, a workspace's creator
+couldn't manage what they just created through the API at all — only a raw DB write could recover
+it. `workspaces.create()` itself stays a pure DB operation with no principal concept; the grant is
+the `POST /workspaces` handler's own follow-up call to `workspaces.grant()`, not something the
+create function does implicitly.
+
+**`schema_ref` stays a plain pointer field — SCHEMA.md itself is not implemented.** `05` §7's
+"Workspace lifecycle" bullet lists "edit SCHEMA.md" alongside create/archive, but no code anywhere
+loads, parses, versions, or applies a real per-workspace `SCHEMA.md` today — every threshold
+(`09` §6's near-duplicate score, classification confidence, etc.) is a hardcoded Python default,
+and `llm.resolve_model`'s `schema: dict | None` parameter has never been passed anything but
+`None`. Building real SCHEMA.md storage (parsing, validation, versioning through the page-version
+machinery per `01` §7's "versioned like a wiki page," then rewiring `classify.py`/`dedup.py`/
+`curate.py`/`llm.py` to read live per-workspace overrides instead of constants) is a
+self-contained feature on the scale of a track of its own, not a workspace-CRUD side effect. This
+step's `update` lets an admin set/change the *pointer* string, matching `01` §3's own framing of
+the field ("pointer to this workspace's SCHEMA.md") — the content behind that pointer remains a
+carried-forward gap, flagged here rather than silently built or silently skipped.
+
+**Spec touch-point**: none — `06` §1 and `05` §7 already specify the operations; this note records
+the bootstrap-auth answer and the `schema_ref` scope boundary underneath them.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

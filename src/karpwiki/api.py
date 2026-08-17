@@ -1,19 +1,20 @@
-"""Common Gateway — submission, review-queue, page-version, and document-type endpoints,
-and the conventions every endpoint shares.
+"""Common Gateway — submission, review-queue, page-version, document-type, and workspace
+endpoints, and the conventions every endpoint shares.
 
 Implements phase1-tasklist step 7 (03 §2's submission path, plus the two cross-cutting
 pieces it is the first to need — principal resolution and role enforcement, 09 §15, and
 the API conventions of 09 §14), step 19 (05 §1's review queue: `review-items` list and
 `review-items/{id}/resolve` — the first list endpoint, so it's also where cursor
 pagination, 09 §14, actually lands), step 20 (05 §6's Version Browser: `pages/{id}/
-versions` list/get/diff and `pages/{id}/rollback`), and phase2-tasklist.md step 22 (05 §7's
-document-type taxonomy CRUD: `document-types` list/create/update/delete).
+versions` list/get/diff and `pages/{id}/rollback`), and phase2-tasklist.md steps 22
+(05 §7's document-type taxonomy CRUD: `document-types` list/create/update/delete) and 23
+(`workspaces` create/update/archive/list/get, plus access-policy grant/revoke — 05 §7,
+06 §1, §3).
 
 Not implemented here, deliberately: the rate limiter is 07 §3, a later phase (phase2-
-tasklist.md step 48). `pages` get/list and `workspaces` CRUD (06 §1's other rows) aren't
-built either — out of this file's steps' citations so far, and not needed for what is:
-version history/rollback only ever take a `page_id` path param, and document-type
-management only ever takes an explicit `workspace_id`.
+tasklist.md step 48). `pages` get/list (06 §1's other row) isn't built either — out of this
+file's steps' citations so far, and version history/rollback only ever take a `page_id`
+path param, never a page-listing call to discover one.
 """
 
 import hashlib
@@ -26,7 +27,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import document_types, ingestion, objectstore, pipeline, review, versioning
+from . import document_types, ingestion, objectstore, pipeline, review, versioning, workspaces
 from .auth import (
     Authenticator,
     Principal,
@@ -36,6 +37,7 @@ from .auth import (
 )
 from .db import SessionLocal
 from .models import (
+    AccessPolicy,
     DocumentType,
     IdempotencyRecord,
     PageVersion,
@@ -213,6 +215,64 @@ async def _admin_document_type(
     ):
         raise ApiError(403, "forbidden", "This operation requires the admin role.")
     return doc_type
+
+
+class CreateWorkspaceRequest(BaseModel):
+    """POST /workspaces body (06 §1, 05 §7, 01 §3)."""
+
+    workspace_id: str
+    name: str
+    description: str | None = None
+    schema_ref: str | None = None
+    storage_bindings: dict | None = None
+
+
+class UpdateWorkspaceRequest(BaseModel):
+    """POST /workspaces/{id} body — only supplied fields change."""
+
+    name: str | None = None
+    description: str | None = None
+    schema_ref: str | None = None
+    storage_bindings: dict | None = None
+
+
+class GrantAccessRequest(BaseModel):
+    """POST /workspaces/{id}/access-policy body (05 §7, 06 §3)."""
+
+    principal: str
+    role: Role
+
+
+def _workspace_body(workspace: Workspace) -> dict[str, Any]:
+    return {
+        "workspace_id": workspace.workspace_id,
+        "name": workspace.name,
+        "description": workspace.description,
+        "schema_ref": workspace.schema_ref,
+        "status": workspace.status.value,
+        "storage_bindings": workspace.storage_bindings,
+    }
+
+
+def _access_policy_body(policy: AccessPolicy) -> dict[str, Any]:
+    return {
+        "workspace_id": policy.workspace_id,
+        "principal": policy.principal,
+        "role": policy.role.value,
+    }
+
+
+async def _admin_workspace(
+    session: AsyncSession, principal: Principal, workspace_id: str
+) -> Workspace:
+    workspace = await session.get(Workspace, workspace_id)
+    if workspace is None:
+        raise ApiError(404, "not_found", f"No workspace {workspace_id!r}.")
+    if not await has_role(
+        session, principal=principal, workspace_id=workspace_id, required=Role.admin
+    ):
+        raise ApiError(403, "forbidden", "This operation requires the admin role.")
+    return workspace
 
 
 def _register_routes(app: FastAPI) -> None:
@@ -624,6 +684,133 @@ def _register_routes(app: FastAPI) -> None:
     ):
         doc_type = await _admin_document_type(session, principal, type_code)
         await document_types.delete(session, doc_type=doc_type)
+        await session.commit()
+
+    @app.get("/workspaces")
+    async def list_workspaces(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+    ):
+        """06 §1: returns only workspaces the caller can access, any role — unlike
+        `document-types`, this resource has a reader-visible half."""
+        found = await workspaces.list_for_principal(session, principal_keys=principal.policy_keys)
+        return {"items": [_workspace_body(w) for w in found]}
+
+    @app.get("/workspaces/{workspace_id}")
+    async def get_workspace(
+        workspace_id: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+    ):
+        workspace = await session.get(Workspace, workspace_id)
+        if workspace is None or not await has_role(
+            session, principal=principal, workspace_id=workspace_id, required=Role.reader
+        ):
+            # Same response either way: whether a workspace exists is not public to a
+            # caller with no access to it (mirrors /sources/{id}, step 7).
+            raise ApiError(404, "not_found", f"No workspace {workspace_id!r}.")
+        return _workspace_body(workspace)
+
+    @app.post("/workspaces", status_code=201)
+    async def create_workspace(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        payload: CreateWorkspaceRequest,
+    ):
+        """06 §1: create requires admin. The target workspace doesn't exist yet, so this
+        checks admin in at least one *existing* workspace — the same bootstrap answer
+        09 §22 already gave for workspace-less review items, reused here rather than
+        inventing the global-admin grant 09 §22 explicitly declined to build."""
+        admin_workspaces = await any_workspace_with_role(
+            session, principal=principal, required=Role.admin
+        )
+        if not admin_workspaces:
+            raise ApiError(
+                403, "forbidden", "Creating a workspace requires the admin role somewhere."
+            )
+        try:
+            workspace = await workspaces.create(
+                session,
+                workspace_id=payload.workspace_id,
+                name=payload.name,
+                description=payload.description,
+                schema_ref=payload.schema_ref,
+                storage_bindings=payload.storage_bindings,
+            )
+        except workspaces.DuplicateWorkspaceError as exc:
+            raise ApiError(409, "conflict", str(exc)) from exc
+        # Without this, nobody could manage the workspace they just created through the API
+        # at all — every other mutation here requires admin *in that workspace*, which
+        # nothing yet grants once creation itself succeeds.
+        await workspaces.grant(
+            session, workspace_id=workspace.workspace_id, principal=principal.id, role=Role.admin
+        )
+        await session.commit()
+        return _workspace_body(workspace)
+
+    @app.post("/workspaces/{workspace_id}")
+    async def update_workspace(
+        workspace_id: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        payload: UpdateWorkspaceRequest,
+    ):
+        workspace = await _admin_workspace(session, principal, workspace_id)
+        updated = await workspaces.update(
+            session,
+            workspace=workspace,
+            name=payload.name,
+            description=payload.description,
+            schema_ref=payload.schema_ref,
+            storage_bindings=payload.storage_bindings,
+        )
+        await session.commit()
+        return _workspace_body(updated)
+
+    @app.post("/workspaces/{workspace_id}/archive")
+    async def archive_workspace(
+        workspace_id: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+    ):
+        workspace = await _admin_workspace(session, principal, workspace_id)
+        archived = await workspaces.archive(session, workspace=workspace)
+        await session.commit()
+        return _workspace_body(archived)
+
+    @app.get("/workspaces/{workspace_id}/access-policy")
+    async def list_access_policy(
+        workspace_id: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+    ):
+        await _admin_workspace(session, principal, workspace_id)
+        grants = await workspaces.list_access(session, workspace_id=workspace_id)
+        return {"items": [_access_policy_body(g) for g in grants]}
+
+    @app.post("/workspaces/{workspace_id}/access-policy", status_code=201)
+    async def grant_access_policy(
+        workspace_id: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        payload: GrantAccessRequest,
+    ):
+        await _admin_workspace(session, principal, workspace_id)
+        granted = await workspaces.grant(
+            session, workspace_id=workspace_id, principal=payload.principal, role=payload.role
+        )
+        await session.commit()
+        return _access_policy_body(granted)
+
+    @app.delete("/workspaces/{workspace_id}/access-policy/{revoked_principal}", status_code=204)
+    async def revoke_access_policy(
+        workspace_id: str,
+        revoked_principal: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+    ):
+        await _admin_workspace(session, principal, workspace_id)
+        await workspaces.revoke(session, workspace_id=workspace_id, principal=revoked_principal)
         await session.commit()
 
 
