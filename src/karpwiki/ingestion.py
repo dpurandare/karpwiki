@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from . import classify, curate, dedup, llm, objectstore, pipeline, review, versioning
 from .frontmatter import split_frontmatter
 from .models import (
+    AdminActionLog,
     PageStatus,
     PageType,
     PageVersion,
@@ -807,14 +808,26 @@ async def _refresh_overview(session: AsyncSession, *, workspace_id: str) -> None
 
 
 async def _refresh_log(session: AsyncSession, *, workspace_id: str) -> None:
-    entries = await pipeline.recent_ingested(
+    """log.md merges `ingestion_log` and `admin_action_log` (02 §5, 09 §23) — `lint_log`
+    doesn't exist in Phase 1, no lint pass is built."""
+    rows: list[tuple] = []
+
+    for entry in await pipeline.recent_ingested(
         session, workspace_id=workspace_id, limit=curate.LOG_RECENT_LIMIT
-    )
-    rows = []
-    for entry in entries:
+    ):
         source = await session.get(RawSource, entry.source_id)
         pages_touched = entry.detail.get("pages_touched") if isinstance(entry.detail, dict) else None
-        rows.append((entry.created_at, source.filename if source else "?", pages_touched or 0))
+        filename = source.filename if source else "?"
+        rows.append(
+            (entry.created_at, f"Ingested `{filename}` → {pages_touched or 0} page(s) touched")
+        )
+
+    for entry in await _recent_admin_actions(
+        session, workspace_id=workspace_id, limit=curate.LOG_RECENT_LIMIT
+    ):
+        rows.append((entry.created_at, f"{entry.actor}: {entry.action} ({entry.subject_ref})"))
+
+    rows.sort(key=lambda row: row[0], reverse=True)
     body = curate.render_log_body(rows)
     await _upsert_singleton(
         session,
@@ -824,6 +837,18 @@ async def _refresh_log(session: AsyncSession, *, workspace_id: str) -> None:
         title=f"{workspace_id} Log",
         body=body,
     )
+
+
+async def _recent_admin_actions(
+    session: AsyncSession, *, workspace_id: str, limit: int
+) -> list[AdminActionLog]:
+    result = await session.execute(
+        select(AdminActionLog)
+        .where(AdminActionLog.workspace_id == workspace_id)
+        .order_by(AdminActionLog.created_at.desc(), AdminActionLog.entry_id.desc())
+        .limit(limit)
+    )
+    return list(result.scalars())
 
 
 async def _upsert_singleton(

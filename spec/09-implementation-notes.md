@@ -797,5 +797,46 @@ tiebreak alone.
 resolution mechanics unspecified ("the available resolution actions for that kind"), and `03` §4's
 action table already described `merge`/`supersede` at the level this note fills in underneath.
 
+## 23. Version Browser and Rollback (Step 20)
+
+**`log.md` now actually merges `ingestion_log` and `admin_action_log`, not just `ingestion_log`.**
+`05` §6 says rollback is "logged to `admin_action_log` and `log.md`" — the former didn't exist
+until step 19, so `log.md`'s renderer had only ever drawn from `ingestion_log`, and step 19's own
+note said as much. That's now stale: `curate.render_log_body` takes pre-formatted
+`(timestamp, description)` pairs rather than ingestion-shaped `(timestamp, filename, count)`
+tuples, and `ingestion._refresh_log` merges both streams (sorted newest-first) before rendering.
+This isn't scoped to rollback specifically — every `admin_action_log` entry now surfaces in
+`log.md`, including step 19's review-item resolutions — because the mechanism is inherently general
+once built, and `02` §5 already describes `log.md` as materialized from every named stream
+(`lint_log` excepted — no lint pass exists in Phase 1).
+
+**Diff is recomputed directly from stored content, not composed from `diff_ref`.** `05` §6 wants a
+diff between *any* two versions, but `diff_ref` (`09` §7) only ever holds the diff against the
+version immediately before it — composing an arbitrary-pair diff from a chain of adjacent diffs is
+real work (and lossy without care). Since `page_version.content` already stores each version's full
+document, `versioning.diff` just runs `difflib.unified_diff` directly between the two requested
+versions' `content`, exactly like `_write_diff` does for adjacent ones. `diff_ref` remains what it
+was: a cheap precomputed cache for the common "diff to previous" case in a version list.
+
+**Cursor pagination moved to a shared `pagination.py`.** Step 19 built `review.py`'s cursor
+encode/decode as private module functions. This step needed the identical `(created_at, id)`
+cursor for `versioning.list_versions`, so rather than duplicate it a second time, both now import
+from `pagination.py` (`encode_cursor`, `decode_cursor`, `DEFAULT_LIST_LIMIT`, `MAX_LIST_LIMIT`).
+`review.py` re-exports the constants it already had, so nothing calling `review.DEFAULT_LIST_LIMIT`
+needed to change.
+
+**Route registration order matters for `/pages/{id}/versions/diff` vs. `/versions/{version_id}`.**
+FastAPI/Starlette matches routes in registration order; a literal path segment must be registered
+before a path-parameter route that would otherwise shadow it (`version_id="diff"` matching first).
+The diff route is defined immediately before the get-one-version route in `api.py` for exactly this
+reason, and a test (`test_diff_route_is_not_shadowed_by_the_version_id_route`) pins it.
+
+**Scope**: `06` §1's `pages` resource (plain get/list) is not built — out of step 20's citation
+(`05` §6 only) and not needed here, since every version/rollback operation takes a `page_id` path
+param directly rather than discovering one through a page-listing call.
+
+**Spec touch-point** (applied): none — `05` §6 and `06` §1 already described this surface; this
+note records how `log.md`'s merge and the diff mechanics are realized underneath it.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

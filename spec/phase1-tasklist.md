@@ -7,7 +7,7 @@ Maintenance Advisor (staleness/orphan/dedup *background* detectors), full API+MC
 horizontal-scaling infra, fine-grained RBAC.
 
 **Status (2026-08-17): 1a and 1b complete** (steps 1–15), plus step 16 pulled forward from 1c.
-Steps 17–19 are also done. 1c's remaining steps (20, 21) are next. Implementation lives in
+Steps 17–20 are also done. 1c's last step (21, end-to-end verify) is next. Implementation lives in
 [`src/karpwiki/`](../src/karpwiki/); see the [README](../README.md) for how to run it.
 
 ## 0 — Readiness Items (settle before the step they block)
@@ -149,6 +149,11 @@ Accepted for Phase 1, no action needed — recorded so they aren't rediscovered 
 20. Build the admin console's page version history view + manual rollback —
     [05](05-admin-backend-and-maintenance.md) §6 (rollback only; skip repository management,
     performance monitoring — later phases).
+    **Done** — [`versioning.py`](../src/karpwiki/versioning.py) (`list_versions`, `diff`,
+    `rollback` now writing `admin_action_log`), [`api.py`](../src/karpwiki/api.py)
+    (`GET /pages/{id}/versions`, `.../versions/{version_id}`, `.../versions/diff`,
+    `POST /pages/{id}/rollback`) — see [09](09-implementation-notes.md) §23 for the `log.md`
+    merge, the diff-recompute approach, and the shared `pagination.py` cursor helper.
 21. **Verify**: search returns ranked, cited results; an admin can see the queue, resolve a
     submission/duplicate/classification item, and roll back a page version.
 

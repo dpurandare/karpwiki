@@ -66,7 +66,7 @@ def test_overview_body_caps_at_the_recent_limit():
 
 def test_log_body_renders_newest_first_as_given():
     now = datetime(2026, 8, 16, tzinfo=timezone.utc)
-    body = curate.render_log_body([(now, "runbook.md", 4)])
+    body = curate.render_log_body([(now, "Ingested `runbook.md` → 4 page(s) touched")])
     assert "runbook.md" in body
     assert "4 page(s)" in body
 

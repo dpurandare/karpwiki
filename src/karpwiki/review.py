@@ -18,17 +18,13 @@ which calls `resolve` here once its own work is done; keeping that split avoids 
 import (`ingestion.py` already imports this module).
 """
 
-import base64
-import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import AdminActionLog, ReviewItem, ReviewKind, ReviewStatus
-
-DEFAULT_LIST_LIMIT = 50
-MAX_LIST_LIMIT = 200
+from .pagination import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, decode_cursor, encode_cursor
 
 
 class AlreadyResolvedError(ValueError):
@@ -86,7 +82,7 @@ async def list_items(
     if severity is not None:
         stmt = stmt.where(ReviewItem.severity == severity)
     if cursor is not None:
-        created_at, review_id = _decode_cursor(cursor)
+        created_at, review_id = decode_cursor(cursor)
         stmt = stmt.where(
             tuple_(ReviewItem.created_at, ReviewItem.review_id) < tuple_(created_at, review_id)
         )
@@ -100,18 +96,8 @@ async def list_items(
     if len(items) > limit:
         items = items[:limit]
         last = items[-1]
-        next_cursor = _encode_cursor(last.created_at, last.review_id)
+        next_cursor = encode_cursor(last.created_at, last.review_id)
     return items, next_cursor
-
-
-def _encode_cursor(created_at, review_id: uuid.UUID) -> str:
-    return base64.urlsafe_b64encode(f"{created_at.isoformat()}|{review_id}".encode()).decode()
-
-
-def _decode_cursor(cursor: str) -> tuple:
-    raw = base64.urlsafe_b64decode(cursor.encode()).decode()
-    created_at, review_id = raw.rsplit("|", 1)
-    return datetime.fromisoformat(created_at), uuid.UUID(review_id)
 
 
 async def resolve(

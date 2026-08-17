@@ -10,12 +10,13 @@ import uuid
 from collections.abc import Sequence
 
 import yaml
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import objectstore
 from .frontmatter import DEFAULT_REQUIRED_TAGS_MIN, validate_frontmatter
 from .models import (
+    AdminActionLog,
     IndexState,
     IndexStatus,
     IndexType,
@@ -25,6 +26,7 @@ from .models import (
     VersionTrigger,
     WikiPage,
 )
+from .pagination import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, decode_cursor, encode_cursor
 
 
 def render_document(frontmatter: dict, body: str) -> str:
@@ -163,13 +165,13 @@ async def rollback(
     author: str,
     change_summary: str | None = None,
 ) -> PageVersion:
-    """Restore a prior version's content as a new version (01 §5)."""
+    """Restore a prior version's content as a new version (01 §5, 05 §6)."""
     target = await session.get(PageVersion, target_version_id)
     if target is None or target.page_id != page.page_id:
         raise ValueError(f"version {target_version_id} does not belong to page {page.page_id}")
 
     _, body = _split(target.content)
-    return await write_version(
+    version = await write_version(
         session,
         page=page,
         body=body,
@@ -184,6 +186,24 @@ async def rollback(
         restored_from_version_id=target_version_id,
     )
 
+    # 05 §6: "logged to admin_action_log and log.md" — the latter is a rendering concern
+    # (curate.render_log_body / ingestion._refresh_log, 09 §23), this is the audit write.
+    session.add(
+        AdminActionLog(
+            actor=author,
+            action="rollback_page",
+            workspace_id=page.workspace_id,
+            subject_ref=page.path,
+            detail={
+                "page_id": str(page.page_id),
+                "restored_from_version_id": str(target_version_id),
+                "new_version_id": str(version.version_id),
+            },
+        )
+    )
+    await session.flush()
+    return version
+
 
 async def history(session: AsyncSession, page_id: uuid.UUID) -> list[PageVersion]:
     result = await session.execute(
@@ -192,6 +212,61 @@ async def history(session: AsyncSession, page_id: uuid.UUID) -> list[PageVersion
         .order_by(PageVersion.created_at, PageVersion.version_id)
     )
     return list(result.scalars())
+
+
+async def list_versions(
+    session: AsyncSession,
+    *,
+    page_id: uuid.UUID,
+    limit: int = DEFAULT_LIST_LIMIT,
+    cursor: str | None = None,
+) -> tuple[list[PageVersion], str | None]:
+    """05 §6's Version Browser list, newest first, cursor-paginated per 09 §14 — unlike
+    `history` above (oldest-first, unpaginated, kept as-is for its existing callers)."""
+    limit = min(limit, MAX_LIST_LIMIT)
+    stmt = select(PageVersion).where(PageVersion.page_id == page_id)
+    if cursor is not None:
+        created_at, version_id = decode_cursor(cursor)
+        stmt = stmt.where(
+            tuple_(PageVersion.created_at, PageVersion.version_id) < tuple_(created_at, version_id)
+        )
+    stmt = stmt.order_by(PageVersion.created_at.desc(), PageVersion.version_id.desc()).limit(
+        limit + 1
+    )
+    versions = list((await session.execute(stmt)).scalars())
+
+    next_cursor = None
+    if len(versions) > limit:
+        versions = versions[:limit]
+        last = versions[-1]
+        next_cursor = encode_cursor(last.created_at, last.version_id)
+    return versions, next_cursor
+
+
+async def diff(
+    session: AsyncSession,
+    *,
+    page_id: uuid.UUID,
+    from_version_id: uuid.UUID,
+    to_version_id: uuid.UUID,
+) -> str:
+    """A diff between any two versions of one page (05 §6), recomputed directly from their
+    stored `content` rather than composing `diff_ref` (09 §23) — that cache only ever holds
+    the diff against the *immediately previous* version, not an arbitrary pair."""
+    from_version = await session.get(PageVersion, from_version_id)
+    to_version = await session.get(PageVersion, to_version_id)
+    for version, version_id in ((from_version, from_version_id), (to_version, to_version_id)):
+        if version is None or version.page_id != page_id:
+            raise ValueError(f"version {version_id} does not belong to page {page_id}")
+
+    return "".join(
+        difflib.unified_diff(
+            from_version.content.splitlines(keepends=True),
+            to_version.content.splitlines(keepends=True),
+            fromfile=str(from_version_id),
+            tofile=str(to_version_id),
+        )
+    )
 
 
 def _split(document: str) -> tuple[dict, str]:

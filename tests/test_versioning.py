@@ -13,6 +13,7 @@ from karpwiki import objectstore, versioning
 from karpwiki.frontmatter import FrontmatterError, split_frontmatter, validate_frontmatter
 from karpwiki.models import (
     AccessPolicy,
+    AdminActionLog,
     IndexState,
     IndexStatus,
     IndexType,
@@ -149,6 +150,105 @@ async def test_rollback_is_non_destructive(session, workspace):
     assert "# Original" in restored.content
     # Three versions exist — nothing was deleted.
     assert len(await versioning.history(session, page.page_id)) == 3
+
+
+async def test_rollback_writes_an_admin_action_log_entry(session, workspace):
+    """05 §6: rollback is "logged to admin_action_log and log.md" — this is the former."""
+    page = await versioning.create_page(
+        session, workspace_id=workspace.workspace_id, body="# Original\n", **PAGE
+    )
+    original_version_id = page.current_version_id
+    await versioning.write_version(
+        session, page=page, body="# Replaced\n", author="user:deepak",
+        trigger=VersionTrigger.manual_edit,
+    )
+
+    restored = await versioning.rollback(
+        session, page=page, target_version_id=original_version_id, author="user:admin"
+    )
+    await session.commit()
+
+    result = await session.execute(
+        select(AdminActionLog).where(AdminActionLog.action == "rollback_page")
+    )
+    entry = result.scalar_one()
+    assert entry.actor == "user:admin"
+    assert entry.workspace_id == workspace.workspace_id
+    assert entry.subject_ref == page.path
+    assert entry.detail["restored_from_version_id"] == str(original_version_id)
+    assert entry.detail["new_version_id"] == str(restored.version_id)
+
+
+async def test_list_versions_paginates_newest_first(session, workspace):
+    page = await versioning.create_page(
+        session, workspace_id=workspace.workspace_id, body="# v1\n", **PAGE
+    )
+    v1 = page.current_version_id
+    v2 = (
+        await versioning.write_version(
+            session, page=page, body="# v2\n", author="user:deepak",
+            trigger=VersionTrigger.manual_edit,
+        )
+    ).version_id
+    v3 = (
+        await versioning.write_version(
+            session, page=page, body="# v3\n", author="user:deepak",
+            trigger=VersionTrigger.manual_edit,
+        )
+    ).version_id
+    await session.commit()
+
+    page1, cursor = await versioning.list_versions(session, page_id=page.page_id, limit=2)
+    assert [v.version_id for v in page1] == [v3, v2]
+    assert cursor is not None
+
+    page2, cursor2 = await versioning.list_versions(
+        session, page_id=page.page_id, limit=2, cursor=cursor
+    )
+    assert [v.version_id for v in page2] == [v1]
+    assert cursor2 is None
+
+
+async def test_diff_compares_any_two_versions_directly(session, workspace):
+    page = await versioning.create_page(
+        session, workspace_id=workspace.workspace_id, body="# v1\nline one\n", **PAGE
+    )
+    v1 = page.current_version_id
+    await versioning.write_version(
+        session, page=page, body="# v2\nline two\n", author="user:deepak",
+        trigger=VersionTrigger.manual_edit,
+    )
+    v3 = (
+        await versioning.write_version(
+            session, page=page, body="# v3\nline three\n", author="user:deepak",
+            trigger=VersionTrigger.manual_edit,
+        )
+    ).version_id
+
+    # Non-adjacent versions (v1 -> v3, skipping v2) — direct recompute, not a diff_ref chain.
+    text = await versioning.diff(session, page_id=page.page_id, from_version_id=v1, to_version_id=v3)
+    assert "-line one" in text
+    assert "+line three" in text
+    assert "line two" not in text
+
+
+async def test_diff_rejects_a_version_from_another_page(session, workspace):
+    page_a = await versioning.create_page(
+        session, workspace_id=workspace.workspace_id, body="# A\n", **PAGE
+    )
+    page_b = await versioning.create_page(
+        session,
+        workspace_id=workspace.workspace_id,
+        body="# B\n",
+        **{**PAGE, "path": "concepts/other.md"},
+    )
+    with pytest.raises(ValueError):
+        await versioning.diff(
+            session,
+            page_id=page_a.page_id,
+            from_version_id=page_a.current_version_id,
+            to_version_id=page_b.current_version_id,
+        )
 
 
 async def test_page_status_change_is_reflected_in_frontmatter(session, workspace):

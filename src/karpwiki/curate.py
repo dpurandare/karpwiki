@@ -111,15 +111,14 @@ def render_overview_body(
     )
 
 
-def render_log_body(entries: list[tuple[datetime, str, int]]) -> str:
-    """`entries` is (timestamp, filename, pages_touched), newest first.
-
-    Scoped to `ingestion_log` only — `lint_log` doesn't exist in Phase 1 (no lint pass is
-    built), and `admin_action_log` (02 §5, 09 §22) is an audit trail for admins, not
-    ingest-facing content, so neither is part of this rendering.
+def render_log_body(entries: list[tuple[datetime, str]]) -> str:
+    """`entries` is (timestamp, description), newest first, already merged from every
+    source 02 §5 names for `log.md` — `ingestion_log` and `admin_action_log` (09 §23);
+    `lint_log` doesn't exist in Phase 1, no lint pass is built. The merge and per-source
+    description formatting happen in `ingestion._refresh_log`, not here — this function
+    stays a pure renderer over whatever timeline it's given.
     """
     lines = "\n".join(
-        f"- {ts.isoformat()}: Ingested `{fn}` → {n} page(s) touched"
-        for ts, fn, n in entries[:LOG_RECENT_LIMIT]
+        f"- {ts.isoformat()}: {desc}" for ts, desc in entries[:LOG_RECENT_LIMIT]
     )
     return lines or "- (none yet)"

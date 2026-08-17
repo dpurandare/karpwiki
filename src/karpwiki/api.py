@@ -1,13 +1,16 @@
-"""Common Gateway — submission and review-queue endpoints, and the conventions every
-endpoint shares.
+"""Common Gateway — submission, review-queue, and page-version endpoints, and the
+conventions every endpoint shares.
 
 Implements phase1-tasklist step 7 (03 §2's submission path, plus the two cross-cutting
 pieces it is the first to need — principal resolution and role enforcement, 09 §15, and
-the API conventions of 09 §14) and step 19 (05 §1's review queue: `review-items` list and
-`review-items/{id}/resolve`) — the first list endpoint, so it's also where cursor
-pagination (09 §14) actually lands, as this module's prior version anticipated.
+the API conventions of 09 §14), step 19 (05 §1's review queue: `review-items` list and
+`review-items/{id}/resolve` — the first list endpoint, so it's also where cursor
+pagination, 09 §14, actually lands), and step 20 (05 §6's Version Browser: `pages/{id}/
+versions` list/get/diff and `pages/{id}/rollback`).
 
-Not implemented here, deliberately: the rate limiter is 07 §3, a later phase.
+Not implemented here, deliberately: the rate limiter is 07 §3, a later phase. `pages`
+get/list (06 §1's other row) isn't built either — out of step 20's citation (05 §6 only),
+and not needed for version history/rollback, which only ever take a `page_id` path param.
 """
 
 import hashlib
@@ -20,7 +23,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import ingestion, objectstore, pipeline, review
+from . import ingestion, objectstore, pipeline, review, versioning
 from .auth import (
     Authenticator,
     Principal,
@@ -31,17 +34,20 @@ from .auth import (
 from .db import SessionLocal
 from .models import (
     IdempotencyRecord,
+    PageVersion,
     PipelineState,
     RawSource,
     ReviewItem,
     ReviewKind,
     ReviewStatus,
     Role,
+    WikiPage,
     Workspace,
 )
 
 SUBMIT_ENDPOINT = "POST /sources"
 RESOLVE_ENDPOINT = "POST /review-items/{id}/resolve"
+ROLLBACK_ENDPOINT = "POST /pages/{id}/rollback"
 
 
 class ApiError(Exception):
@@ -128,6 +134,43 @@ def _review_item_body(item: ReviewItem) -> dict[str, Any]:
         "resolved_by": item.resolved_by,
         "resolved_at": item.resolved_at.isoformat() if item.resolved_at else None,
     }
+
+
+class RollbackRequest(BaseModel):
+    """POST /pages/{id}/rollback body (06 §1, 05 §6, 01 §5)."""
+
+    target_version_id: uuid.UUID
+    change_summary: str | None = None
+
+
+def _page_version_body(version: PageVersion, *, include_content: bool = False) -> dict[str, Any]:
+    body = {
+        "version_id": str(version.version_id),
+        "page_id": str(version.page_id),
+        "author": version.author,
+        "created_at": version.created_at.isoformat(),
+        "trigger": version.trigger.value,
+        "change_summary": version.change_summary,
+        "restored_from_version_id": (
+            str(version.restored_from_version_id) if version.restored_from_version_id else None
+        ),
+    }
+    if include_content:
+        body["content"] = version.content
+        body["frontmatter"] = version.frontmatter
+    return body
+
+
+async def _admin_page(session: AsyncSession, principal: Principal, page_id: uuid.UUID) -> WikiPage:
+    """05 §6's Version Browser is admin-only (06 §1's `pages/{id}/versions` caller column)."""
+    page = await session.get(WikiPage, page_id)
+    if page is None:
+        raise ApiError(404, "not_found", f"No page {page_id}.")
+    if not await has_role(
+        session, principal=principal, workspace_id=page.workspace_id, required=Role.admin
+    ):
+        raise ApiError(403, "forbidden", "This operation requires the admin role.")
+    return page
 
 
 def _register_routes(app: FastAPI) -> None:
@@ -333,6 +376,101 @@ def _register_routes(app: FastAPI) -> None:
                     key=idempotency_key,
                     principal=principal.id,
                     endpoint=RESOLVE_ENDPOINT,
+                    response_status=200,
+                    response_body=body,
+                )
+            )
+        await session.commit()
+        return body
+
+    @app.get("/pages/{page_id}/versions/diff")
+    async def diff_page_versions(
+        page_id: uuid.UUID,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        from_version_id: uuid.UUID,
+        to_version_id: uuid.UUID,
+    ):
+        """05 §6's diff view. Registered ahead of `/versions/{version_id}` below so this
+        literal path isn't shadowed by that one's path parameter."""
+        await _admin_page(session, principal, page_id)
+        try:
+            text = await versioning.diff(
+                session, page_id=page_id, from_version_id=from_version_id, to_version_id=to_version_id
+            )
+        except ValueError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
+        return {
+            "from_version_id": str(from_version_id),
+            "to_version_id": str(to_version_id),
+            "diff": text,
+        }
+
+    @app.get("/pages/{page_id}/versions/{version_id}")
+    async def get_page_version(
+        page_id: uuid.UUID,
+        version_id: uuid.UUID,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+    ):
+        await _admin_page(session, principal, page_id)
+        version = await session.get(PageVersion, version_id)
+        if version is None or version.page_id != page_id:
+            raise ApiError(404, "not_found", f"No version {version_id} on page {page_id}.")
+        return _page_version_body(version, include_content=True)
+
+    @app.get("/pages/{page_id}/versions")
+    async def list_page_versions(
+        page_id: uuid.UUID,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        limit: int = versioning.DEFAULT_LIST_LIMIT,
+        cursor: str | None = None,
+    ):
+        await _admin_page(session, principal, page_id)
+        versions, next_cursor = await versioning.list_versions(
+            session, page_id=page_id, limit=limit, cursor=cursor
+        )
+        return {
+            "items": [_page_version_body(v) for v in versions],
+            "next_cursor": next_cursor,
+        }
+
+    @app.post("/pages/{page_id}/rollback")
+    async def rollback_page(
+        page_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        payload: RollbackRequest,
+        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    ):
+        page = await _admin_page(session, principal, page_id)
+
+        if idempotency_key:
+            replayed = await _replay(session, idempotency_key, principal, ROLLBACK_ENDPOINT)
+            if replayed is not None:
+                response.headers["Idempotency-Replayed"] = "true"
+                return replayed
+
+        try:
+            version = await versioning.rollback(
+                session,
+                page=page,
+                target_version_id=payload.target_version_id,
+                author=f"user:{principal.id}",
+                change_summary=payload.change_summary,
+            )
+        except ValueError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
+
+        body = _page_version_body(version)
+        if idempotency_key:
+            session.add(
+                IdempotencyRecord(
+                    key=idempotency_key,
+                    principal=principal.id,
+                    endpoint=ROLLBACK_ENDPOINT,
                     response_status=200,
                     response_body=body,
                 )

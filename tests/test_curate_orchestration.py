@@ -232,6 +232,38 @@ async def test_log_reflects_the_ingest_that_triggered_it(session, workspace):
     assert "1 page(s) touched" in version.content
 
 
+async def test_log_merges_a_rollback_alongside_ingests(session, workspace):
+    """05 §6: rollback is logged to log.md too, not only admin_action_log — 02 §5 already
+    describes log.md as materialized from both streams, 09 §23."""
+    source = await _classified(session, workspace)
+    await ingestion.curate_source(session, source=source, workspace=workspace, call=_returns(_content()))
+    await session.commit()
+
+    result = await session.execute(
+        select(WikiPage)
+        .where(WikiPage.workspace_id == workspace.workspace_id, WikiPage.path == "sources/" + str(source.source_id) + ".md")
+    )
+    source_page = result.scalar_one()
+    history = await versioning.history(session, source_page.page_id)
+    await versioning.rollback(
+        session, page=source_page, target_version_id=history[0].version_id, author="user:admin"
+    )
+    await ingestion._refresh_log(session, workspace_id=workspace.workspace_id)
+    await session.commit()
+
+    result = await session.execute(
+        select(WikiPage)
+        .where(WikiPage.workspace_id == workspace.workspace_id, WikiPage.path == "log.md")
+    )
+    log_page = result.scalar_one()
+    version = await session.get(PageVersion, log_page.current_version_id)
+    assert "restart-payments.md" in version.content
+    assert "rollback_page" in version.content
+    assert "user:admin" in version.content
+    # Newest first: the rollback happened after the ingest.
+    assert version.content.index("rollback_page") < version.content.index("restart-payments.md")
+
+
 async def test_pages_touched_counts_source_plus_every_curated_page(session, workspace):
     source = await _classified(session, workspace)
     content = _content(
