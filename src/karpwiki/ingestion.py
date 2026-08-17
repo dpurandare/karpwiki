@@ -19,7 +19,7 @@ from typing import Protocol
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import classify, curate, dedup, llm, objectstore, pipeline, review, versioning
+from . import classify, curate, dedup, document_types, llm, objectstore, pipeline, review, versioning
 from .frontmatter import split_frontmatter
 from .models import (
     AdminActionLog,
@@ -101,14 +101,17 @@ async def classify_source(
     source.source_version = version
 
     text = payload.decode("utf-8", errors="replace")
-    lexical = classify.lexical_match(f"{source.filename}\n{text}", workspace.document_types)
+    types = await document_types.type_codes_for_workspace(
+        session, workspace_id=workspace.workspace_id
+    )
+    lexical = classify.lexical_match(f"{source.filename}\n{text}", types)
 
     try:
         result = await call(
             model=llm.resolve_model("classifier"),
             text=text,
             filename=source.filename,
-            document_types=list(workspace.document_types),
+            document_types=types,
         )
     except Exception as exc:
         # 03 §1: transient failures are retried inside the worker; reaching here means
@@ -127,7 +130,7 @@ async def classify_source(
         result,
         lexical,
         min_confidence=DEFAULT_MIN_CONFIDENCE if min_confidence is None else min_confidence,
-        document_types=list(workspace.document_types),
+        document_types=types,
     )
     detail = {
         "summary": result.summary,
@@ -240,7 +243,10 @@ async def resolve_classification(
         raise InvalidResolutionError(
             f"source for review item {item.review_id} is not awaiting classification"
         )
-    if document_type not in workspace.document_types:
+    types = await document_types.type_codes_for_workspace(
+        session, workspace_id=workspace.workspace_id
+    )
+    if document_type not in types:
         raise InvalidResolutionError(
             f"{document_type!r} is not in {workspace.workspace_id}'s document_types"
         )

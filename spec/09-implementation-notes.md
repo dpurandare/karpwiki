@@ -874,5 +874,44 @@ green suite can't catch on its own and a live run reading actual output can.
 **Spec touch-point**: none — both are implementation bugs against decisions `09` §19 and §23
 already made, not new spec ground.
 
+## 25. Document-Type Table Design (Phase 2 Step 22)
+
+`02` §3 lists `document_type` as `type_code`, `workspace_id`, `description` — a field list, not a
+key. Phase 1's `models.py` used a `Workspace.document_types` array column instead, with a comment
+marking it a simplification pending this table.
+
+**Decision**: `type_code` is the table's primary key on its own — not a composite
+`(workspace_id, type_code)` key. Classification (`03` §3) produces a bare `type_code` string with
+no workspace attached; the entire point of "routing" is that a code determines its one owning
+workspace, not the other way around. A composite key would allow the same code to exist under two
+workspaces, which nothing in `03`'s routing model could then disambiguate at classification time —
+`classify.route`'s gate already assumes `result.document_type` is checked against exactly one
+workspace's list. Phase 1's array column had this same implicit assumption (nothing stopped the
+same string appearing in two workspaces' arrays, but nothing needed to prevent it either, since
+only one workspace's array was ever checked against). The migration's backfill (`e22a1b4c3004`)
+keeps a type_code's *first* occurrence across workspaces and drops later duplicates for exactly
+this reason — there's no correct second home for a code that already claims a primary-key slot.
+
+**CRUD shape** (`document_types.py`): `create`/`list_for_workspace`/`update`/`delete`, plus
+`list_for_workspaces` (a set, not one workspace) and `type_codes_for_workspace` (the bare
+`list[str]` `classify.py`'s pure functions expect — what `workspace.document_types` used to
+provide). `update` supports renaming (changing the primary key itself — safe here because nothing
+else in the schema foreign-keys against `type_code`; no `raw_source`/`wiki_page` column stores a
+type code directly, only the `workspace_id` classification resolves) and reassigning
+`workspace_id`, matching `05` §7's "add/remove/rename... reassign a type's target workspace"
+verbatim. Reassignment touches only this one row — `05` §7 is explicit that it "affects future
+routing only," and moving already-ingested content is the separate, already-designed bulk-move
+action (`09` §11).
+
+**API auth shape**: every `document-types` operation — list included — requires `admin`, unlike
+`workspaces` (list/get open to any authenticated caller, `06` §1). The resource row itself signals
+this: `06` §1 gives `document-types` one combined "list, manage | admin (manage)" row rather than
+splitting read and write callers the way `workspaces`' two rows do. Listing without a
+`workspace_id` filter mirrors the review queue's shape (`09` §22): admin in at least one workspace
+sees every type across every workspace they administer, not a global listing.
+
+**Spec touch-point**: none — `02` §3 and `05` §7 already specify the fields and the CRUD
+operations; this note records the key design and auth shape underneath them.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

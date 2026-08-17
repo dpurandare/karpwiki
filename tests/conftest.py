@@ -6,7 +6,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from karpwiki.models import AccessPolicy, Base, Role, Workspace, WorkspaceStatus
+from karpwiki.models import AccessPolicy, Base, DocumentType, Role, Workspace, WorkspaceStatus
 
 TEST_DATABASE_URL = os.environ.get(
     "KARPWIKI_TEST_DATABASE_URL",
@@ -43,11 +43,15 @@ async def _workspace(session, prefix: str, document_types: list[str]) -> Workspa
     workspace = Workspace(
         workspace_id=f"{prefix}-{uuid.uuid4().hex[:8]}",
         name=prefix.replace("-", " ").title(),
-        document_types=document_types,
         status=WorkspaceStatus.active,
         storage_bindings={"object_store": "file://./var/objectstore"},
     )
     session.add(workspace)
+    await session.flush()
+    session.add_all(
+        DocumentType(type_code=code, workspace_id=workspace.workspace_id)
+        for code in document_types
+    )
     await session.flush()
     return workspace
 

@@ -1,16 +1,19 @@
-"""Common Gateway — submission, review-queue, and page-version endpoints, and the
-conventions every endpoint shares.
+"""Common Gateway — submission, review-queue, page-version, and document-type endpoints,
+and the conventions every endpoint shares.
 
 Implements phase1-tasklist step 7 (03 §2's submission path, plus the two cross-cutting
 pieces it is the first to need — principal resolution and role enforcement, 09 §15, and
 the API conventions of 09 §14), step 19 (05 §1's review queue: `review-items` list and
 `review-items/{id}/resolve` — the first list endpoint, so it's also where cursor
-pagination, 09 §14, actually lands), and step 20 (05 §6's Version Browser: `pages/{id}/
-versions` list/get/diff and `pages/{id}/rollback`).
+pagination, 09 §14, actually lands), step 20 (05 §6's Version Browser: `pages/{id}/
+versions` list/get/diff and `pages/{id}/rollback`), and phase2-tasklist.md step 22 (05 §7's
+document-type taxonomy CRUD: `document-types` list/create/update/delete).
 
-Not implemented here, deliberately: the rate limiter is 07 §3, a later phase. `pages`
-get/list (06 §1's other row) isn't built either — out of step 20's citation (05 §6 only),
-and not needed for version history/rollback, which only ever take a `page_id` path param.
+Not implemented here, deliberately: the rate limiter is 07 §3, a later phase (phase2-
+tasklist.md step 48). `pages` get/list and `workspaces` CRUD (06 §1's other rows) aren't
+built either — out of this file's steps' citations so far, and not needed for what is:
+version history/rollback only ever take a `page_id` path param, and document-type
+management only ever takes an explicit `workspace_id`.
 """
 
 import hashlib
@@ -23,7 +26,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import ingestion, objectstore, pipeline, review, versioning
+from . import document_types, ingestion, objectstore, pipeline, review, versioning
 from .auth import (
     Authenticator,
     Principal,
@@ -33,6 +36,7 @@ from .auth import (
 )
 from .db import SessionLocal
 from .models import (
+    DocumentType,
     IdempotencyRecord,
     PageVersion,
     PipelineState,
@@ -171,6 +175,44 @@ async def _admin_page(session: AsyncSession, principal: Principal, page_id: uuid
     ):
         raise ApiError(403, "forbidden", "This operation requires the admin role.")
     return page
+
+
+class CreateDocumentTypeRequest(BaseModel):
+    """POST /document-types body (06 §1, 05 §7)."""
+
+    type_code: str
+    workspace_id: str
+    description: str | None = None
+
+
+class UpdateDocumentTypeRequest(BaseModel):
+    """POST /document-types/{type_code} body — rename, reassign, and/or redescribe (05 §7).
+    `new_type_code`, not `type_code`: the path identifies which type is being updated."""
+
+    new_type_code: str | None = None
+    workspace_id: str | None = None
+    description: str | None = None
+
+
+def _document_type_body(doc_type: DocumentType) -> dict[str, Any]:
+    return {
+        "type_code": doc_type.type_code,
+        "workspace_id": doc_type.workspace_id,
+        "description": doc_type.description,
+    }
+
+
+async def _admin_document_type(
+    session: AsyncSession, principal: Principal, type_code: str
+) -> DocumentType:
+    doc_type = await session.get(DocumentType, type_code)
+    if doc_type is None:
+        raise ApiError(404, "not_found", f"No document type {type_code!r}.")
+    if not await has_role(
+        session, principal=principal, workspace_id=doc_type.workspace_id, required=Role.admin
+    ):
+        raise ApiError(403, "forbidden", "This operation requires the admin role.")
+    return doc_type
 
 
 def _register_routes(app: FastAPI) -> None:
@@ -480,6 +522,109 @@ def _register_routes(app: FastAPI) -> None:
             )
         await session.commit()
         return body
+
+    @app.get("/document-types")
+    async def list_document_types(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        workspace_id: str | None = None,
+    ):
+        """05 §7's taxonomy list — admin-only per 06 §1's `document-types` caller column
+        (unlike `workspaces` list/get, this resource has no reader-visible half)."""
+        if workspace_id is not None:
+            if not await has_role(
+                session, principal=principal, workspace_id=workspace_id, required=Role.admin
+            ):
+                raise ApiError(
+                    403,
+                    "forbidden",
+                    "Listing document types for this workspace requires the admin role.",
+                )
+            types = await document_types.list_for_workspace(session, workspace_id=workspace_id)
+        else:
+            admin_workspaces = await any_workspace_with_role(
+                session, principal=principal, required=Role.admin
+            )
+            if not admin_workspaces:
+                raise ApiError(
+                    403, "forbidden", "Listing document types requires the admin role somewhere."
+                )
+            types = await document_types.list_for_workspaces(
+                session, workspace_ids=admin_workspaces
+            )
+        return {"items": [_document_type_body(t) for t in types]}
+
+    @app.post("/document-types", status_code=201)
+    async def create_document_type(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        payload: CreateDocumentTypeRequest,
+    ):
+        if not await has_role(
+            session, principal=principal, workspace_id=payload.workspace_id, required=Role.admin
+        ):
+            raise ApiError(
+                403,
+                "forbidden",
+                "Creating a document type requires the admin role in its workspace.",
+            )
+        try:
+            doc_type = await document_types.create(
+                session,
+                type_code=payload.type_code,
+                workspace_id=payload.workspace_id,
+                description=payload.description,
+            )
+        except document_types.DuplicateTypeCodeError as exc:
+            raise ApiError(409, "conflict", str(exc)) from exc
+        await session.commit()
+        return _document_type_body(doc_type)
+
+    @app.post("/document-types/{type_code}")
+    async def update_document_type(
+        type_code: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        payload: UpdateDocumentTypeRequest,
+    ):
+        doc_type = await _admin_document_type(session, principal, type_code)
+        # Reassigning to a new workspace requires admin in *that* workspace too — whichever
+        # grant is more restrictive applies, same rule as on-behalf-of submission (09 §5).
+        if payload.workspace_id is not None and payload.workspace_id != doc_type.workspace_id:
+            if not await has_role(
+                session,
+                principal=principal,
+                workspace_id=payload.workspace_id,
+                required=Role.admin,
+            ):
+                raise ApiError(
+                    403,
+                    "forbidden",
+                    "Reassigning into this workspace requires the admin role there.",
+                    {"workspace_id": payload.workspace_id},
+                )
+        try:
+            updated = await document_types.update(
+                session,
+                doc_type=doc_type,
+                new_type_code=payload.new_type_code,
+                workspace_id=payload.workspace_id,
+                description=payload.description,
+            )
+        except document_types.DuplicateTypeCodeError as exc:
+            raise ApiError(409, "conflict", str(exc)) from exc
+        await session.commit()
+        return _document_type_body(updated)
+
+    @app.delete("/document-types/{type_code}", status_code=204)
+    async def delete_document_type(
+        type_code: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+    ):
+        doc_type = await _admin_document_type(session, principal, type_code)
+        await document_types.delete(session, doc_type=doc_type)
+        await session.commit()
 
 
 def _parse_enum(enum_cls, value: str, field: str):

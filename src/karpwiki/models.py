@@ -2,7 +2,8 @@
 
 Field lists follow 02 §3's conceptual table definitions; enum values follow the states
 defined in 01 §5, 02 §7, and 03 §1. Phase 1 covers the seven core tables plus
-`access_policy` (09 §15); `connector` arrives with the connector framework in Phase 2.
+`access_policy` (09 §15); `document_type` arrives with multi-workspace routing (phase2-
+tasklist.md step 22); `connector` arrives with the connector framework in Phase 2.
 """
 
 import enum
@@ -10,7 +11,6 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    ARRAY,
     DateTime,
     Enum,
     ForeignKey,
@@ -139,14 +139,28 @@ class Workspace(Base):
     workspace_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text)
-    # Phase 1 is single-workspace, so the taxonomy slice is an array column rather than
-    # the separate `document_type` table 02 §3 also describes.
-    document_types: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
     schema_ref: Mapped[str | None] = mapped_column(String(512))
     status: Mapped[WorkspaceStatus] = mapped_column(
         Enum(WorkspaceStatus, name="workspace_status"), default=WorkspaceStatus.active
     )
     storage_bindings: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+
+class DocumentType(Base):
+    """A workspace's taxonomy slice (02 §3), promoted from Phase 1's `Workspace.document_types`
+    array column (phase2-tasklist.md step 22) — 09 §25 explains why `type_code` is the primary
+    key rather than part of a composite `(workspace_id, type_code)` key: classification produces
+    a bare `type_code` with no workspace to disambiguate it against, so a code must already
+    determine its one owning workspace for routing (03 §3) to mean anything.
+    """
+
+    __tablename__ = "document_type"
+
+    type_code: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace.workspace_id"), index=True
+    )
+    description: Mapped[str | None] = mapped_column(Text)
 
 
 class RawSource(Base):

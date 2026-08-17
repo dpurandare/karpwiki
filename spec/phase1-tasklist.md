@@ -175,4 +175,4 @@ produce concept/entity pages, and answer search queries with citations — admin
 queue and page history. **Met** (2026-08-17) — Phase 1 (1a, 1b, 1c) is complete.
 
 ---
-Back to: [00-overview.md](00-overview.md)
+Next: [phase2-tasklist.md](phase2-tasklist.md) · Back to: [00-overview.md](00-overview.md)
