@@ -6,9 +6,12 @@ from this phase (per the roadmap, they're Phase 2+): multi-workspace routing, co
 Maintenance Advisor (staleness/orphan/dedup *background* detectors), full API+MCP surface,
 horizontal-scaling infra, fine-grained RBAC.
 
-**Status (2026-08-17): 1a and 1b complete** (steps 1–15), plus step 16 pulled forward from 1c.
-Steps 17–20 are also done. 1c's last step (21, end-to-end verify) is next. Implementation lives in
-[`src/karpwiki/`](../src/karpwiki/); see the [README](../README.md) for how to run it.
+**Status (2026-08-17): Phase 1 complete** — 1a, 1b, and 1c (steps 1–21) all done. Implementation
+lives in [`src/karpwiki/`](../src/karpwiki/); see the [README](../README.md) for how to run it.
+Phase 2+ scope is [07](07-additional-features-and-roadmap.md)'s roadmap — start there for what's
+next, beginning with the items this file's exclusions list and accepted-simplifications notes
+above flag as deliberately carried forward (index.md catalog page and `page_link` parsing,
+async job wiring, `merge`'s scope limits, etc.).
 
 ## 0 — Readiness Items (settle before the step they block)
 
@@ -156,12 +159,20 @@ Accepted for Phase 1, no action needed — recorded so they aren't rediscovered 
     merge, the diff-recompute approach, and the shared `pagination.py` cursor helper.
 21. **Verify**: search returns ranked, cited results; an admin can see the queue, resolve a
     submission/duplicate/classification item, and roll back a page version.
+    **Done** — [`tests/test_end_to_end_1c.py`](../tests/test_end_to_end_1c.py) drives the whole
+    chain through the real gateway (submit → classify → dedup → curate → reindex → search;
+    resolve one item of each kind via `GET`/`POST /review-items`; roll back a page via
+    `POST /pages/{id}/rollback`). A companion live script (not checked in) printing actual
+    output at each stage caught two real bugs the passing test suite had been masking — a
+    rollback endpoint that wrote its audit log entry but never refreshed `log.md`, and a
+    resolved classification item never backfilled with its new workspace — both fixed; see
+    [09](09-implementation-notes.md) §24.
 
 ## Exit Criteria
 
 Matches [07](07-additional-features-and-roadmap.md) §6: a single workspace can ingest documents,
 produce concept/entity pages, and answer search queries with citations — admin can review the
-queue and page history.
+queue and page history. **Met** (2026-08-17) — Phase 1 (1a, 1b, 1c) is complete.
 
 ---
 Back to: [00-overview.md](00-overview.md)

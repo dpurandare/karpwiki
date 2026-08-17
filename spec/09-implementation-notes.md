@@ -838,5 +838,41 @@ param directly rather than discovering one through a page-listing call.
 **Spec touch-point** (applied): none — `05` §6 and `06` §1 already described this surface; this
 note records how `log.md`'s merge and the diff mechanics are realized underneath it.
 
+## 24. Two Bugs Caught by Live Verification (Step 21)
+
+Step 21's own end-to-end script (submit → search → resolve one item of every kind → roll back a
+version, through the real gateway) caught two gaps that 188 passing tests had been masking, both
+in code from steps 19-20:
+
+**`POST /pages/{id}/rollback` never actually refreshed `log.md`.** `versioning.rollback` writes the
+`admin_action_log` entry (`09` §23), but nothing called `ingestion.refresh_log` afterward — the one
+test exercising the merge (`test_log_merges_a_rollback_alongside_ingests`) called `refresh_log`
+itself directly, which only proved the *renderer* merges both streams correctly, not that the real
+request path triggers it. It didn't, because nothing had ever wired it in. Fixed by renaming the
+private `_refresh_log` to public `refresh_log` (it now has two callers — `curate_source`
+internally, and `api.py`'s rollback handler — so it can't stay module-private) and calling it from
+the rollback endpoint after a successful rollback. `versioning.py` can't call it directly:
+`ingestion.py` already imports `versioning.py`, so the reverse import would cycle.
+
+**A resolved `classification` review item never got backfilled with its new workspace.**
+`resolve_classification` correctly sets `source.workspace_id` (via `_accept_classification`), but
+never set `item.workspace_id` — so the item's `admin_action_log` entry was written with
+`workspace_id=None` even after resolution settled one, making it invisible to that workspace's
+`log.md` and to `review.list_items`' `workspace_id` filter. `09` §19 had already named
+"nullable-with-optional-backfill" as the intended shape for `review_item.workspace_id`, using
+`raw_source.workspace_id`'s own backfill as the precedent — this was that pattern's other half,
+simply never implemented. Fixed by setting `item.workspace_id = workspace.workspace_id` in
+`resolve_classification` before calling `review.resolve`. `submission` and `duplicate` items don't
+need the same fix: `duplicate` items always have a workspace at creation (`09` §22), and
+`submission` items resolve independently of classification ever settling one, so there's no
+analogous "moment resolution and workspace-resolution coincide" for them to backfill at.
+
+Neither gap failed a single existing test — both are absences (a call that should have happened
+and didn't, a field that should have been set and wasn't), which is exactly the failure mode a
+green suite can't catch on its own and a live run reading actual output can.
+
+**Spec touch-point**: none — both are implementation bugs against decisions `09` §19 and §23
+already made, not new spec ground.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

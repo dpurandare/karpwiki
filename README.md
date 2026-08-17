@@ -46,19 +46,24 @@ Start with [`spec/00-overview.md`](spec/00-overview.md).
 
 ## Implementation
 
-Phase 1 of [`spec/phase1-tasklist.md`](spec/phase1-tasklist.md) is being built in this repo under
-[`src/karpwiki/`](src/karpwiki/). **1a and 1b are complete** (steps 1–15), plus step 16 was pulled
-forward from 1c — see [`phase1-tasklist.md`](spec/phase1-tasklist.md) for what each step maps to
-in the code. In short: submit a document, it's classified against the workspace's taxonomy with a
-lexical cross-check, checked for duplicates against a real Postgres full-text index, and curated by
-an LLM into a cited source page plus concept/entity pages — with `overview.md`/`log.md` kept in
-sync and a review item raised whenever a human needs to look at something. 1c (search retrieval,
-the async reindex lifecycle, and the admin console) is next.
+Phase 1 of [`spec/phase1-tasklist.md`](spec/phase1-tasklist.md) is built in this repo under
+[`src/karpwiki/`](src/karpwiki/). **Phase 1 is complete** (steps 1–21, all of 1a/1b/1c) — see
+[`phase1-tasklist.md`](spec/phase1-tasklist.md) for what each step maps to in the code. In short:
+submit a document, it's classified against the workspace's taxonomy with a lexical cross-check,
+checked for duplicates against a real Postgres full-text index, and curated by an LLM into a cited
+source page plus concept/entity pages — with `overview.md`/`log.md` kept in sync and a review item
+raised whenever a human needs to look at something. Once indexed, the curated wiki is searchable
+with lexical ranking and a catalog-match boost; an admin can list and resolve every review-item
+kind (including duplicate `merge`, `supersede`, and `keep_both`) and roll back a page version, both
+through the gateway. Phase 2+ scope (multi-workspace routing, connectors, the Maintenance Advisor,
+MCP, horizontal scaling) is [`07-additional-features-and-roadmap.md`](spec/07-additional-features-and-roadmap.md).
 
-Pipeline stages are not yet wired as automatic background jobs — the Celery queues from step 5
-exist, but nothing enqueues onto them. Classification, dedup, and curation are explicit function
-calls today, driven by the API layer's own request handling and by tests; see the task list's
-accepted-simplifications note for why that's deliberate rather than an oversight.
+Pipeline stages are not wired as automatic background jobs — the Celery queues from step 5 exist,
+but nothing enqueues onto them, and the same is true of the indexing lifecycle (step 18).
+Classification, dedup, curation, and reindexing are explicit function calls today, driven by the
+API layer's own request handling and by tests; see the task list's accepted-simplifications note
+for why that's deliberate rather than an oversight, and what gates building the install/scaling
+docs that assume it's solved.
 
 ```bash
 cp .env.example .env                     # then fill in OPENAI_API_KEY
@@ -66,7 +71,7 @@ docker compose up -d                     # PostgreSQL + Redis + MinIO
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e '.[dev]'                  # Python 3.11+ (tested on 3.14)
 alembic upgrade head                     # create the schema
-pytest                                   # full suite — 1a, 1b, and step 16
+pytest                                   # full suite — all of Phase 1
 ```
 
 Then run the API itself:
@@ -76,11 +81,15 @@ uvicorn karpwiki.api:app --reload
 ```
 
 `POST /sources` (file, pasted text, or a URL) accepts a submission; `GET /sources/{id}` polls its
-status. Interactive API docs (Swagger UI) are at `http://localhost:8000/docs` once running — FastAPI
-generates them from the route definitions, nothing to write by hand. There is no endpoint yet for
-search, review-item resolution, or version rollback (1c), and pipeline stages after submission
-still need to be driven explicitly (see above) — `curl` alone won't take a document all the way to
-a published page.
+status. `GET /review-items` lists the admin queue and `POST /review-items/{id}/resolve` acts on one;
+`GET /pages/{id}/versions` (plus `/{version_id}` and `/diff`) and `POST /pages/{id}/rollback` are
+the Version Browser. Interactive API docs (Swagger UI) are at `http://localhost:8000/docs` once
+running — FastAPI generates them from the route definitions, nothing to write by hand. There is no
+endpoint for search itself — `06 §1`'s "full API+MCP surface" is an explicit Phase 1 exclusion, and
+`search.py`'s functions are exercised directly (by tests and the end-to-end script) rather than
+through the gateway. Pipeline stages after submission, and reindexing, still need to be driven
+explicitly (see above) — `curl` alone won't take a document all the way to a published, searchable
+page.
 
 Configuration is environment variables, listed with their defaults in
 [`.env.example`](.env.example). `.env` is gitignored and loaded automatically; real environment
@@ -122,9 +131,12 @@ in a deployment the secrets manager injects it at container start.
 [`spec/08-implementation-stack.md`](spec/08-implementation-stack.md) is an optional appendix
 pinning a concrete Python stack (FastAPI, Celery, PostgreSQL, fsspec, Pydantic AI, etc.) to the
 vendor-neutral roles defined in `00`–`07`. [`spec/09-implementation-notes.md`](spec/09-implementation-notes.md)
-follows up with concrete design decisions — 19 sections at this point, spanning both
+follows up with concrete design decisions — 24 sections at this point, spanning both
 implementation-readiness gaps found before coding started (pipeline-state tracking, connector
 execution and credentials, MCP delegation, a `SCHEMA.md` example, `diff_ref` format, retention
 defaults) and decisions forced by actually building Phase 1 (API conventions, the auth scope, the
-LLM model and its cost tradeoff, the near-duplicate similarity metric, and the timing of the
-placeholder page and of review items relative to workspace resolution).
+LLM model and its cost tradeoff, the near-duplicate similarity metric, the timing of the
+placeholder page and of review items relative to workspace resolution, the catalog-match boost
+without a literal `index.md` page, the indexing lifecycle's explicit-call scope, the review queue's
+resolution mechanics including `merge`'s limits, the Version Browser's `log.md` merge and diff
+approach, and two bugs a live end-to-end run caught that the test suite alone had missed).

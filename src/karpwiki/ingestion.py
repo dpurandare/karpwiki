@@ -253,6 +253,10 @@ async def resolve_classification(
         actor=actor,
         detail={"resolution": "admin_assigned"},
     )
+    # Backfill (09 §19's pattern, applied to review_item too): resolving is what settles
+    # the workspace this item never had, so from here on it belongs in that workspace's
+    # queue view and log.md the same as any other resolved item.
+    item.workspace_id = workspace.workspace_id
     await review.resolve(session, item=item, action=document_type, actor=actor)
     return state
 
@@ -698,7 +702,7 @@ async def curate_source(
 
     try:
         await _refresh_overview(session, workspace_id=workspace.workspace_id)
-        await _refresh_log(session, workspace_id=workspace.workspace_id)
+        await refresh_log(session, workspace_id=workspace.workspace_id)
     except Exception:
         logger.exception("failed to refresh overview.md/log.md for %s", source.source_id)
 
@@ -807,9 +811,14 @@ async def _refresh_overview(session: AsyncSession, *, workspace_id: str) -> None
     )
 
 
-async def _refresh_log(session: AsyncSession, *, workspace_id: str) -> None:
+async def refresh_log(session: AsyncSession, *, workspace_id: str) -> None:
     """log.md merges `ingestion_log` and `admin_action_log` (02 §5, 09 §23) — `lint_log`
-    doesn't exist in Phase 1, no lint pass is built."""
+    doesn't exist in Phase 1, no lint pass is built.
+
+    Public: `curate_source` below calls it after an ingest, and `api.py`'s rollback
+    endpoint calls it after a rollback — `versioning.rollback` can't call it itself
+    without a circular import (`ingestion.py` already imports `versioning.py`).
+    """
     rows: list[tuple] = []
 
     for entry in await pipeline.recent_ingested(

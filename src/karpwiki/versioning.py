@@ -187,7 +187,7 @@ async def rollback(
     )
 
     # 05 §6: "logged to admin_action_log and log.md" — the latter is a rendering concern
-    # (curate.render_log_body / ingestion._refresh_log, 09 §23), this is the audit write.
+    # (curate.render_log_body / ingestion.refresh_log, 09 §23), this is the audit write.
     session.add(
         AdminActionLog(
             actor=author,

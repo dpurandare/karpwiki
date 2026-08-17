@@ -248,7 +248,7 @@ async def test_log_merges_a_rollback_alongside_ingests(session, workspace):
     await versioning.rollback(
         session, page=source_page, target_version_id=history[0].version_id, author="user:admin"
     )
-    await ingestion._refresh_log(session, workspace_id=workspace.workspace_id)
+    await ingestion.refresh_log(session, workspace_id=workspace.workspace_id)
     await session.commit()
 
     result = await session.execute(

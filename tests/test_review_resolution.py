@@ -79,6 +79,10 @@ async def test_resolve_classification_assigns_workspace_and_classifies(session, 
     assert source.pipeline_state is PipelineState.classified
     assert item.status is ReviewStatus.resolved
     assert item.resolved_action == "eng.runbook"
+    # Backfilled (09 §19's pattern, 09 §23): the item never had a workspace until this
+    # resolution assigned one — without this, its admin_action_log entry (and the item
+    # itself) would be invisible to workspace-scoped log.md and queue filtering.
+    assert item.workspace_id == workspace.workspace_id
 
 
 async def test_resolve_classification_rejects_a_type_outside_the_taxonomy(session, workspace):

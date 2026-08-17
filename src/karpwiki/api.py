@@ -464,6 +464,9 @@ def _register_routes(app: FastAPI) -> None:
         except ValueError as exc:
             raise ApiError(400, "invalid_request", str(exc)) from exc
 
+        # 05 §6: rollback is logged to log.md, not just admin_action_log (09 §23).
+        await ingestion.refresh_log(session, workspace_id=page.workspace_id)
+
         body = _page_version_body(version)
         if idempotency_key:
             session.add(

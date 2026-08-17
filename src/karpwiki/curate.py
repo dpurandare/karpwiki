@@ -115,7 +115,7 @@ def render_log_body(entries: list[tuple[datetime, str]]) -> str:
     """`entries` is (timestamp, description), newest first, already merged from every
     source 02 §5 names for `log.md` — `ingestion_log` and `admin_action_log` (09 §23);
     `lint_log` doesn't exist in Phase 1, no lint pass is built. The merge and per-source
-    description formatting happen in `ingestion._refresh_log`, not here — this function
+    description formatting happen in `ingestion.refresh_log`, not here — this function
     stays a pure renderer over whatever timeline it's given.
     """
     lines = "\n".join(

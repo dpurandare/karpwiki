@@ -124,6 +124,33 @@ async def test_rollback_via_the_endpoint(client, session, workspace):
     assert len(versions) == 3
 
 
+async def test_rollback_via_the_endpoint_refreshes_log_md(client, session, workspace):
+    """05 §6: rollback is logged to log.md, not just admin_action_log. A prior version of
+    this endpoint wrote the audit row but never called the function that regenerates
+    log.md, so the real endpoint never actually surfaced it there — this pins the fix."""
+    from sqlalchemy import select
+
+    from karpwiki.models import PageVersion, PageType, WikiPage
+
+    await _grant_admin(session, workspace)
+    page, v1, v2 = await _page_with_history(session, workspace)
+
+    await client.post(
+        f"/pages/{page.page_id}/rollback", headers=ADMIN, json={"target_version_id": str(v1)}
+    )
+
+    log_page = (
+        await session.execute(
+            select(WikiPage).where(
+                WikiPage.workspace_id == workspace.workspace_id, WikiPage.path == "log.md"
+            )
+        )
+    ).scalar_one()
+    log_version = await session.get(PageVersion, log_page.current_version_id)
+    assert "rollback_page" in log_version.content
+    assert "avery" in log_version.content
+
+
 async def test_non_admin_cannot_rollback(client, session, workspace):
     await _grant_admin(session, workspace)
     page, v1, _ = await _page_with_history(session, workspace)
