@@ -7,7 +7,7 @@ Maintenance Advisor (staleness/orphan/dedup *background* detectors), full API+MC
 horizontal-scaling infra, fine-grained RBAC.
 
 **Status (2026-08-17): 1a and 1b complete** (steps 1–15), plus step 16 pulled forward from 1c.
-Steps 17 and 18 are also done. 1c's remaining steps (19, 20, 21) are next. Implementation lives in
+Steps 17–19 are also done. 1c's remaining steps (20, 21) are next. Implementation lives in
 [`src/karpwiki/`](../src/karpwiki/); see the [README](../README.md) for how to run it.
 
 ## 0 — Readiness Items (settle before the step they block)
@@ -140,6 +140,12 @@ Accepted for Phase 1, no action needed — recorded so they aren't rediscovered 
     async-job-wiring gap unchanged.
 19. Build the admin console's Review Queue view (list/filter open `review_item`s, resolve
     action) — [05](05-admin-backend-and-maintenance.md) §1.
+    **Done** — [`review.py`](../src/karpwiki/review.py) (listing, cursor pagination, generic
+    resolve bookkeeping + `admin_action_log`), [`ingestion.py`](../src/karpwiki/ingestion.py)
+    (`resolve_classification`/`resolve_submission`/`resolve_duplicate`, including `merge` via a
+    new Curator call), [`api.py`](../src/karpwiki/api.py) (`GET /review-items`,
+    `POST /review-items/{id}/resolve`) — see [09](09-implementation-notes.md) §22 for the
+    resolution-mechanics decisions, including where `merge` is and isn't available.
 20. Build the admin console's page version history view + manual rollback —
     [05](05-admin-backend-and-maintenance.md) §6 (rollback only; skip repository management,
     performance monitoring — later phases).

@@ -737,5 +737,65 @@ observable, so a page reaching `indexed` now stamps it.
 Phase 1 implements the state machine without the automatic dispatch the diagram assumes, same as
 every other stage so far.
 
+## 22. Review Queue and Resolution (Step 19)
+
+Several decisions landed together building the admin console's review queue (`05` §1) and the
+resolution actions `03` §3-5 describe but leave to "a later step" (`review.py`'s own prior
+docstring).
+
+**`admin_action_log` had no field list.** `02` §3's conceptual-tables list doesn't include it at
+all — like `ingestion_log`, `query_log`, and `lint_log`, it's introduced only in `02` §5 as a named
+stream with a purpose and consumers, no schema. Modeled a new `AdminActionLog` on `IngestionLog`
+(`entry_id`, `actor`, `action`, `workspace_id` nullable, `subject_ref`, `detail` JSONB,
+`created_at`), the one other append-only actor/action/detail history already in the schema —
+nothing here calls for a different shape.
+
+**Authorizing a workspace-less item reuses `any_workspace_with_role`, not a new global-admin
+grant.** `06` §3's caller table names "global admin across all workspaces" as distinct from
+per-workspace admin, but nothing in the schema represents it, and every `access_policy` grant is
+workspace-scoped. Rather than add that concept now, `review.list_items`/the resolve endpoint treat
+"admin in at least one workspace" as sufficient to see or act on a `submission`/`classification`
+item with `workspace_id IS NULL` — the same check submission's own auth already uses (`09` §15) for
+the identical "no workspace yet" situation. Once an item (or the source behind it) has a
+workspace, `has_role` scopes it normally. Building real cross-workspace grants is deferred to
+whenever multi-workspace routing itself lands (`phase1-tasklist.md`'s exclusions) — building the
+access-control primitive first, with no caller needing it, would be speculative.
+
+**`duplicate` resolution: `supersede` needed no new curation code; `merge` did, and is scoped to
+near-duplicate evidence only.** Tracing `03` §4's four actions against what already existed:
+`reject` reuses `reject_source`; `keep_both` is `pending_review -> ingesting`, the same edge
+`check_duplicates`' own "no concerns" path already takes. `supersede` looked like it would need new
+page-update logic too ("existing source/page marked superseded... updated in place via new
+page_versions") — but `curate_source`'s existing title-match upsert (`_write_curated_page`,
+step 12) already updates an existing concept/entity page in place when titles match. So
+`supersede` is: mark the prior source(s) `RawSourceStatus.superseded`, transition to `ingesting`,
+and let the normal ingest path (a separate, later call, same as every other stage) do the rest.
+
+`merge` is genuinely different — the Curator must fold content into a *specific* page an admin
+already identified, not run its normal independent extraction. `ReviewItem` carries no structured
+detail column, so both `supersede` and `merge` read their evidence back off the `pending_review`
+transition's `ingestion_log.detail` (`_duplicate_evidence`) rather than re-running `dedup.check`
+against what may now be a changed DB state. That evidence only names a matched *page*
+(`similar_pages`) for the near-duplicate verdict — an exact-match or newer-version duplicate
+records a prior *source*, not a page, so `merge` is unavailable for those and raises
+`InvalidResolutionError` rather than guessing which page to target. A failed merge call leaves the
+review item `open` (not resolved) so an admin can retry it, unlike every other action, which
+resolves regardless of outcome since they can't themselves fail past the point of no return.
+
+**`pending_review -> ingested` isn't a legal edge, even for merge.** `03` §1's diagram has no such
+transition, and `pipeline.py`'s own docstring says nothing is widened beyond that diagram. A merge
+*is* a completed ingest, but goes through `ingesting` first like every other path to `ingested`,
+via two ordinary legal transitions in sequence, rather than adding a new edge for one resolution.
+
+**Cursor format** (`09` §14 promised one; this is the first list endpoint to actually need it):
+base64 of `"{created_at.isoformat()}|{review_id}"`, sorted newest-first with `review_id` as
+tiebreak, compared as a Postgres row-value tuple (`tuple_(...) < tuple_(...)`) rather than two
+separate `WHERE` clauses — the latter would incorrectly exclude same-timestamp rows on the
+tiebreak alone.
+
+**Spec touch-point** (applied): none of `03`-`06` needed correction — `05` §1 already left
+resolution mechanics unspecified ("the available resolution actions for that kind"), and `03` §4's
+action table already described `merge`/`supersede` at the level this note fills in underneath.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

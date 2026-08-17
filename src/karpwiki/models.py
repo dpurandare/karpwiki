@@ -297,6 +297,33 @@ class IngestionLog(Base):
     )
 
 
+class AdminActionLog(Base):
+    """Audit trail of admin actions (02 §5): review item resolutions, rollbacks, manual
+    edits, workspace/schema changes.
+
+    02 §3's table gives every other log table an explicit field list except this one — one
+    line of purpose, no schema (09 §22). Modeled on `IngestionLog`, the one other
+    append-only actor/action/detail history in the schema, since nothing else here calls
+    for a different shape.
+    """
+
+    __tablename__ = "admin_action_log"
+
+    entry_id: Mapped[uuid.UUID] = _uuid_pk()
+    actor: Mapped[str] = mapped_column(String(255))
+    action: Mapped[str] = mapped_column(String(64))
+    # Null when the action predates/has no workspace (e.g. resolving a still-unassigned
+    # classification review item) — same reasoning as ingestion_log.workspace_id above.
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace.workspace_id"), index=True
+    )
+    subject_ref: Mapped[str] = mapped_column(String(512))
+    detail: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.clock_timestamp()
+    )
+
+
 class PageIndex(Base):
     """The Full-Text Index (02 §4) — the Platform's only query-time index.
 

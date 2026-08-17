@@ -1,12 +1,13 @@
-"""Common Gateway — submission entry point and the conventions every endpoint shares.
+"""Common Gateway — submission and review-queue endpoints, and the conventions every
+endpoint shares.
 
-Implements phase1-tasklist step 7: 03 §2's submission path, plus the two cross-cutting
-pieces it is the first to need — principal resolution and role enforcement (09 §15), and
-the API conventions of 09 §14.
+Implements phase1-tasklist step 7 (03 §2's submission path, plus the two cross-cutting
+pieces it is the first to need — principal resolution and role enforcement, 09 §15, and
+the API conventions of 09 §14) and step 19 (05 §1's review queue: `review-items` list and
+`review-items/{id}/resolve`) — the first list endpoint, so it's also where cursor
+pagination (09 §14) actually lands, as this module's prior version anticipated.
 
-Not implemented here, deliberately: cursor pagination (09 §14) has no list endpoint to
-exercise yet — it lands with the review queue — and the rate limiter is 07 §3, a later
-phase. Building either now would be guesswork with no caller.
+Not implemented here, deliberately: the rate limiter is 07 §3, a later phase.
 """
 
 import hashlib
@@ -15,15 +16,32 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Form, Header, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import objectstore, pipeline, review
-from .auth import Authenticator, Principal, TrustedHeaderAuthenticator, any_workspace_with_role
+from . import ingestion, objectstore, pipeline, review
+from .auth import (
+    Authenticator,
+    Principal,
+    TrustedHeaderAuthenticator,
+    any_workspace_with_role,
+    has_role,
+)
 from .db import SessionLocal
-from .models import IdempotencyRecord, PipelineState, RawSource, ReviewKind, Role
+from .models import (
+    IdempotencyRecord,
+    PipelineState,
+    RawSource,
+    ReviewItem,
+    ReviewKind,
+    ReviewStatus,
+    Role,
+    Workspace,
+)
 
 SUBMIT_ENDPOINT = "POST /sources"
+RESOLVE_ENDPOINT = "POST /review-items/{id}/resolve"
 
 
 class ApiError(Exception):
@@ -80,6 +98,36 @@ async def _principal(request: Request) -> Principal:
     if resolved is None:
         raise ApiError(401, "unauthenticated", "No authenticated principal on this request.")
     return resolved
+
+
+class ResolveRequest(BaseModel):
+    """POST /review-items/{id}/resolve body (06 §1, 05 §1).
+
+    `action` means different things per `kind`: for `submission` it's always
+    `"acknowledge"`; for `classification` it's the chosen `document_type`; for `duplicate`
+    it's one of `reject`/`keep_both`/`supersede`/`merge` (03 §4). `workspace_id` is
+    required only for `classification` — every other kind already has one, or none applies.
+    """
+
+    action: str
+    workspace_id: str | None = None
+    note: str | None = None
+
+
+def _review_item_body(item: ReviewItem) -> dict[str, Any]:
+    return {
+        "review_id": str(item.review_id),
+        "workspace_id": item.workspace_id,
+        "kind": item.kind.value,
+        "severity": item.severity,
+        "subject_ref": item.subject_ref,
+        "proposed_action": item.proposed_action,
+        "status": item.status.value,
+        "created_at": item.created_at.isoformat(),
+        "resolved_action": item.resolved_action,
+        "resolved_by": item.resolved_by,
+        "resolved_at": item.resolved_at.isoformat() if item.resolved_at else None,
+    }
 
 
 def _register_routes(app: FastAPI) -> None:
@@ -171,6 +219,139 @@ def _register_routes(app: FastAPI) -> None:
             # `pipeline_state` (the raw enum) and from the page's own frontmatter status.
             "label": pipeline.placeholder_label(source.pipeline_state),
         }
+
+    @app.get("/review-items")
+    async def list_review_items(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        workspace_id: str | None = None,
+        kind: str | None = None,
+        status: str | None = "open",
+        severity: str | None = None,
+        limit: int = review.DEFAULT_LIST_LIMIT,
+        cursor: str | None = None,
+    ):
+        """05 §1's consolidated queue (06 §1). Admin-only — a caller with no admin grant
+        anywhere has nothing to list, since every item is either workspace-scoped to a
+        workspace they'd need to administer, or workspace-less (09 §22)."""
+        admin_workspaces = await any_workspace_with_role(
+            session, principal=principal, required=Role.admin
+        )
+        if not admin_workspaces:
+            raise ApiError(
+                403, "forbidden", "Listing review items requires the admin role somewhere."
+            )
+
+        items, next_cursor = await review.list_items(
+            session,
+            admin_workspaces=admin_workspaces,
+            workspace_id=workspace_id,
+            kind=_parse_enum(ReviewKind, kind, "kind") if kind else None,
+            status=_parse_enum(ReviewStatus, status, "status") if status else None,
+            severity=severity,
+            limit=limit,
+            cursor=cursor,
+        )
+        return {"items": [_review_item_body(i) for i in items], "next_cursor": next_cursor}
+
+    @app.post("/review-items/{review_id}/resolve")
+    async def resolve_review_item_endpoint(
+        review_id: uuid.UUID,
+        response: Response,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        payload: ResolveRequest,
+        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    ):
+        """Execute a resolution (06 §1, 05 §1) — action semantics depend on `kind`, see
+        `ResolveRequest`. Admin-gated against the item's own workspace when it has one;
+        against any workspace the caller administers when it doesn't yet (09 §22)."""
+        item = await session.get(ReviewItem, review_id)
+        if item is None:
+            raise ApiError(404, "not_found", f"No review item {review_id}.")
+
+        if item.workspace_id is not None:
+            authorized = await has_role(
+                session, principal=principal, workspace_id=item.workspace_id, required=Role.admin
+            )
+        else:
+            authorized = bool(
+                await any_workspace_with_role(session, principal=principal, required=Role.admin)
+            )
+        if not authorized:
+            raise ApiError(403, "forbidden", "Resolving this review item requires the admin role.")
+
+        if idempotency_key:
+            replayed = await _replay(session, idempotency_key, principal, RESOLVE_ENDPOINT)
+            if replayed is not None:
+                response.headers["Idempotency-Replayed"] = "true"
+                return replayed
+
+        workspace: Workspace | None = None
+        if payload.workspace_id is not None:
+            if not await has_role(
+                session,
+                principal=principal,
+                workspace_id=payload.workspace_id,
+                required=Role.admin,
+            ):
+                raise ApiError(
+                    403,
+                    "forbidden",
+                    "Resolving into this workspace requires the admin role there.",
+                    {"workspace_id": payload.workspace_id},
+                )
+            workspace = await session.get(Workspace, payload.workspace_id)
+            if workspace is None:
+                raise ApiError(
+                    400, "invalid_request", f"No workspace {payload.workspace_id!r}."
+                )
+
+        try:
+            state = await ingestion.resolve_review_item(
+                session,
+                item=item,
+                action=payload.action,
+                actor=f"user:{principal.id}",
+                workspace=workspace,
+                note=payload.note,
+            )
+        except review.AlreadyResolvedError as exc:
+            raise ApiError(409, "conflict", str(exc)) from exc
+        except ingestion.InvalidResolutionError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
+
+        body = {
+            "review_id": str(item.review_id),
+            "status": item.status.value,
+            "resolved_action": item.resolved_action,
+            "pipeline_state": state.value if state is not None else None,
+        }
+        if idempotency_key:
+            session.add(
+                IdempotencyRecord(
+                    key=idempotency_key,
+                    principal=principal.id,
+                    endpoint=RESOLVE_ENDPOINT,
+                    response_status=200,
+                    response_body=body,
+                )
+            )
+        await session.commit()
+        return body
+
+
+def _parse_enum(enum_cls, value: str, field: str):
+    try:
+        return enum_cls(value)
+    except ValueError:
+        valid = ", ".join(m.value for m in enum_cls)
+        raise ApiError(
+            400,
+            "invalid_request",
+            f"{value!r} is not a valid {field}.",
+            {"field": field, "valid": valid},
+        ) from None
 
 
 async def _replay(

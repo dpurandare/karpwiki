@@ -1,11 +1,18 @@
-"""Ingestion orchestration (03 §3, §4, §6, phase1-tasklist steps 9-12).
+"""Ingestion orchestration (03 §3, §4, §6, phase1-tasklist steps 9-12, 19).
 
 Performs the decisions in `classify.py`, `dedup.py`, and `curate.py` against the database
 and object store: runs the pipeline transitions, relocates the stored object once a
 workspace is known, and parks the source for review when a gate refuses.
+
+Also performs the pipeline-side effects of an admin resolving a review item (05 §1,
+`resolve_review_item` and friends) — the counterpart to `review.py`'s generic bookkeeping,
+kept separate to avoid a circular import (`review.py` cannot depend back on this module).
 """
 
+from __future__ import annotations
+
 import logging
+import uuid
 from datetime import date
 from typing import Protocol
 
@@ -13,6 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import classify, curate, dedup, llm, objectstore, pipeline, review, versioning
+from .frontmatter import split_frontmatter
 from .models import (
     PageStatus,
     PageType,
@@ -20,6 +28,7 @@ from .models import (
     PipelineState,
     RawSource,
     RawSourceStatus,
+    ReviewItem,
     ReviewKind,
     VersionTrigger,
     WikiPage,
@@ -30,6 +39,12 @@ logger = logging.getLogger(__name__)
 
 # 09 §6's SCHEMA.md default, used when the workspace sets no threshold.
 DEFAULT_MIN_CONFIDENCE = 0.75
+
+
+class InvalidResolutionError(ValueError):
+    """A review-item resolution request doesn't fit: wrong kind, wrong pipeline state, an
+    action outside the kind's vocabulary, or missing evidence (e.g. `merge` with no
+    matched page recorded)."""
 
 
 class ClassifierCall(Protocol):
@@ -141,6 +156,29 @@ async def classify_source(
         )
         return PipelineState.pending_review
 
+    return await _accept_classification(
+        session,
+        source=source,
+        workspace=workspace,
+        document_type=routing.document_type,
+        actor="system:classifier",
+        detail=detail,
+    )
+
+
+async def _accept_classification(
+    session: AsyncSession,
+    *,
+    source: RawSource,
+    workspace: Workspace,
+    document_type: str,
+    actor: str,
+    detail: dict,
+) -> PipelineState:
+    """Resolve a source's workspace once its `document_type` is settled (03 §3's accept
+    path) — shared by the automatic gate above and an admin's manual resolution
+    (`resolve_classification` below, 09 §22), since both do exactly the same work from
+    that point on."""
     source.workspace_id = workspace.workspace_id
     _relocate(source, workspace.workspace_id)
     await _create_placeholder_source_page(session, source=source, workspace=workspace)
@@ -148,8 +186,8 @@ async def classify_source(
         session,
         source=source,
         to_state=PipelineState.classified,
-        actor="system:classifier",
-        detail={**detail, "document_type": routing.document_type},
+        actor=actor,
+        detail={**detail, "document_type": document_type},
     )
     return PipelineState.classified
 
@@ -180,6 +218,42 @@ async def _create_placeholder_source_page(
         body=PLACEHOLDER_SOURCE_BODY,
         status=PageStatus.draft,
     )
+
+
+async def resolve_classification(
+    session: AsyncSession,
+    *,
+    item: ReviewItem,
+    workspace: Workspace,
+    document_type: str,
+    actor: str,
+) -> PipelineState:
+    """Admin resolution of a `classification` review item (03 §3, §5): picking a
+    `document_type` is what resolves the workspace the automatic gate couldn't. Runs the
+    same accept path `classify_source` takes when it succeeds on its own."""
+    if item.kind is not ReviewKind.classification:
+        raise InvalidResolutionError(f"review item {item.review_id} is not a classification item")
+
+    source = await session.get(RawSource, uuid.UUID(item.subject_ref))
+    if source is None or source.pipeline_state is not PipelineState.pending_review:
+        raise InvalidResolutionError(
+            f"source for review item {item.review_id} is not awaiting classification"
+        )
+    if document_type not in workspace.document_types:
+        raise InvalidResolutionError(
+            f"{document_type!r} is not in {workspace.workspace_id}'s document_types"
+        )
+
+    state = await _accept_classification(
+        session,
+        source=source,
+        workspace=workspace,
+        document_type=document_type,
+        actor=actor,
+        detail={"resolution": "admin_assigned"},
+    )
+    await review.resolve(session, item=item, action=document_type, actor=actor)
+    return state
 
 
 async def reject_source(
@@ -280,6 +354,228 @@ async def check_duplicates(
     return PipelineState.ingesting
 
 
+async def resolve_submission(session: AsyncSession, *, item: ReviewItem, actor: str) -> ReviewItem:
+    """03 §5: a `submission` item's only resolution is `acknowledge` — informational, no
+    pipeline effect. (An admin reassigning the workspace or halting processing from here
+    is a roadmap capability, not built in Phase 1.)"""
+    if item.kind is not ReviewKind.submission:
+        raise InvalidResolutionError(f"review item {item.review_id} is not a submission item")
+    return await review.resolve(session, item=item, action="acknowledge", actor=actor)
+
+
+async def _duplicate_evidence(session: AsyncSession, source_id: uuid.UUID) -> dict:
+    """The detail `check_duplicates` recorded when it parked this source (03 §4) — the
+    durable record of which prior source(s)/page(s) it matched. `ReviewItem` itself carries
+    no structured detail column (09 §22), so resolution reads it back off `ingestion_log`
+    rather than re-running `dedup.check` against what may now be a changed DB state."""
+    for entry in reversed(await pipeline.history(session, source_id)):
+        if entry.to_state is PipelineState.pending_review and "duplicate_source_ids" in entry.detail:
+            return entry.detail
+    return {}
+
+
+async def resolve_duplicate(
+    session: AsyncSession,
+    *,
+    item: ReviewItem,
+    source: RawSource,
+    action: str,
+    actor: str,
+    note: str | None = None,
+    call: MergeCall | None = None,
+) -> PipelineState:
+    """Admin resolution of a `duplicate` review item (03 §4): `reject`, `keep_both`,
+    `supersede`, or `merge`."""
+    if item.kind is not ReviewKind.duplicate:
+        raise InvalidResolutionError(f"review item {item.review_id} is not a duplicate item")
+    if source.pipeline_state is not PipelineState.pending_review:
+        raise InvalidResolutionError(f"source {source.source_id} is not pending_review")
+
+    if action == "reject":
+        state = await reject_source(
+            session, source=source, reason=note or "duplicate", actor=actor
+        )
+    elif action == "keep_both":
+        # 03 §4: "proceeds to normal ingestion as a distinct source" — the same edge
+        # check_duplicates' own "no concerns" path takes.
+        await pipeline.transition(
+            session,
+            source=source,
+            to_state=PipelineState.ingesting,
+            actor=actor,
+            detail={"resolution": "keep_both"},
+        )
+        state = PipelineState.ingesting
+    elif action == "supersede":
+        state = await _resolve_supersede(session, source=source, actor=actor)
+    elif action == "merge":
+        state = await _resolve_merge(
+            session, source=source, actor=actor, call=call or call_merge_model
+        )
+    else:
+        raise InvalidResolutionError(f"{action!r} is not a valid duplicate resolution")
+
+    if state is not PipelineState.error:
+        # A failed merge (the one branch that can still land on `error`, 09 §22) leaves
+        # the item open rather than "resolved" with an action that didn't stick — an
+        # admin needs to be able to retry it.
+        await review.resolve(
+            session, item=item, action=action, actor=actor, detail={"note": note} if note else None
+        )
+    return state
+
+
+async def _resolve_supersede(
+    session: AsyncSession, *, source: RawSource, actor: str
+) -> PipelineState:
+    """03 §4: 'existing source/page marked superseded, new one becomes canonical.' Marking
+    the prior source(s) `superseded` and letting this one proceed through the normal
+    `ingesting` path is sufficient — `curate_source`'s existing title-match upsert
+    (`_write_curated_page`) is what updates the corresponding page in place; no new
+    curation logic is needed for the page side of this resolution."""
+    evidence = await _duplicate_evidence(session, source.source_id)
+    old_ids = evidence.get("duplicate_source_ids") or []
+    if not old_ids:
+        raise InvalidResolutionError(
+            f"source {source.source_id} has no recorded prior source(s) to supersede"
+        )
+
+    for old_id in old_ids:
+        old_source = await session.get(RawSource, uuid.UUID(old_id))
+        if old_source is not None and old_source.status is RawSourceStatus.active:
+            old_source.status = RawSourceStatus.superseded
+
+    await pipeline.transition(
+        session,
+        source=source,
+        to_state=PipelineState.ingesting,
+        actor=actor,
+        detail={"resolution": "supersede", "superseded_source_ids": old_ids},
+    )
+    return PipelineState.ingesting
+
+
+async def _resolve_merge(
+    session: AsyncSession, *, source: RawSource, actor: str, call: MergeCall
+) -> PipelineState:
+    """03 §4: 'Curator folds the new source's content into the existing page(s) as an
+    update.' Scoped to the near-duplicate verdict's evidence (`similar_pages`) — the only
+    verdict that names an actual matched *page* rather than a prior *source*; an
+    exact/newer-version duplicate has no page-level match recorded to merge into (09 §22)."""
+    evidence = await _duplicate_evidence(session, source.source_id)
+    similar = evidence.get("similar_pages") or []
+    if not similar:
+        raise InvalidResolutionError(
+            f"source {source.source_id} has no matched wiki page to merge into "
+            "(merge needs near-duplicate evidence)"
+        )
+    target_path = similar[0]["path"]
+    target = (
+        await session.execute(
+            select(WikiPage).where(
+                WikiPage.workspace_id == source.workspace_id, WikiPage.path == target_path
+            )
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise InvalidResolutionError(f"matched page {target_path!r} no longer exists")
+
+    # `pending_review -> ingested` is not a legal edge (03 §1) even though a merge *is* a
+    # completed ingest — go through `ingesting` first, same as every other path to
+    # `ingested`, rather than widening pipeline.py's transition table for this one case.
+    await pipeline.transition(
+        session,
+        source=source,
+        to_state=PipelineState.ingesting,
+        actor=actor,
+        detail={"resolution": "merge", "target_page_id": str(target.page_id)},
+    )
+
+    try:
+        payload = objectstore.read_bytes(source.object_key)
+        new_text = payload.decode("utf-8", errors="replace")
+        current_version = await session.get(PageVersion, target.current_version_id)
+        _, existing_body = split_frontmatter(current_version.content)
+        merged = await call(
+            model=llm.resolve_model("curator"),
+            existing_body=existing_body,
+            new_source_text=new_text,
+            filename=source.filename,
+        )
+        await versioning.write_version(
+            session,
+            page=target,
+            body=merged.body,
+            author="system:curator",
+            trigger=VersionTrigger.ingest,
+            change_summary=merged.change_summary,
+        )
+    except Exception as exc:
+        logger.exception("merge failed for %s -> %s", source.source_id, target.page_id)
+        await pipeline.transition(
+            session,
+            source=source,
+            to_state=PipelineState.error,
+            actor=actor,
+            detail={"step": "merge", "error": type(exc).__name__},
+        )
+        return PipelineState.error
+
+    await pipeline.transition(
+        session,
+        source=source,
+        to_state=PipelineState.ingested,
+        actor=actor,
+        detail={"resolution": "merge", "target_page_id": str(target.page_id)},
+    )
+    return PipelineState.ingested
+
+
+async def resolve_review_item(
+    session: AsyncSession,
+    *,
+    item: ReviewItem,
+    action: str,
+    actor: str,
+    workspace: Workspace | None = None,
+    note: str | None = None,
+    merge_call: MergeCall | None = None,
+) -> PipelineState | None:
+    """Single entry point the gateway's resolve endpoint calls (05 §1) — dispatches to the
+    kind-specific function above by `item.kind`, then leaves the generic bookkeeping
+    (`review.resolve`) to whichever one it called. Returns the resulting pipeline state, or
+    `None` for `submission` (nothing pipeline-side happens)."""
+    if item.kind is ReviewKind.submission:
+        if action != "acknowledge":
+            raise InvalidResolutionError("submission items only accept action='acknowledge'")
+        await resolve_submission(session, item=item, actor=actor)
+        return None
+
+    source = await session.get(RawSource, uuid.UUID(item.subject_ref))
+    if source is None:
+        raise InvalidResolutionError(f"no source for review item {item.review_id}")
+
+    if item.kind is ReviewKind.classification:
+        if workspace is None:
+            raise InvalidResolutionError("classification resolution requires a workspace")
+        return await resolve_classification(
+            session, item=item, workspace=workspace, document_type=action, actor=actor
+        )
+
+    if item.kind is ReviewKind.duplicate:
+        return await resolve_duplicate(
+            session,
+            item=item,
+            source=source,
+            action=action,
+            actor=actor,
+            note=note,
+            call=merge_call or call_merge_model,
+        )
+
+    raise InvalidResolutionError(f"resolution for {item.kind.value} items is not implemented")
+
+
 class CuratorCall(Protocol):
     async def __call__(
         self, *, model: str, source_text: str, filename: str, existing_titles: list[str]
@@ -307,6 +603,39 @@ async def call_curator_model(
         ),
     )
     result = await agent.run(f"Filename: {filename}\n\n{source_text}")
+    return result.output
+
+
+class MergeCall(Protocol):
+    """The LLM call `_resolve_merge` above makes, isolated the same way `CuratorCall` is."""
+
+    async def __call__(
+        self, *, model: str, existing_body: str, new_source_text: str, filename: str
+    ) -> curate.MergedPage: ...
+
+
+async def call_merge_model(
+    *, model: str, existing_body: str, new_source_text: str, filename: str
+) -> curate.MergedPage:
+    """Real merge call via Pydantic AI — 03 §4's `merge` duplicate resolution."""
+    from pydantic_ai import Agent
+
+    agent = Agent(
+        model,
+        output_type=curate.MergedPage,
+        system_prompt=(
+            "You maintain a page in an enterprise wiki. An admin has decided a newly "
+            "submitted document duplicates this page's subject and should be folded into "
+            "it rather than becoming a separate page. Rewrite the page's full body to "
+            "incorporate anything new, corrected, or updated from the submitted document, "
+            "preserving what still holds from the existing page. Then write a one-sentence "
+            "change summary noting that this update came from a merge."
+        ),
+    )
+    result = await agent.run(
+        f"Existing page body:\n\n{existing_body}\n\n---\n\n"
+        f"Newly submitted document ({filename}):\n\n{new_source_text}"
+    )
     return result.output
 
 

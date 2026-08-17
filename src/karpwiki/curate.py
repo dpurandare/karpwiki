@@ -1,9 +1,13 @@
 """Curator decisions (03 §6) — no I/O, no database, no transitions.
 
 One LLM call proposes the source page's content and the concept/entity pages a source
-warrants. Everything else here is deterministic rendering: matching a proposed page
-against the workspace's existing pages, and regenerating `overview.md`/`log.md` bodies
-from queryable ground truth rather than parsing prior markdown.
+warrants (`CuratedContent`). A second, separate call folds a duplicate source into an
+existing page when an admin resolves a `duplicate` review item as `merge` (03 §4,
+`MergedPage`) — its own call, not a variant of curation, since it targets one page an
+admin already picked rather than proposing new ones. Everything else here is deterministic
+rendering: matching a proposed page against the workspace's existing pages, and
+regenerating `overview.md`/`log.md` bodies from queryable ground truth rather than parsing
+prior markdown.
 
 Phase 1 curates every source as `narrative` — 07 §1.3's structured-data metadata/intent
 page is out of scope (phase1-tasklist §0, accepted simplification).
@@ -46,6 +50,14 @@ class CuratedContent(BaseModel):
             "duplicated; otherwise pick a new, distinct title."
         ),
     )
+
+
+class MergedPage(BaseModel):
+    """The Curator's output for folding a duplicate source into an existing page (03 §4's
+    `merge` duplicate resolution)."""
+
+    body: str = Field(min_length=1, description="The page's full updated markdown body.")
+    change_summary: str = Field(min_length=1, description="One sentence noting the merge.")
 
 
 @dataclass(frozen=True)
@@ -102,8 +114,9 @@ def render_overview_body(
 def render_log_body(entries: list[tuple[datetime, str, int]]) -> str:
     """`entries` is (timestamp, filename, pages_touched), newest first.
 
-    Scoped to `ingestion_log` only — `lint_log` and `admin_action_log` (02 §5) don't exist
-    yet in Phase 1, so they aren't part of this rendering.
+    Scoped to `ingestion_log` only — `lint_log` doesn't exist in Phase 1 (no lint pass is
+    built), and `admin_action_log` (02 §5, 09 §22) is an audit trail for admins, not
+    ingest-facing content, so neither is part of this rendering.
     """
     lines = "\n".join(
         f"- {ts.isoformat()}: Ingested `{fn}` → {n} page(s) touched"
