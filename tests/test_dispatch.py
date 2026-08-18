@@ -370,6 +370,46 @@ async def test_resolving_advisor_duplicate_merge_dispatches_reindex_for_the_prim
     assert dispatched["reindex"] == [str(older.page_id)]
 
 
+async def test_resolving_archive_page_archives_it_no_dispatch(client, session, workspace, dispatched):
+    """Step 39: "archive page" is a synchronous status flip, same shape as step 37's
+    "delete superseded source" — an archived page just stops matching search's own
+    published-only filter, no reindex/dispatch needed."""
+    from datetime import date
+
+    from karpwiki import advisor, versioning
+    from karpwiki.models import PageStatus, PageType, WikiPage
+
+    await _grant_admin(session, workspace)
+    page = await versioning.create_page(
+        session,
+        workspace_id=workspace.workspace_id,
+        path="concepts/forgotten-page.md",
+        page_type=PageType.concept,
+        title="Forgotten Page",
+        description="About Forgotten Page.",
+        date=date(2026, 8, 17),
+        tags=["a", "b"],
+        body="Nobody links to or searches for this page.",
+        author="system:curator",
+        status=PageStatus.published,
+    )
+    await session.flush()
+
+    item = await advisor.run_orphan_detector(session, workspace_id=workspace.workspace_id)
+    await session.commit()
+
+    resp = await client.post(
+        f"/review-items/{item.review_id}/resolve", headers=ADMIN, json={"action": "archive page"}
+    )
+    assert resp.status_code == 200
+    assert dispatched["reindex"] == []
+    assert dispatched["curate_source"] == []
+
+    refreshed = await session.get(WikiPage, page.page_id)
+    await session.refresh(refreshed)
+    assert refreshed.status is PageStatus.archived
+
+
 async def test_curate_task_dispatches_reindex_for_pages_it_wrote(session, workspace, task_db, dispatched):
     """Extends tests/test_tasks.py's coverage: `_curate` itself dispatches reindex for
     whatever it left pending/stale in the source's workspace (step 32), not just the

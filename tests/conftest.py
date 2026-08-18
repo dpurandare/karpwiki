@@ -45,6 +45,7 @@ def dispatched(monkeypatch):
         "detect_staleness",
         "detect_superseded_sources",
         "detect_existing_duplicates",
+        "detect_orphans",
     )
     calls = {name: [] for name in task_names}
     for name in task_names:

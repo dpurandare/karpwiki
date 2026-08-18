@@ -139,9 +139,9 @@ services:
         condition: service_healthy
 
   # Maintenance Advisor detectors (track 2c, steps 36+): `detect_staleness` (step 36),
-  # `detect_superseded_sources` (step 37), `detect_existing_duplicates` (step 38). Nothing
-  # schedules any of these automatically yet (step 41's Celery beat), so all three are
-  # dispatched manually per workspace.
+  # `detect_superseded_sources` (step 37), `detect_existing_duplicates` (step 38),
+  # `detect_orphans` (step 39). Nothing schedules any of these automatically yet (step 41's
+  # Celery beat), so all four are dispatched manually per workspace.
   worker-maintenance:
     image: karpwiki-worker:local
     command: celery -A karpwiki.tasks worker -Q maintenance --loglevel=info -n maintenance@%h

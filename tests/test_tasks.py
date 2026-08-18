@@ -77,6 +77,11 @@ def test_maintenance_queue_registers_the_existing_duplicate_detector():
     assert tasks.app.tasks["karpwiki.maintenance.detect_existing_duplicates"] is not None
 
 
+def test_maintenance_queue_registers_the_orphan_detector():
+    """Step 39."""
+    assert tasks.app.tasks["karpwiki.maintenance.detect_orphans"] is not None
+
+
 def test_acks_late_is_set_so_a_crashed_worker_redelivers_the_task():
     """Step 33: a worker process dying mid-task (OOM, SIGKILL) must not silently lose the
     job — acks_late + reject_on_worker_lost means the broker redelivers it instead."""
@@ -291,3 +296,37 @@ async def test_detect_existing_duplicates_task_raises_a_review_item(session, wor
         )
     ).scalar_one()
     assert item.detail["raised_by"] == "advisor"
+
+
+async def test_detect_orphans_task_raises_a_review_item(session, workspace, task_db):
+    from datetime import date
+
+    from karpwiki import versioning
+    from karpwiki.models import PageStatus, PageType, ReviewItem, ReviewKind
+
+    await versioning.create_page(
+        session,
+        workspace_id=workspace.workspace_id,
+        path="concepts/forgotten-page.md",
+        page_type=PageType.concept,
+        title="Forgotten Page",
+        description="About Forgotten Page.",
+        date=date(2026, 8, 17),
+        tags=["a", "b"],
+        body="Nobody links to or searches for this page.",
+        author="system:curator",
+        status=PageStatus.published,
+    )
+    await session.commit()
+
+    await tasks._detect_orphans(workspace.workspace_id)
+
+    item = (
+        await session.execute(
+            select(ReviewItem).where(
+                ReviewItem.workspace_id == workspace.workspace_id, ReviewItem.kind == ReviewKind.prune
+            )
+        )
+    ).scalar_one()
+    assert item.detail["reason"] == "orphaned"
+    assert item.detail["page_count"] == 1

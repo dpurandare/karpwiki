@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-18): steps 22–38 done, tracks 2a and 2b complete, track 2c in progress.** Phase 1 (steps 1–21,
+**Status (2026-08-18): steps 22–39 done, tracks 2a and 2b complete, track 2c in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -241,7 +241,17 @@ is a real Authenticator implementation using that pick, not a library search.
     got a real new version, duplicate archived, reindexed. See
     [09](09-implementation-notes.md) §41.
 39. Orphan/Low-Traffic Detector → `prune` review items — needs `page_link` inbound-reference
-    counts (step 28) and `query_log` (step 25), both now available.
+    counts (step 28) and `query_log` (step 25), both now available. **Done** —
+    `advisor.find_orphaned_pages`/`run_orphan_detector` (batched, same shape as step 37) require
+    *both* zero inbound `page_link` rows and zero `query_log` appearances over the 90-day lookback
+    (09 §8), scoped to `concept`/`entity`/`comparison` pages only. Caught and fixed a real
+    pre-existing bug in step 37's `_open_prune_item` before it shipped: it wasn't scoped by
+    `detail["reason"]`, so an open `superseded_source_retention` item would have silently blocked
+    every `orphaned` finding from ever being raised. `resolve_prune` now branches by reason
+    (`archive page`/`dismiss` for `orphaned`). Live-verified against real dev Postgres/workers with
+    real `page_link` parsing and a real `query_log` row from a real search call: exactly the two
+    genuine orphans flagged, the linked and searched pages correctly excluded. See
+    [09](09-implementation-notes.md) §42.
 40. Contradiction Detector (Curator lint pass) → `reindex`/`prune` — net new LLM capability, no
     prior design to build from (flagged open in §0 above); resolve its design when this step
     starts, the same way Phase 1 resolved forks at the step they blocked.

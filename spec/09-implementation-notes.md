@@ -1788,5 +1788,60 @@ new version, the duplicate was archived, and the primary reindexed within 2s via
 **Spec touch-point**: none — `05` §5 already describes this; this section records the batching
 divergence, the resolution-function split, and the `llm.py` refactor.
 
+## 42. Orphan/Low-Traffic Detector — A Reason-Scoping Bug in `_open_prune_item`, Surfaced by Adding a Second Prune Reason (Phase 2 Step 39)
+
+Track 2c's fourth detector (05 §2's table row, §4), and the first to reuse `ReviewKind.prune`
+for a genuinely different reason than step 37's.
+
+**Both conditions, not either.** 05 §2 is explicit: "zero inbound cross-references... **and**
+zero appearances in `query_log`... over the lookback window" — a page with real query traffic but
+no incoming links is still in use; a rarely-linked page people keep searching for isn't truly
+orphaned. `find_orphaned_pages` runs this as two stages: a cheap, workspace-wide "zero inbound
+`page_link`" query first, then a `query_log` JSONB-containment check (`results.contains([{"page_id":
+...}])`, SQLAlchemy's JSONB comparator, no raw SQL needed) only against that already-small
+candidate set — one query per candidate, matching every other detector's "periodic batch job, not
+a hot path" cost shape. The 90-day lookback (`09` §8, `SCHEMA.md`'s
+`thresholds.orphan.query_log_lookback_days`) sits inside `query_log`'s own 90-day retention window
+by construction, so "zero appearances" can never silently mean "the log already got purged."
+
+**Scoped to real content pages only.** `overview`/`index`/`log` page types are structural
+bookkeeping pages that legitimately have zero inbound links (nothing links *to* the overview page)
+and were never meant to be prune candidates; `source` pages are cited via free-text footnotes, not
+`page_link` rows (the same limit `09` §39 named for step 36's Signal 2), and already have their
+own retention detector (step 37) — including them here would double-handle the same subject under
+two different detectors. `ORPHAN_CANDIDATE_PAGE_TYPES` is `concept`/`entity`/`comparison` only.
+
+**A real bug in the existing `_open_prune_item`, caught before it shipped.** Step 37's
+duplicate-prevention check (`_open_prune_item`) looked for *any* open `prune` item for the
+workspace, regardless of reason — correct when only one prune reason existed, but adding this
+detector's `orphaned` reason meant an open `superseded_source_retention` item would have silently
+blocked every future orphan finding from ever being raised (and vice versa) — the same class of
+bug step 38's per-pair duplicate check was already built to avoid, just not yet applied to `prune`.
+Fixed by making `_open_prune_item` take a `reason` and filter by `item.detail["reason"]`, the same
+client-side comparison step 38 already uses (an open-items list per workspace is always small, so
+this isn't the same cost concern as scanning all of `query_log`). `run_superseded_source_detector`
+updated to pass its own reason explicitly — this is a real, if narrow, retroactive fix to step 37's
+own code, not new step-39 surface area, caught by reasoning through the scenario before writing
+`run_orphan_detector`, not by a failing test.
+
+**`resolve_prune` restructured to branch by reason, not by a single hardcoded check.** Now
+`superseded_source_retention` → `delete superseded source`/`dismiss`, `orphaned` → `archive
+page`/`dismiss` (`WikiPage.status = archived` — search already filters to `published`/`draft`-if-
+requested at query time, so an archived page silently stops appearing with no index cleanup or
+dispatch needed, same no-dispatch shape as step 37's status flip), everything else still a clean
+`InvalidResolutionError` naming `contradicted_by` (step 40) as what's still missing.
+
+**Live-verified** against real dev Postgres and the real worker containers (not committed): four
+pages seeded — a truly orphaned page, a page with a real inbound link via step 28's actual
+cross-reference parsing, a page found via a real `GET /search` call that wrote a real `query_log`
+row, and the "linker" page itself (which turned out to be a genuine orphan too, since nothing
+links to *it* either — the live script's own first assertion was wrong about this, not the
+detector, caught and fixed before the run counted as passing). The detector correctly flagged
+exactly the two genuine orphans and excluded the linked and searched pages; resolved as `archive
+page` over the real gateway.
+
+**Spec touch-point**: none — `05` §2/§4 already describe this; this section records the
+`_open_prune_item` fix and the content-page-type scoping.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

@@ -1,4 +1,4 @@
-"""Maintenance Advisor detectors (05 §2-5) — phase2-tasklist.md steps 36-38."""
+"""Maintenance Advisor detectors (05 §2-5) — phase2-tasklist.md steps 36-39."""
 
 import hashlib
 import uuid
@@ -13,9 +13,12 @@ from karpwiki.models import (
     IndexState,
     IndexStatus,
     IndexType,
+    LinkType,
+    PageLink,
     PageStatus,
     PageType,
     PageVersion,
+    QueryLog,
     RawSource,
     RawSourceStatus,
     ReviewItem,
@@ -48,12 +51,12 @@ async def _indexed_page(session, workspace, *, title, body=DUPLICATE_BODY):
     return page
 
 
-async def _page(session, workspace, *, title="Runbook", body="Body text."):
+async def _page(session, workspace, *, title="Runbook", body="Body text.", page_type=PageType.concept):
     return await versioning.create_page(
         session,
         workspace_id=workspace.workspace_id,
-        path=f"concepts/{title.lower().replace(' ', '-')}.md",
-        page_type=PageType.concept,
+        path=f"{'sources' if page_type is PageType.source else 'concepts'}/{title.lower().replace(' ', '-')}.md",
+        page_type=page_type,
         title=title,
         description=f"About {title}.",
         date=date(2026, 8, 17),
@@ -400,13 +403,13 @@ async def test_resolve_prune_rejects_the_wrong_kind(session, workspace):
 
 
 async def test_resolve_prune_rejects_an_unbuilt_reason(session, workspace):
-    """`orphaned`/`low_traffic` (step 39) and `contradicted_by` (step 40) don't exist yet."""
+    """`contradicted_by` (step 40) doesn't exist yet."""
     item = await review.create(
         session,
         kind=ReviewKind.prune,
         subject_ref=workspace.workspace_id,
         workspace_id=workspace.workspace_id,
-        detail={"reason": "orphaned"},
+        detail={"reason": "contradicted_by"},
     )
     with pytest.raises(advisor.InvalidResolutionError):
         await advisor.resolve_prune(session, item=item, action="archive page", actor="user:admin")
@@ -580,4 +583,148 @@ async def test_resolve_existing_duplicate_rejects_an_unsupported_action(session,
     with pytest.raises(advisor.InvalidResolutionError):
         await advisor.resolve_existing_duplicate(
             session, item=item, action="bogus", actor="user:admin"
+        )
+
+
+# --- Orphan/Low-Traffic Detector (05 §2, §4) — step 39 ------------------------------------
+
+
+async def test_find_orphaned_pages_finds_an_unlinked_unqueried_page(session, workspace):
+    page = await _page(session, workspace, title="Forgotten Page")
+    findings = await advisor.find_orphaned_pages(session, workspace_id=workspace.workspace_id)
+    assert [f.page_id for f in findings] == [page.page_id]
+
+
+async def test_find_orphaned_pages_excludes_a_page_with_an_inbound_link(session, workspace):
+    target = await _page(session, workspace, title="Linked Page")
+    linker = await _page(session, workspace, title="Linker Page")
+    session.add(PageLink(from_page_id=linker.page_id, to_page_id=target.page_id, link_type=LinkType.cross_reference))
+    await session.flush()
+
+    findings = await advisor.find_orphaned_pages(session, workspace_id=workspace.workspace_id)
+    found_ids = {f.page_id for f in findings}
+    assert target.page_id not in found_ids
+    # `linker` itself has no inbound links and wasn't queried either — it's a legitimate
+    # finding in its own right, just not the one this test is about.
+
+
+async def test_find_orphaned_pages_excludes_a_recently_queried_page(session, workspace):
+    page = await _page(session, workspace, title="Searched Page")
+    session.add(
+        QueryLog(
+            principal="user:deepak",
+            query_text="searched page",
+            resolved_workspaces=[workspace.workspace_id],
+            results=[{"page_id": str(page.page_id), "score": 0.9}],
+        )
+    )
+    await session.flush()
+
+    findings = await advisor.find_orphaned_pages(session, workspace_id=workspace.workspace_id)
+    assert findings == []
+
+
+async def test_find_orphaned_pages_ignores_a_query_outside_the_lookback_window(session, workspace):
+    page = await _page(session, workspace, title="Once Popular Page")
+    entry = QueryLog(
+        principal="user:deepak",
+        query_text="once popular page",
+        resolved_workspaces=[workspace.workspace_id],
+        results=[{"page_id": str(page.page_id), "score": 0.9}],
+    )
+    session.add(entry)
+    await session.flush()
+    entry.created_at = datetime.now(UTC) - timedelta(days=200)
+    await session.flush()
+
+    findings = await advisor.find_orphaned_pages(
+        session, workspace_id=workspace.workspace_id, lookback_days=90
+    )
+    assert [f.page_id for f in findings] == [page.page_id]
+
+
+async def test_find_orphaned_pages_ignores_structural_and_source_page_types(session, workspace):
+    await _page(session, workspace, title="Overview", page_type=PageType.overview)
+    await _page(session, workspace, title="Log", page_type=PageType.log)
+    await _page(session, workspace, title="Index", page_type=PageType.index)
+    await _page(session, workspace, title="Source Page", page_type=PageType.source)
+
+    findings = await advisor.find_orphaned_pages(session, workspace_id=workspace.workspace_id)
+    assert findings == []
+
+
+async def test_run_orphan_detector_creates_a_prune_item(session, workspace):
+    page = await _page(session, workspace, title="Forgotten Page")
+    item = await advisor.run_orphan_detector(session, workspace_id=workspace.workspace_id)
+    await session.commit()
+
+    assert item is not None
+    assert item.kind is ReviewKind.prune
+    assert item.proposed_action == "archive page"
+    assert item.detail["raised_by"] == "advisor"
+    assert item.detail["reason"] == "orphaned"
+    assert item.detail["pages"] == [{"page_id": str(page.page_id), "path": page.path}]
+
+
+async def test_run_orphan_detector_coexists_with_an_open_superseded_source_item(session, workspace):
+    """The reason-scoped `_open_prune_item` fix: an open `superseded_source_retention` item
+    must not block a genuinely different `orphaned` finding."""
+    old_source = await _superseded_source(session, workspace, filename="old.md", superseded_days_ago=200)
+    superseded_item = await advisor.run_superseded_source_detector(
+        session, workspace_id=workspace.workspace_id, retention_days=180
+    )
+    await session.commit()
+    assert superseded_item is not None
+
+    await _page(session, workspace, title="Forgotten Page")
+    orphan_item = await advisor.run_orphan_detector(session, workspace_id=workspace.workspace_id)
+    assert orphan_item is not None
+    assert orphan_item.review_id != superseded_item.review_id
+
+
+async def test_run_orphan_detector_skips_if_orphaned_item_already_open(session, workspace):
+    await _page(session, workspace, title="Forgotten Page")
+    first = await advisor.run_orphan_detector(session, workspace_id=workspace.workspace_id)
+    await session.commit()
+    assert first is not None
+
+    await _page(session, workspace, title="Another Forgotten Page")
+    second = await advisor.run_orphan_detector(session, workspace_id=workspace.workspace_id)
+    assert second is None
+
+
+async def test_resolve_prune_archive_page_archives_it(session, workspace):
+    page = await _page(session, workspace, title="Forgotten Page")
+    item = await advisor.run_orphan_detector(session, workspace_id=workspace.workspace_id)
+    await session.commit()
+
+    await advisor.resolve_prune(session, item=item, action="archive page", actor="user:admin")
+    await session.commit()
+
+    refreshed = await session.get(type(page), page.page_id)
+    await session.refresh(refreshed)
+    assert refreshed.status is PageStatus.archived
+
+
+async def test_resolve_prune_orphaned_dismiss_leaves_page_untouched(session, workspace):
+    page = await _page(session, workspace, title="Forgotten Page")
+    item = await advisor.run_orphan_detector(session, workspace_id=workspace.workspace_id)
+    await session.commit()
+
+    await advisor.resolve_prune(session, item=item, action="dismiss", actor="user:admin")
+
+    refreshed = await session.get(type(page), page.page_id)
+    await session.refresh(refreshed)
+    assert refreshed.status is PageStatus.published
+
+
+async def test_resolve_prune_orphaned_rejects_delete_superseded_source_action(session, workspace):
+    """Actions are scoped per reason — a superseded-source action doesn't apply here."""
+    await _page(session, workspace, title="Forgotten Page")
+    item = await advisor.run_orphan_detector(session, workspace_id=workspace.workspace_id)
+    await session.commit()
+
+    with pytest.raises(advisor.InvalidResolutionError):
+        await advisor.resolve_prune(
+            session, item=item, action="delete superseded source", actor="user:admin"
         )

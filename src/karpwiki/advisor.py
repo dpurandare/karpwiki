@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import curate, dedup, llm, review, search, versioning
@@ -20,8 +20,11 @@ from .frontmatter import split_frontmatter
 from .models import (
     IndexState,
     IndexStatus,
+    PageLink,
     PageStatus,
+    PageType,
     PageVersion,
+    QueryLog,
     RawSource,
     RawSourceStatus,
     ReviewItem,
@@ -39,6 +42,12 @@ class InvalidResolutionError(ValueError):
 
 # 09 §8's decided default — confirms 09 §6's illustrative `retention.superseded_source_days`.
 DEFAULT_SUPERSEDED_SOURCE_RETENTION_DAYS = 180
+
+# 09 §8's decided default — confirms 09 §6's illustrative
+# `thresholds.orphan.query_log_lookback_days`, and sits inside query_log's own 90-day
+# retention window (09 §8) by construction, so "zero appearances" never silently means
+# "the log was already purged."
+DEFAULT_ORPHAN_QUERY_LOG_LOOKBACK_DAYS = 90
 
 
 # 09 §6's SCHEMA.md template gives popularity-tiered values (`high_traffic_days: 90`,
@@ -222,8 +231,12 @@ async def find_superseded_sources_past_retention(
     ]
 
 
-async def _open_prune_item(session: AsyncSession, *, workspace_id: str) -> ReviewItem | None:
-    return (
+async def _open_prune_item(session: AsyncSession, *, workspace_id: str, reason: str) -> ReviewItem | None:
+    """Scoped by `detail["reason"]`, not just kind/workspace/status — `ReviewKind.prune`
+    now covers more than one detector (`superseded_source_retention` here, `orphaned`
+    below), and an open item for one reason must not block a genuinely different one from
+    ever being raised (the same problem step 38's per-pair check solves for `duplicate`)."""
+    candidates = (
         await session.execute(
             select(ReviewItem).where(
                 ReviewItem.workspace_id == workspace_id,
@@ -231,7 +244,11 @@ async def _open_prune_item(session: AsyncSession, *, workspace_id: str) -> Revie
                 ReviewItem.status == ReviewStatus.open,
             )
         )
-    ).scalars().first()
+    ).scalars().all()
+    for item in candidates:
+        if (item.detail or {}).get("reason") == reason:
+            return item
+    return None
 
 
 async def run_superseded_source_detector(
@@ -242,7 +259,10 @@ async def run_superseded_source_detector(
 ) -> ReviewItem | None:
     """05 §4: one batched `prune` review item per workspace per run, same shape as
     `run_staleness_detector` — skips if an equivalent item is already open."""
-    if await _open_prune_item(session, workspace_id=workspace_id) is not None:
+    if (
+        await _open_prune_item(session, workspace_id=workspace_id, reason="superseded_source_retention")
+        is not None
+    ):
         return None
 
     findings = await find_superseded_sources_past_retention(
@@ -275,34 +295,138 @@ async def run_superseded_source_detector(
     )
 
 
+@dataclass(frozen=True)
+class OrphanFinding:
+    page_id: uuid.UUID
+    path: str
+
+
+# Content page types only — `overview`/`index`/`log` are structural bookkeeping pages that
+# legitimately have zero inbound page_link references (nothing links *to* the overview
+# page) and aren't prune candidates; `source` pages are cited via free-text footnotes, not
+# `page_link` rows (09 §39's note on step 36's Signal 2), so "inbound references" doesn't
+# mean the same thing for them, and their own retention already has a dedicated detector
+# (step 37).
+ORPHAN_CANDIDATE_PAGE_TYPES = (PageType.concept, PageType.entity, PageType.comparison)
+
+
+async def find_orphaned_pages(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    lookback_days: int = DEFAULT_ORPHAN_QUERY_LOG_LOOKBACK_DAYS,
+) -> list[OrphanFinding]:
+    """05 §2: zero inbound `page_link` references **and** zero `query_log` appearances over
+    the lookback window — both conditions, not either alone (a page with no incoming links
+    but real query traffic is still being used; a rarely-linked page someone keeps
+    searching for isn't truly orphaned). Stage 1 (inbound links) is cheap and workspace-wide
+    in one query; stage 2 (query_log) only runs against that already-small candidate set,
+    one query per candidate — a periodic batch job, not a hot path, same cost shape as the
+    other detectors' per-page checks."""
+    candidates = (
+        await session.execute(
+            select(WikiPage.page_id, WikiPage.path).where(
+                WikiPage.workspace_id == workspace_id,
+                WikiPage.status == PageStatus.published,
+                WikiPage.page_type.in_(ORPHAN_CANDIDATE_PAGE_TYPES),
+                ~exists().where(PageLink.to_page_id == WikiPage.page_id),
+            )
+        )
+    ).all()
+    if not candidates:
+        return []
+
+    cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
+    findings: list[OrphanFinding] = []
+    for page_id, path in candidates:
+        queried = (
+            await session.execute(
+                select(QueryLog.query_id)
+                .where(
+                    QueryLog.created_at >= cutoff,
+                    QueryLog.results.contains([{"page_id": str(page_id)}]),
+                )
+                .limit(1)
+            )
+        ).first()
+        if queried is None:
+            findings.append(OrphanFinding(page_id=page_id, path=path))
+    return findings
+
+
+async def run_orphan_detector(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    lookback_days: int = DEFAULT_ORPHAN_QUERY_LOG_LOOKBACK_DAYS,
+) -> ReviewItem | None:
+    """05 §2/§4: one batched `prune` review item per workspace per run, same shape as
+    `run_superseded_source_detector` — skips if an `orphaned`-reason item is already open."""
+    if await _open_prune_item(session, workspace_id=workspace_id, reason="orphaned") is not None:
+        return None
+
+    findings = await find_orphaned_pages(session, workspace_id=workspace_id, lookback_days=lookback_days)
+    if not findings:
+        return None
+
+    severity = "high" if len(findings) >= 20 else "medium" if len(findings) >= 5 else "low"
+    return await review.create(
+        session,
+        kind=ReviewKind.prune,
+        subject_ref=workspace_id,
+        workspace_id=workspace_id,
+        severity=severity,
+        proposed_action="archive page",
+        detail={
+            "raised_by": "advisor",
+            "reason": "orphaned",
+            "page_count": len(findings),
+            "pages": [{"page_id": str(f.page_id), "path": f.path} for f in findings],
+        },
+    )
+
+
 async def resolve_prune(session: AsyncSession, *, item: ReviewItem, action: str, actor: str) -> ReviewItem:
-    """Admin resolution of a `prune` review item (05 §4). Only `superseded_source_retention`
-    is built (step 37) — `orphaned`/`low_traffic` (step 39) and `contradicted_by` (step 40)
-    extend this once their detectors exist, the same way `resolve_duplicate` grew one
-    action at a time rather than all four arriving at once.
+    """Admin resolution of a `prune` review item (05 §4). `superseded_source_retention`
+    (step 37) and `orphaned` (step 39) are built — `contradicted_by` (step 40) extends this
+    once its detector exists, the same way `resolve_duplicate` grew one action at a time
+    rather than all four arriving at once.
 
     "delete superseded source" only ever flips `RawSource.status` to `archived` — 05 §4's
     "follows the object-store lifecycle tiering" already assigns physical erasure to an
     external object-store lifecycle policy reacting to that status tag (02 §2), not to
     application code (`objectstore.delete` is explicitly staging-only, never for a
-    final-key object)."""
+    final-key object). "archive page" is the direct `WikiPage.status = archived` analog for
+    a page subject rather than a source one (05 §4: "archive... reversible... default")."""
     if item.kind is not ReviewKind.prune:
         raise InvalidResolutionError(f"review item {item.review_id} is not a prune item")
     reason = (item.detail or {}).get("reason")
-    if reason != "superseded_source_retention":
-        raise InvalidResolutionError(
-            f"prune resolution for reason {reason!r} is not implemented"
-        )
-    if action not in ("delete superseded source", "dismiss"):
-        raise InvalidResolutionError(
-            f"{action!r} is not a supported prune resolution for a superseded source "
-            "(delete superseded source | dismiss)"
-        )
-    if action == "delete superseded source":
-        for entry in (item.detail or {}).get("sources", []):
-            source = await session.get(RawSource, uuid.UUID(entry["source_id"]))
-            if source is not None and source.status is RawSourceStatus.superseded:
-                source.status = RawSourceStatus.archived
+
+    if reason == "superseded_source_retention":
+        if action not in ("delete superseded source", "dismiss"):
+            raise InvalidResolutionError(
+                f"{action!r} is not a supported prune resolution for a superseded source "
+                "(delete superseded source | dismiss)"
+            )
+        if action == "delete superseded source":
+            for entry in (item.detail or {}).get("sources", []):
+                source = await session.get(RawSource, uuid.UUID(entry["source_id"]))
+                if source is not None and source.status is RawSourceStatus.superseded:
+                    source.status = RawSourceStatus.archived
+    elif reason == "orphaned":
+        if action not in ("archive page", "dismiss"):
+            raise InvalidResolutionError(
+                f"{action!r} is not a supported prune resolution for orphaned pages "
+                "(archive page | dismiss)"
+            )
+        if action == "archive page":
+            for entry in (item.detail or {}).get("pages", []):
+                page = await session.get(WikiPage, uuid.UUID(entry["page_id"]))
+                if page is not None and page.status is PageStatus.published:
+                    page.status = PageStatus.archived
+    else:
+        raise InvalidResolutionError(f"prune resolution for reason {reason!r} is not implemented")
+
     return await review.resolve(session, item=item, action=action, actor=actor)
 
 
