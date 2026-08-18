@@ -214,6 +214,58 @@ async def test_bulk_move_dispatches_reindex_per_moved_page(
     assert dispatched["reindex"] == [str(page.page_id)]
 
 
+async def test_resolving_reindex_now_dispatches_reindex_for_each_page(
+    client, session, workspace, dispatched
+):
+    """Step 36: approving a Staleness Detector item dispatches reindex for exactly the
+    pages it found (05 §3), read back from the review item's own `detail`."""
+    from datetime import UTC, datetime, timedelta
+
+    from karpwiki import advisor
+    from karpwiki.models import IndexState, IndexStatus, IndexType, PageVersion
+
+    await _grant_admin(session, workspace)
+    page = await _page(session, workspace, title="Stale Page")
+    status = await session.get(IndexStatus, (page.page_id, IndexType.fts))
+    status.state = IndexState.stale
+    version = await session.get(PageVersion, page.current_version_id)
+    version.created_at = datetime.now(UTC) - timedelta(days=100)
+    await session.flush()
+
+    item = await advisor.run_staleness_detector(session, workspace_id=workspace.workspace_id, threshold_days=90)
+    await session.commit()
+
+    resp = await client.post(
+        f"/review-items/{item.review_id}/resolve", headers=ADMIN, json={"action": "reindex now"}
+    )
+    assert resp.status_code == 200
+    assert dispatched["reindex"] == [str(page.page_id)]
+
+
+async def test_resolving_reindex_dismiss_dispatches_nothing(client, session, workspace, dispatched):
+    from datetime import UTC, datetime, timedelta
+
+    from karpwiki import advisor
+    from karpwiki.models import IndexState, IndexStatus, IndexType, PageVersion
+
+    await _grant_admin(session, workspace)
+    page = await _page(session, workspace, title="Stale Page")
+    status = await session.get(IndexStatus, (page.page_id, IndexType.fts))
+    status.state = IndexState.stale
+    version = await session.get(PageVersion, page.current_version_id)
+    version.created_at = datetime.now(UTC) - timedelta(days=100)
+    await session.flush()
+
+    item = await advisor.run_staleness_detector(session, workspace_id=workspace.workspace_id, threshold_days=90)
+    await session.commit()
+
+    resp = await client.post(
+        f"/review-items/{item.review_id}/resolve", headers=ADMIN, json={"action": "dismiss"}
+    )
+    assert resp.status_code == 200
+    assert dispatched["reindex"] == []
+
+
 async def test_curate_task_dispatches_reindex_for_pages_it_wrote(session, workspace, task_db, dispatched):
     """Extends tests/test_tasks.py's coverage: `_curate` itself dispatches reindex for
     whatever it left pending/stale in the source's workspace (step 32), not just the

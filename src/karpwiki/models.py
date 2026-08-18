@@ -282,6 +282,12 @@ class ReviewItem(Base):
     severity: Mapped[str | None] = mapped_column(String(32))
     subject_ref: Mapped[str] = mapped_column(String(512))
     proposed_action: Mapped[str | None] = mapped_column(Text)
+    # Nullable, no default: ingest-time items (submission/classification/duplicate) still
+    # have nowhere they *need* structured evidence — ingestion_log already carries their
+    # history (09 §22). Maintenance Advisor items (reindex/prune, phase2-tasklist.md step
+    # 36+) have no equivalent log to fall back on, so this is where their evidence
+    # (reason, scope, page list, `raised_by`) lives.
+    detail: Mapped[dict | None] = mapped_column(JSONB)
     status: Mapped[ReviewStatus] = mapped_column(
         Enum(ReviewStatus, name="review_status"), default=ReviewStatus.open
     )

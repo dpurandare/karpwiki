@@ -20,7 +20,18 @@ from typing import Protocol
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import classify, curate, dedup, document_types, llm, objectstore, pipeline, review, versioning
+from . import (
+    advisor,
+    classify,
+    curate,
+    dedup,
+    document_types,
+    llm,
+    objectstore,
+    pipeline,
+    review,
+    versioning,
+)
 from .frontmatter import split_frontmatter
 from .models import (
     AdminActionLog,
@@ -629,6 +640,16 @@ async def resolve_review_item(
         if action != "acknowledge":
             raise InvalidResolutionError("submission items only accept action='acknowledge'")
         await resolve_submission(session, item=item, actor=actor)
+        return None
+
+    if item.kind is ReviewKind.reindex:
+        # `subject_ref` is a workspace_id here, not a source_id (phase2-tasklist.md step
+        # 36) — resolved entirely in `advisor.py`, before the RawSource lookup below, which
+        # doesn't apply to this kind.
+        try:
+            await advisor.resolve_reindex(session, item=item, action=action, actor=actor)
+        except advisor.InvalidResolutionError as exc:
+            raise InvalidResolutionError(str(exc)) from exc
         return None
 
     source = await session.get(RawSource, uuid.UUID(item.subject_ref))

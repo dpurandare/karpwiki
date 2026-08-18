@@ -18,7 +18,7 @@ import uuid
 
 from celery import Celery
 
-from . import ingestion, pipeline, search
+from . import advisor, ingestion, pipeline, search
 from .config import CELERY_BROKER_URL
 from .db import engine, session_scope
 from .models import PipelineState, RawSource, Workspace
@@ -142,6 +142,13 @@ async def _reindex(page_id: uuid.UUID) -> None:
         await search.reindex(session, page_id)
 
 
+async def _detect_staleness(workspace_id: str) -> None:
+    """Phase 2 step 36 — the maintenance queue's first real task. Nothing schedules this
+    yet (step 41's Celery beat); dispatched manually per workspace until then."""
+    async with session_scope() as session:
+        await advisor.run_staleness_detector(session, workspace_id=workspace_id)
+
+
 async def _run_and_release(coro) -> None:
     """`db.engine`'s connection pool is a process-level singleton, but each `@app.task`
     below gets its own `asyncio.run()` — a fresh event loop per call — and an asyncpg
@@ -170,3 +177,8 @@ def curate_source(source_id: str) -> None:
 @app.task(name="karpwiki.indexing.reindex")
 def reindex(page_id: str) -> None:
     asyncio.run(_run_and_release(_reindex(uuid.UUID(page_id))))
+
+
+@app.task(name="karpwiki.maintenance.detect_staleness")
+def detect_staleness(workspace_id: str) -> None:
+    asyncio.run(_run_and_release(_detect_staleness(workspace_id)))

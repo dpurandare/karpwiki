@@ -1612,5 +1612,74 @@ async job dispatch and worker-pool scaling are now met.
 **Spec touch-point**: none — this section is the closing verification record for 2b, not a new
 decision.
 
+## 39. Staleness Detector — `ReviewItem.detail`, and What Signal 2 Can Actually Reach (Phase 2 Step 36)
+
+Track 2c's first detector (05 §2's table, §3), and the first Maintenance Advisor code —
+`advisor.py` is new, shared by all five detectors (steps 36-40).
+
+**`ReviewItem` gains a `detail: JSONB` column** (migration `20102d0aa751`, nullable, no backfill).
+09 §22 deliberately left `ReviewItem` without one, since ingest-time items (submission/
+classification/duplicate) can always read structured evidence back off `ingestion_log`, keyed by
+`source_id`. Maintenance Advisor items have no such log — a `reindex`/`prune` finding isn't a
+`RawSource` pipeline transition at all — so there was nowhere for 05 §3's "Reason: ..., Estimated
+cost: ..., Evidence: ..." to live without either a real column or stuffing formatted text into the
+existing `proposed_action` field. Flagged to the user as a real fork before writing any detector
+code, since every one of steps 36-40 needed the answer; the column was the clear pick, confirmed
+before proceeding. `proposed_action` keeps its existing meaning (a short action slug) for every
+kind; `detail` is where evidence, scope, and (per step 38's own wording) a `raised_by` marker for
+advisor-raised items all live, without a data model split by kind.
+
+**Two signals, one gap in reach.** 05 §2's staleness signal is "`index_status = stale` for longer
+than the threshold, OR a cited `raw_source` was superseded without re-ingestion." Signal 1
+(`find_stale_pages`) is direct — join `index_status`/`page_version`, using the current version's
+`created_at` as "how long stale" since `index_status` itself carries no timestamp for when
+staleness began. Signal 2 (`find_pages_citing_superseded_sources`) can only reach a `raw_source`'s
+own dedicated page (`sources/{source_id}.md`, `ingestion._write_source_page`'s literal path
+convention) — a concept/entity page's provenance back to whichever source(s) shaped it isn't
+tracked anywhere as structured data (citations are free-text footnotes, `01` §6, not an FK), so
+there's no way to find "which curated pages cite this superseded source" without inventing a
+citation graph nothing else in this codebase needs yet. Scoped explicitly to source pages rather
+than silently under-detecting or over-building; worth revisiting if/when a citation FK ever gets
+built for another reason.
+
+**Popularity-tiering deferred to the scheduler, per the spec's own framing, not skipped as an
+oversight.** `09` §6's SCHEMA.md template gives two threshold values (`high_traffic_days: 90`,
+`low_traffic_days: 365`), but `05` §2 explicitly assigns that tiering to "the scheduler... a
+tuning detail... not a hard architectural requirement" — step 41, not this one. `find_stale_pages`/
+`run_staleness_detector` take a plain `threshold_days` parameter (default 90, the more responsive
+tier) so step 41 can pass a per-page/per-tier value later without touching detector internals.
+
+**Batching, not one item per page.** 05 §3: "small, single-page reindexes... do not go through
+this review path — only batched/costly reindexes do." `run_staleness_detector` raises exactly one
+`reindex` item per workspace per run, with every finding folded into `detail.pages`, and skips
+entirely if an equivalent item is already open — necessary since nothing schedules this detector
+yet (step 41); a naive re-run without that guard would spam duplicates every time it's invoked.
+
+**Resolution, added now rather than left for a later step.** No step in 36-42 is explicitly named
+"wire reindex resolution," but step 42's verify explicitly requires resolving "through the same
+endpoints ingest-time items already use" — a review item nothing can resolve is an incomplete
+feature, not an appropriately narrow one, so `advisor.resolve_reindex` and its wiring into
+`ingestion.resolve_review_item`'s dispatcher (a new early-return branch, since `reindex`'s
+`subject_ref` is a `workspace_id`, not a `source_id` the existing generic `RawSource` lookup
+expects) landed with the detector. `advisor.py` cannot import `tasks.py` (would cycle:
+`tasks -> ingestion -> advisor -> tasks`), so `resolve_reindex` is bookkeeping only — `api.py`
+dispatches `reindex` for each `item.detail["pages"]` entry itself, post-commit, the same pattern
+already used for a duplicate resolution's `merge` outcome (`09` §35). `"schedule for off-peak"`
+(05 §3's third proposed action) gets a clean `InvalidResolutionError` rather than silently
+behaving like immediate dispatch — no off-peak scheduling primitive exists anywhere in this
+codebase (step 41's Celery beat is recurring-schedule, not one-off-at-a-later-time).
+
+**Live-verified** against real dev Postgres and the real worker containers (not committed): a
+workspace seeded with both signals — a page stale 120 days past a 90-day threshold, a superseded
+source whose own page had never been re-touched — dispatched to the real `detect_staleness` task,
+produced one `reindex` review item with both pages and correct per-page reasons
+(`stale_content`/`source_updated`) within 0.1s, resolved over the real HTTP gateway as
+`"reindex now"`, and both pages reached `indexed` within 2s via the real `worker-indexing`
+container. No LLM calls involved anywhere in this detector (matches 02 §7: reindexing is cheap,
+no LLM), so no bugs and no cost either.
+
+**Spec touch-point**: `05` §1's review-item kind table already lists `reindex`; no wording changes
+needed — this section records the `detail` column decision and Signal 2's honest scope limit.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

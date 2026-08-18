@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-17): steps 22–35 done, tracks 2a and 2b complete.** Phase 1 (steps 1–21,
+**Status (2026-08-18): steps 22–36 done, tracks 2a and 2b complete, track 2c started.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -203,7 +203,17 @@ is a real Authenticator implementation using that pick, not a library search.
 ## 2c — Maintenance Advisor
 
 36. Staleness Detector → `reindex` review items
-    ([05](05-admin-backend-and-maintenance.md) §2 table, §3).
+    ([05](05-admin-backend-and-maintenance.md) §2 table, §3). **Done** —
+    [`advisor.py`](../src/karpwiki/advisor.py) (new module for all of track 2c's detectors):
+    `find_stale_pages`/`find_pages_citing_superseded_sources` (the two 05 §2 signals),
+    `run_staleness_detector` (batches findings into one `reindex` item per workspace per run,
+    05 §3), `resolve_reindex` (new resolution path — `reindex now`/`dismiss`). `ReviewItem`
+    gained a `detail` JSONB column (new migration `20102d0aa751`) since Maintenance Advisor
+    items have no `ingestion_log` to fall back on for evidence the way ingest-time items do
+    (09 §22). New `karpwiki.maintenance.detect_staleness` Celery task — the maintenance queue's
+    first real task. Live-verified against real dev Postgres and the real worker containers:
+    both signals detected correctly, resolved over the real gateway, both pages reindexed. See
+    [09](09-implementation-notes.md) §39.
 37. Superseded-Source Detector → `prune` review items, 180-day retention (already decided,
     [09](09-implementation-notes.md) §8) — [05](05-admin-backend-and-maintenance.md) §4.
 38. Existing-Content Duplicate Detector

@@ -154,6 +154,7 @@ def _review_item_body(item: ReviewItem) -> dict[str, Any]:
         "severity": item.severity,
         "subject_ref": item.subject_ref,
         "proposed_action": item.proposed_action,
+        "detail": item.detail,
         "status": item.status.value,
         "created_at": item.created_at.isoformat(),
         "resolved_action": item.resolved_action,
@@ -527,6 +528,13 @@ def _register_routes(app: FastAPI) -> None:
                     merge_page_id = uuid.UUID(entry.detail["target_page_id"])
                     break
 
+        # phase2-tasklist.md step 36: approving a Staleness Detector `reindex` item
+        # dispatches reindex for exactly the pages it found (05 §3) — read from the item's
+        # own `detail` (advisor.py), the same evidence the admin console would have shown.
+        reindex_page_ids: list[str] = []
+        if item.kind is ReviewKind.reindex and payload.action == "reindex now":
+            reindex_page_ids = [p["page_id"] for p in (item.detail or {}).get("pages", [])]
+
         body = {
             "review_id": str(item.review_id),
             "status": item.status.value,
@@ -548,6 +556,8 @@ def _register_routes(app: FastAPI) -> None:
             tasks.curate_source.delay(item.subject_ref)
         elif merge_page_id is not None:
             tasks.reindex.delay(str(merge_page_id))
+        for page_id in reindex_page_ids:
+            tasks.reindex.delay(page_id)
         return body
 
     @app.get("/pages/{page_id}/versions/diff")

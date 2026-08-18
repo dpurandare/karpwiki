@@ -60,6 +60,13 @@ def test_queue_routing_registers_all_three_tasks():
     assert routes["karpwiki.indexing.*"]["queue"] == "indexing"
 
 
+def test_maintenance_queue_registers_the_staleness_detector():
+    """Step 36 — the maintenance queue's first real task."""
+    assert tasks.app.tasks["karpwiki.maintenance.detect_staleness"] is not None
+    routes = tasks.app.conf.task_routes
+    assert routes["karpwiki.maintenance.*"]["queue"] == "maintenance"
+
+
 def test_acks_late_is_set_so_a_crashed_worker_redelivers_the_task():
     """Step 33: a worker process dying mid-task (OOM, SIGKILL) must not silently lose the
     job — acks_late + reject_on_worker_lost means the broker redelivers it instead."""
@@ -160,3 +167,40 @@ async def test_reindex_task_indexes_a_pending_page(client, session, workspace, t
     await session.refresh(status_after)
     assert status_after.state is IndexState.indexed
     assert status_after.last_indexed_at is not None
+
+
+async def test_detect_staleness_task_raises_a_review_item(session, workspace, task_db):
+    from datetime import UTC, date, datetime, timedelta
+
+    from karpwiki import versioning
+    from karpwiki.models import PageStatus, PageType, PageVersion, ReviewItem, ReviewKind
+
+    page = await versioning.create_page(
+        session,
+        workspace_id=workspace.workspace_id,
+        path="concepts/old-page.md",
+        page_type=PageType.concept,
+        title="Old Page",
+        description="An old page.",
+        date=date(2026, 8, 17),
+        tags=["a", "b"],
+        body="Body.",
+        author="system:curator",
+        status=PageStatus.published,
+    )
+    status = await session.get(IndexStatus, (page.page_id, IndexType.fts))
+    status.state = IndexState.stale
+    version = await session.get(PageVersion, page.current_version_id)
+    version.created_at = datetime.now(UTC) - timedelta(days=100)
+    await session.commit()
+
+    await tasks._detect_staleness(workspace.workspace_id)
+
+    item = (
+        await session.execute(
+            select(ReviewItem).where(
+                ReviewItem.workspace_id == workspace.workspace_id, ReviewItem.kind == ReviewKind.reindex
+            )
+        )
+    ).scalar_one()
+    assert item.detail["page_count"] == 1

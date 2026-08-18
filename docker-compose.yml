@@ -138,9 +138,9 @@ services:
       opensearch:
         condition: service_healthy
 
-  # No real task fills this queue yet (Maintenance Advisor is track 2c, steps 36+) — the
-  # worker is here because step 31 asks for one per queue in `QUEUES`, and an idle
-  # consumer on an empty queue is harmless.
+  # Maintenance Advisor detectors (track 2c, steps 36+) — the Staleness Detector's
+  # `detect_staleness` task (step 36) is the first one here; nothing schedules it
+  # automatically yet (step 41's Celery beat), so it's dispatched manually per workspace.
   worker-maintenance:
     image: karpwiki-worker:local
     command: celery -A karpwiki.tasks worker -Q maintenance --loglevel=info -n maintenance@%h

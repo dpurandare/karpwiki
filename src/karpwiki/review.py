@@ -39,6 +39,7 @@ async def create(
     workspace_id: str | None = None,
     severity: str | None = None,
     proposed_action: str | None = None,
+    detail: dict | None = None,
 ) -> ReviewItem:
     item = ReviewItem(
         workspace_id=workspace_id,
@@ -46,6 +47,7 @@ async def create(
         subject_ref=subject_ref,
         severity=severity,
         proposed_action=proposed_action,
+        detail=detail,
     )
     session.add(item)
     await session.flush()
