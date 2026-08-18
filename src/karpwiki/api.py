@@ -534,6 +534,15 @@ def _register_routes(app: FastAPI) -> None:
         reindex_page_ids: list[str] = []
         if item.kind is ReviewKind.reindex and payload.action == "reindex now":
             reindex_page_ids = [p["page_id"] for p in (item.detail or {}).get("pages", [])]
+        # Step 38: an advisor-raised duplicate's `merge` writes a new version on the
+        # primary page directly (advisor.resolve_existing_duplicate) — the page id is
+        # already in `detail`, no ingestion_log archaeology needed for this one.
+        elif (
+            item.kind is ReviewKind.duplicate
+            and (item.detail or {}).get("raised_by") == "advisor"
+            and payload.action == "merge"
+        ):
+            reindex_page_ids = [item.detail["primary_page_id"]]
 
         body = {
             "review_id": str(item.review_id),

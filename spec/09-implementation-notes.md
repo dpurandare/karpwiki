@@ -1725,5 +1725,68 @@ synchronous bookkeeping, unlike `reindex`'s.
 records where the timestamp gap was closed and confirms the "app flips a tag, storage policy acts
 on it" reading is what got built.
 
+## 41. Existing-Content Duplicate Detector — A Real Import Cycle, and Why This One Isn't Batched (Phase 2 Step 38)
+
+Track 2c's third detector (05 §5), and the first to genuinely diverge from steps 36-37's shape
+rather than repeat it.
+
+**Not batched — one review item per pair.** Steps 36-37 batch findings into one item per
+workspace because their resolution ("reindex now", "delete superseded source") applies
+uniformly across the whole batch. Here, `merge`/`supersede`/`keep_both`/`reject` are inherently
+pair-specific — one pair might get merged, an unrelated pair dismissed — so batching them into one
+item would force one resolution action onto findings that need independent ones. One item per
+pair instead matches how ingest-time `duplicate` items already work (03 §4: always singular, never
+batched) more closely than it matches steps 36-37's new pattern. A `max_items`
+(default 10) caps how many pairs one run raises, and duplicate-prevention is per-pair (an open
+advisor-raised item already covering this exact pair) rather than "any item open for this
+workspace," since the latter would block all pairs after the first one ever gets raised.
+
+**`resolve_duplicate` stays completely untouched — a new function, not a variant.** The tasklist
+says "reusing resolve_duplicate's ... actions unchanged," which reads most naturally as: same
+action *vocabulary*, same familiar admin-facing UX, not literally the same Python function.
+`ingestion.resolve_duplicate` is built entirely around a `RawSource` moving through
+`PipelineState` — neither exists for two already-published `WikiPage`s. `advisor.
+resolve_existing_duplicate` implements the same four action names with page-pair semantics:
+`merge` folds the duplicate's content into the primary (LLM call) and archives the duplicate;
+`supersede` just archives the duplicate; `reject`/`keep_both` are no-ops that differ only in
+their recorded audit label — there's no "new" item here to actually reject, so both leave every
+page untouched. `ingestion.resolve_review_item` routes here via `item.detail["raised_by"] ==
+"advisor"` — the exact tag the tasklist names — checked *before* the generic `RawSource` lookup,
+same as steps 36-37's `reindex`/`prune` branches, since `subject_ref` here is a page_id.
+
+**A real import cycle forced a small refactor.** `merge` needs an LLM call with step 33's
+retry-with-backoff, but that lived in `ingestion.py`, and `advisor.py` cannot import
+`ingestion.py` (`ingestion -> advisor` already exists for `resolve_review_item`'s dispatch, so
+the reverse would cycle: `ingestion -> advisor -> ingestion`). Moved `TransientCallFailed`/
+`retry_transient`/`failure_detail` (renamed public, dropping their leading underscores) from
+`ingestion.py` into `llm.py` — already dependency-free, already imported by both modules, a
+better home now that a second module needs identical behavior rather than a widened `ingestion.py`
+API surface. `ingestion.py`'s three call sites and `advisor.py`'s new `call_page_merge_model`
+(a second, independent Pydantic AI call — not reused from `ingestion.call_merge_model`, since that
+would need the same import `advisor.py` can't make) both call through `llm.py` now. Existing
+`ingestion.py` tests for the retry helper moved to a new `tests/test_llm.py` alongside it; one
+integration test (`classify_source` records the attempt count correctly) stayed in
+`test_ingestion.py`, updated to call through `llm.` instead.
+
+**Incident, not a design decision**: writing `tests/test_llm.py`, a `Write` call overwrote an
+existing file — `test_llm.py` already existed from Phase 1 (`llm.resolve_model` tests) — instead
+of appending, silently deleting its four original tests for one `pytest --collect-only` cycle.
+Caught immediately by watching the total test count drop (336 -> 332) after a change that should
+have been count-neutral, not by any tool warning. Fixed by restoring the original four tests
+alongside the three new ones. Recorded as a reminder: a file that already exists needs a Read (or
+at least a check) before `Write`, not just before *editing* — this project's own tooling requires
+a prior Read for `Write` on an existing file, and this slipped through, so treat that guarantee as
+a floor to double-check against, not a substitute for looking.
+
+**Live-verified** against real dev Postgres and the real worker containers, including a real LLM
+merge call (not committed): two pages seeded with identical bodies were correctly matched (score
+1.0, older page = primary) within 0.1s of dispatch, resolved as `merge` over the real HTTP gateway
+in 13.1s (real `gpt-5-nano`, wrote a real, sensible change summary), the primary page got a real
+new version, the duplicate was archived, and the primary reindexed within 2s via the real
+`worker-indexing` container.
+
+**Spec touch-point**: none — `05` §5 already describes this; this section records the batching
+divergence, the resolution-function split, and the `llm.py` refactor.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

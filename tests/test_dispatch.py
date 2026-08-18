@@ -315,6 +315,61 @@ async def test_resolving_delete_superseded_source_archives_it_no_dispatch(
     assert source.status is RawSourceStatus.archived
 
 
+async def test_resolving_advisor_duplicate_merge_dispatches_reindex_for_the_primary_page(
+    client, session, workspace, dispatched, monkeypatch
+):
+    """Step 38: merging an advisor-raised duplicate writes a new version on the primary
+    page (advisor.resolve_existing_duplicate) — dispatched from `item.detail` directly,
+    same as the ingest-time merge case dispatches from `ingestion_log`."""
+    from datetime import date
+
+    from karpwiki import advisor, search, versioning
+    from karpwiki.curate import MergedPage
+    from karpwiki.models import PageStatus, PageType, PageVersion
+
+    await _grant_admin(session, workspace)
+
+    body = (
+        "The payments worker drains its queue before restart. Operators run a rollout "
+        "restart and verify that consumer lag returns to zero within five minutes."
+    )
+    pages = []
+    for title in ("Restarting Payments", "Payments Restart Runbook"):
+        page = await versioning.create_page(
+            session,
+            workspace_id=workspace.workspace_id,
+            path=f"concepts/{title.lower().replace(' ', '-')}.md",
+            page_type=PageType.concept,
+            title=title,
+            description=f"About {title}.",
+            date=date(2026, 8, 17),
+            tags=["a", "b"],
+            body=body,
+            author="system:curator",
+            status=PageStatus.published,
+        )
+        version = await session.get(PageVersion, page.current_version_id)
+        await search.index_page(session, page=page, version=version)
+        pages.append(page)
+    older = pages[0]
+
+    [item] = await advisor.run_existing_content_duplicate_detector(
+        session, workspace_id=workspace.workspace_id
+    )
+    await session.commit()
+
+    async def _fake_merge(**_kwargs):
+        return MergedPage(body="Merged body.", change_summary="Merged a duplicate.")
+
+    monkeypatch.setattr(advisor, "call_page_merge_model", _fake_merge)
+
+    resp = await client.post(
+        f"/review-items/{item.review_id}/resolve", headers=ADMIN, json={"action": "merge"}
+    )
+    assert resp.status_code == 200
+    assert dispatched["reindex"] == [str(older.page_id)]
+
+
 async def test_curate_task_dispatches_reindex_for_pages_it_wrote(session, workspace, task_db, dispatched):
     """Extends tests/test_tasks.py's coverage: `_curate` itself dispatches reindex for
     whatever it left pending/stale in the source's workspace (step 32), not just the

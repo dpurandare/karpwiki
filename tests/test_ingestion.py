@@ -5,7 +5,7 @@ import uuid
 
 import pytest
 
-from karpwiki import classify, ingestion, objectstore, pipeline
+from karpwiki import classify, ingestion, llm, objectstore, pipeline
 from karpwiki.classify import ClassificationResult
 from karpwiki.models import ContentShape, PipelineState, RawSource
 
@@ -156,58 +156,23 @@ async def test_a_model_failure_lands_on_error(session, workspace):
 
 
 # --- retry/idempotency semantics (03 §1, phase2-tasklist.md step 33) ------------------
-
-
-async def test_retry_transient_succeeds_after_failures(monkeypatch):
-    monkeypatch.setattr(ingestion, "LLM_RETRY_BASE_DELAY_S", 0.0)
-    attempts = []
-
-    async def flaky():
-        attempts.append(1)
-        if len(attempts) < ingestion.LLM_RETRY_ATTEMPTS:
-            raise TimeoutError("upstream")
-        return "ok"
-
-    assert await ingestion._retry_transient(flaky) == "ok"
-    assert len(attempts) == ingestion.LLM_RETRY_ATTEMPTS
-
-
-async def test_retry_transient_raises_once_exhausted(monkeypatch):
-    monkeypatch.setattr(ingestion, "LLM_RETRY_BASE_DELAY_S", 0.0)
-
-    async def always_fails():
-        raise TimeoutError("upstream")
-
-    with pytest.raises(ingestion.TransientCallFailed) as exc_info:
-        await ingestion._retry_transient(always_fails)
-    assert exc_info.value.attempts == ingestion.LLM_RETRY_ATTEMPTS
-    assert isinstance(exc_info.value.__cause__, TimeoutError)
-
-
-def test_failure_detail_only_adds_attempts_for_transient_call_failed():
-    assert ingestion._failure_detail("classify", TimeoutError("boom")) == {
-        "step": "classify",
-        "error": "TimeoutError",
-    }
-    try:
-        raise ingestion.TransientCallFailed(3) from TimeoutError("boom")
-    except ingestion.TransientCallFailed as exc:
-        detail = ingestion._failure_detail("classify", exc)
-    assert detail == {"step": "classify", "error": "TimeoutError", "attempts": 3}
+# Pure unit tests for the retry helper itself now live in tests/test_llm.py — it moved to
+# llm.py at step 38 so advisor.py could reuse it without an import cycle. This one stays
+# here since it's specifically about classify_source's own integration with it.
 
 
 async def test_classify_source_records_retry_attempts_once_exhausted(session, workspace, monkeypatch):
-    """A fake `call` routed through the same `_retry_transient` the real `call_model` uses
-    (rather than mocking pydantic_ai's `Agent` directly) — proves the attempt count reaches
-    `ingestion_log`'s detail (03 §1), not just that `_retry_transient` itself works."""
-    monkeypatch.setattr(ingestion, "LLM_RETRY_BASE_DELAY_S", 0.0)
+    """A fake `call` routed through the same `llm.retry_transient` the real `call_model`
+    uses (rather than mocking pydantic_ai's `Agent` directly) — proves the attempt count
+    reaches `ingestion_log`'s detail (03 §1), not just that the helper itself works."""
+    monkeypatch.setattr(llm, "LLM_RETRY_BASE_DELAY_S", 0.0)
     source = await _submitted(session)
 
     async def _always_fails():
         raise TimeoutError("upstream")
 
     async def flaky_call(**_kwargs):
-        return await ingestion._retry_transient(_always_fails)
+        return await llm.retry_transient(_always_fails)
 
     state = await ingestion.classify_source(session, source=source, call=flaky_call)
     await session.commit()
@@ -217,7 +182,7 @@ async def test_classify_source_records_retry_attempts_once_exhausted(session, wo
     assert last.detail == {
         "step": "classify",
         "error": "TimeoutError",
-        "attempts": ingestion.LLM_RETRY_ATTEMPTS,
+        "attempts": llm.LLM_RETRY_ATTEMPTS,
     }
 
 

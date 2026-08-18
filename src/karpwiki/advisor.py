@@ -15,18 +15,22 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import review, search
+from . import curate, dedup, llm, review, search, versioning
+from .frontmatter import split_frontmatter
 from .models import (
     IndexState,
     IndexStatus,
+    PageStatus,
     PageVersion,
     RawSource,
     RawSourceStatus,
     ReviewItem,
     ReviewKind,
     ReviewStatus,
+    VersionTrigger,
     WikiPage,
 )
+
 
 class InvalidResolutionError(ValueError):
     """Mirrors `ingestion.InvalidResolutionError` — kept local rather than imported, since
@@ -300,3 +304,277 @@ async def resolve_prune(session: AsyncSession, *, item: ReviewItem, action: str,
             if source is not None and source.status is RawSourceStatus.superseded:
                 source.status = RawSourceStatus.archived
     return await review.resolve(session, item=item, action=action, actor=actor)
+
+
+# --- Existing-Content Duplicate Detector (05 §5) — step 38 -------------------------------
+#
+# Unlike the two detectors above, findings here are NOT batched one-item-per-workspace:
+# `merge`/`supersede`/`keep_both`/`reject` are inherently pair-specific decisions (one pair
+# might get merged, another dismissed), so one review item per similar pair matches how
+# ingest-time `duplicate` items already work — always singular, never batched (03 §4).
+
+
+@dataclass(frozen=True)
+class DuplicatePagePairFinding:
+    primary_page_id: uuid.UUID
+    primary_path: str
+    duplicate_page_id: uuid.UUID
+    duplicate_path: str
+    score: float
+
+
+# Reuses 03 §4/09 §17's already-calibrated near-duplicate threshold rather than inventing a
+# second one — same metric (`search.find_similar`'s lexeme containment), same meaning.
+DEFAULT_DUPLICATE_SIMILARITY_THRESHOLD = dedup.DEFAULT_NEAR_DUPLICATE_SCORE
+
+# Caps how many pairs one detector run raises — a large workspace's first-ever run could
+# otherwise surface dozens of pairs at once; bounded here rather than left unbounded since
+# nothing schedules incremental runs yet (step 41) to naturally spread this out over time.
+DEFAULT_MAX_DUPLICATE_ITEMS_PER_RUN = 10
+
+
+async def find_similar_page_pairs(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    threshold: float = DEFAULT_DUPLICATE_SIMILARITY_THRESHOLD,
+) -> list[DuplicatePagePairFinding]:
+    """05 §5: a "more like this" scan of each workspace's own published pages against the
+    Full-Text Index, for high-similarity pairs never caught at ingest time. Scans every
+    published page's own body against `search.find_similar` (excluding the page's own
+    match against itself), then keeps one finding per unordered pair — a pair would
+    otherwise turn up twice, once from each page's own scan.
+
+    "Primary" is the older page (created first — `versioning.create_page`'s original,
+    since a page's `page_id` carries no timestamp of its own) and "duplicate" the newer;
+    an arbitrary but defensible convention (the pair is symmetric — nothing about the
+    content says which "should" be canonical) an admin can always resolve differently."""
+    pages = (
+        await session.execute(
+            select(WikiPage.page_id, WikiPage.path, WikiPage.current_version_id)
+            .where(WikiPage.workspace_id == workspace_id, WikiPage.status == PageStatus.published)
+        )
+    ).all()
+    if len(pages) < 2:
+        return []
+
+    version_ids = [v for _, _, v in pages if v is not None]
+    versions = {
+        row.version_id: row
+        for row in (
+            await session.execute(select(PageVersion).where(PageVersion.version_id.in_(version_ids)))
+        ).scalars()
+    }
+
+    seen_pairs: set[frozenset[uuid.UUID]] = set()
+    findings: list[DuplicatePagePairFinding] = []
+    for page_id, path, version_id in pages:
+        version = versions.get(version_id)
+        if version is None:
+            continue
+        _, body = split_frontmatter(version.content)
+        hits = await search.find_similar(session, text_body=body, workspace_id=workspace_id)
+        for hit in hits:
+            if hit.page_id == page_id or hit.score < threshold:
+                continue
+            pair_key = frozenset({page_id, hit.page_id})
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            other_version_id = next((v for pid, _, v in pages if pid == hit.page_id), None)
+            other = versions.get(other_version_id)
+            # Older `created_at` is primary; ties (shouldn't happen — clock_timestamp() per
+            # version, 01 §5) keep this page as primary arbitrarily.
+            if other is not None and other.created_at < version.created_at:
+                findings.append(
+                    DuplicatePagePairFinding(
+                        primary_page_id=hit.page_id,
+                        primary_path=hit.path,
+                        duplicate_page_id=page_id,
+                        duplicate_path=path,
+                        score=hit.score,
+                    )
+                )
+            else:
+                findings.append(
+                    DuplicatePagePairFinding(
+                        primary_page_id=page_id,
+                        primary_path=path,
+                        duplicate_page_id=hit.page_id,
+                        duplicate_path=hit.path,
+                        score=hit.score,
+                    )
+                )
+    return findings
+
+
+async def _open_duplicate_item_for_pair(
+    session: AsyncSession, *, workspace_id: str, page_a_id: uuid.UUID, page_b_id: uuid.UUID
+) -> ReviewItem | None:
+    candidates = (
+        await session.execute(
+            select(ReviewItem).where(
+                ReviewItem.workspace_id == workspace_id,
+                ReviewItem.kind == ReviewKind.duplicate,
+                ReviewItem.status == ReviewStatus.open,
+            )
+        )
+    ).scalars().all()
+    pair_key = frozenset({str(page_a_id), str(page_b_id)})
+    for item in candidates:
+        detail = item.detail or {}
+        if detail.get("raised_by") != "advisor":
+            continue
+        if frozenset({detail.get("primary_page_id"), detail.get("duplicate_page_id")}) == pair_key:
+            return item
+    return None
+
+
+async def run_existing_content_duplicate_detector(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    threshold: float = DEFAULT_DUPLICATE_SIMILARITY_THRESHOLD,
+    max_items: int = DEFAULT_MAX_DUPLICATE_ITEMS_PER_RUN,
+) -> list[ReviewItem]:
+    """05 §5: one `duplicate` review item per similar pair, skipping any pair that already
+    has an open advisor-raised item (a naive re-run must not re-flag a pair an admin hasn't
+    resolved yet) and capping how many new items one run raises."""
+    findings = await find_similar_page_pairs(session, workspace_id=workspace_id, threshold=threshold)
+    items: list[ReviewItem] = []
+    for finding in findings:
+        if len(items) >= max_items:
+            break
+        if (
+            await _open_duplicate_item_for_pair(
+                session,
+                workspace_id=workspace_id,
+                page_a_id=finding.primary_page_id,
+                page_b_id=finding.duplicate_page_id,
+            )
+            is not None
+        ):
+            continue
+        severity = "high" if finding.score >= 0.85 else "medium"
+        item = await review.create(
+            session,
+            kind=ReviewKind.duplicate,
+            subject_ref=str(finding.primary_page_id),
+            workspace_id=workspace_id,
+            severity=severity,
+            proposed_action="merge",
+            detail={
+                "raised_by": "advisor",
+                "primary_page_id": str(finding.primary_page_id),
+                "primary_path": finding.primary_path,
+                "duplicate_page_id": str(finding.duplicate_page_id),
+                "duplicate_path": finding.duplicate_path,
+                "score": round(finding.score, 4),
+            },
+        )
+        items.append(item)
+    return items
+
+
+class PageMergeCall:
+    """The LLM call `resolve_existing_duplicate`'s `merge` action makes — isolated the same
+    way `ingestion.MergeCall` is, for tests to inject a fake and skip the network."""
+
+    async def __call__(
+        self, *, model: str, primary_body: str, duplicate_body: str, primary_path: str
+    ) -> curate.MergedPage: ...
+
+
+async def call_page_merge_model(
+    *, model: str, primary_body: str, duplicate_body: str, primary_path: str
+) -> curate.MergedPage:
+    """Real merge call via Pydantic AI — 05 §5's existing-content `merge` resolution.
+    Deliberately a separate function from `ingestion.call_merge_model` rather than a shared
+    import: `advisor.py` cannot import `ingestion.py` (`ingestion -> advisor` already exists
+    for `resolve_review_item`'s dispatch, so the reverse would cycle). Transient failures
+    retried with backoff (`llm.retry_transient`), same as every other real LLM call."""
+    from pydantic_ai import Agent
+
+    agent = Agent(
+        model,
+        output_type=curate.MergedPage,
+        system_prompt=(
+            "You maintain a page in an enterprise wiki. A periodic similarity scan found "
+            "another page in the same workspace covering the same subject, and an admin "
+            "has decided to fold it into this one rather than keep both. Rewrite this "
+            "page's full body to incorporate anything new, corrected, or updated from the "
+            "duplicate page, preserving what still holds from this page. Then write a "
+            "one-sentence change summary noting that this update came from a duplicate "
+            "merge."
+        ),
+    )
+    result = await llm.retry_transient(
+        lambda: agent.run(
+            f"This page's body:\n\n{primary_body}\n\n---\n\n"
+            f"Duplicate page ({primary_path}'s near-duplicate):\n\n{duplicate_body}"
+        )
+    )
+    return result.output
+
+
+async def resolve_existing_duplicate(
+    session: AsyncSession,
+    *,
+    item: ReviewItem,
+    action: str,
+    actor: str,
+    call: PageMergeCall | None = None,
+) -> None:
+    """Admin resolution of an advisor-raised `duplicate` review item (05 §5). Reuses the
+    same four action names `ingestion.resolve_duplicate` (ingest-time) uses, reinterpreted
+    for two already-published pages rather than a `RawSource` + an existing page — there is
+    no "new" item here to actually reject, so `reject`/`keep_both` both leave every page
+    untouched and differ only in their recorded audit label (the finding was wrong vs. the
+    finding was right but not worth acting on)."""
+    if item.kind is not ReviewKind.duplicate or (item.detail or {}).get("raised_by") != "advisor":
+        raise InvalidResolutionError(
+            f"review item {item.review_id} is not an advisor-raised duplicate item"
+        )
+    if action not in ("reject", "keep_both", "supersede", "merge"):
+        raise InvalidResolutionError(
+            f"{action!r} is not a supported duplicate resolution "
+            "(reject | keep_both | supersede | merge)"
+        )
+
+    detail = item.detail
+    primary_id = uuid.UUID(detail["primary_page_id"])
+    duplicate_id = uuid.UUID(detail["duplicate_page_id"])
+
+    if action == "supersede":
+        duplicate_page = await session.get(WikiPage, duplicate_id)
+        if duplicate_page is not None:
+            duplicate_page.status = PageStatus.archived
+    elif action == "merge":
+        primary_page = await session.get(WikiPage, primary_id)
+        duplicate_page = await session.get(WikiPage, duplicate_id)
+        if primary_page is None or duplicate_page is None:
+            raise InvalidResolutionError(
+                f"review item {item.review_id}'s pages no longer both exist"
+            )
+        primary_version = await session.get(PageVersion, primary_page.current_version_id)
+        duplicate_version = await session.get(PageVersion, duplicate_page.current_version_id)
+        _, primary_body = split_frontmatter(primary_version.content)
+        _, duplicate_body = split_frontmatter(duplicate_version.content)
+        merged = await (call or call_page_merge_model)(
+            model=llm.resolve_model("curator"),
+            primary_body=primary_body,
+            duplicate_body=duplicate_body,
+            primary_path=primary_page.path,
+        )
+        await versioning.write_version(
+            session,
+            page=primary_page,
+            body=merged.body,
+            author="system:curator",
+            trigger=VersionTrigger.ingest,
+            change_summary=merged.change_summary,
+        )
+        duplicate_page.status = PageStatus.archived
+    # reject/keep_both: no page changes — see docstring.
+
+    await review.resolve(session, item=item, action=action, actor=actor)

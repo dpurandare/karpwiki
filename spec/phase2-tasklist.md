@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-18): steps 22–37 done, tracks 2a and 2b complete, track 2c in progress.** Phase 1 (steps 1–21,
+**Status (2026-08-18): steps 22–38 done, tracks 2a and 2b complete, track 2c in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -229,7 +229,17 @@ is a real Authenticator implementation using that pick, not a library search.
 38. Existing-Content Duplicate Detector
     ([05](05-admin-backend-and-maintenance.md) §5) → `duplicate` review items, reusing
     `resolve_duplicate`'s existing reject/merge/supersede/keep_both actions unchanged, tagged
-    `raised_by=advisor`.
+    `raised_by=advisor`. **Done** — `advisor.find_similar_page_pairs`/
+    `run_existing_content_duplicate_detector` (one item per similar pair, not batched like
+    steps 36-37 — pair-specific resolutions don't compose with batching); new
+    `advisor.resolve_existing_duplicate` reuses the four action names with page-pair semantics,
+    routed via `item.detail["raised_by"] == "advisor"`, leaving `ingestion.resolve_duplicate`
+    completely untouched. Forced a small refactor: the retry-with-backoff helper moved from
+    `ingestion.py` to `llm.py` so `advisor.py` could reuse it for its own merge call without an
+    import cycle. Live-verified against real dev Postgres/workers, including a real `gpt-5-nano`
+    merge call: two near-identical pages matched (score 1.0), resolved as `merge`, primary page
+    got a real new version, duplicate archived, reindexed. See
+    [09](09-implementation-notes.md) §41.
 39. Orphan/Low-Traffic Detector → `prune` review items — needs `page_link` inbound-reference
     counts (step 28) and `query_log` (step 25), both now available.
 40. Contradiction Detector (Curator lint pass) → `reindex`/`prune` — net new LLM capability, no

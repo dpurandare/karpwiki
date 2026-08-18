@@ -72,6 +72,11 @@ def test_maintenance_queue_registers_the_superseded_source_detector():
     assert tasks.app.tasks["karpwiki.maintenance.detect_superseded_sources"] is not None
 
 
+def test_maintenance_queue_registers_the_existing_duplicate_detector():
+    """Step 38."""
+    assert tasks.app.tasks["karpwiki.maintenance.detect_existing_duplicates"] is not None
+
+
 def test_acks_late_is_set_so_a_crashed_worker_redelivers_the_task():
     """Step 33: a worker process dying mid-task (OOM, SIGKILL) must not silently lose the
     job — acks_late + reject_on_worker_lost means the broker redelivers it instead."""
@@ -246,3 +251,43 @@ async def test_detect_superseded_sources_task_raises_a_review_item(session, work
         )
     ).scalar_one()
     assert item.detail["source_count"] == 1
+
+
+async def test_detect_existing_duplicates_task_raises_a_review_item(session, workspace, task_db):
+    from datetime import date
+
+    from karpwiki import search, versioning
+    from karpwiki.models import PageStatus, PageType, PageVersion, ReviewItem, ReviewKind
+
+    body = (
+        "The payments worker drains its queue before restart. Operators run a rollout "
+        "restart and verify that consumer lag returns to zero within five minutes."
+    )
+    for title in ("Restarting Payments", "Payments Restart Runbook"):
+        page = await versioning.create_page(
+            session,
+            workspace_id=workspace.workspace_id,
+            path=f"concepts/{title.lower().replace(' ', '-')}.md",
+            page_type=PageType.concept,
+            title=title,
+            description=f"About {title}.",
+            date=date(2026, 8, 17),
+            tags=["a", "b"],
+            body=body,
+            author="system:curator",
+            status=PageStatus.published,
+        )
+        version = await session.get(PageVersion, page.current_version_id)
+        await search.index_page(session, page=page, version=version)
+    await session.commit()
+
+    await tasks._detect_existing_duplicates(workspace.workspace_id)
+
+    item = (
+        await session.execute(
+            select(ReviewItem).where(
+                ReviewItem.workspace_id == workspace.workspace_id, ReviewItem.kind == ReviewKind.duplicate
+            )
+        )
+    ).scalar_one()
+    assert item.detail["raised_by"] == "advisor"

@@ -1,4 +1,4 @@
-"""Maintenance Advisor detectors (05 §2-4) — phase2-tasklist.md steps 36-37."""
+"""Maintenance Advisor detectors (05 §2-5) — phase2-tasklist.md steps 36-38."""
 
 import hashlib
 import uuid
@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from karpwiki import advisor, objectstore, review, search, versioning
+from karpwiki.curate import MergedPage
 from karpwiki.models import (
     IndexState,
     IndexStatus,
@@ -21,6 +22,30 @@ from karpwiki.models import (
     ReviewKind,
     ReviewStatus,
 )
+
+DUPLICATE_BODY = (
+    "The payments worker drains its queue before restart. Operators run a rollout restart "
+    "and verify that consumer lag returns to zero within five minutes."
+)
+
+
+async def _indexed_page(session, workspace, *, title, body=DUPLICATE_BODY):
+    page = await versioning.create_page(
+        session,
+        workspace_id=workspace.workspace_id,
+        path=f"concepts/{title.lower().replace(' ', '-')}.md",
+        page_type=PageType.concept,
+        title=title,
+        description=f"About {title}.",
+        date=date(2026, 8, 14),
+        tags=["a", "b"],
+        body=body,
+        author="system:curator",
+        status=PageStatus.published,
+    )
+    version = await session.get(PageVersion, page.current_version_id)
+    await search.index_page(session, page=page, version=version)
+    return page
 
 
 async def _page(session, workspace, *, title="Runbook", body="Body text."):
@@ -385,3 +410,174 @@ async def test_resolve_prune_rejects_an_unbuilt_reason(session, workspace):
     )
     with pytest.raises(advisor.InvalidResolutionError):
         await advisor.resolve_prune(session, item=item, action="archive page", actor="user:admin")
+
+
+# --- Existing-Content Duplicate Detector (05 §5) — step 38 -------------------------------
+
+
+async def test_find_similar_page_pairs_finds_identical_pages(session, workspace):
+    older = await _indexed_page(session, workspace, title="Restarting Payments")
+    newer = await _indexed_page(session, workspace, title="Payments Restart Runbook")
+
+    findings = await advisor.find_similar_page_pairs(session, workspace_id=workspace.workspace_id)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.score == 1.0
+    # Older page (created first) is primary.
+    assert finding.primary_page_id == older.page_id
+    assert finding.duplicate_page_id == newer.page_id
+
+
+async def test_find_similar_page_pairs_ignores_unrelated_pages(session, workspace):
+    await _indexed_page(session, workspace, title="Restarting Payments")
+    await _indexed_page(session, workspace, title="Holiday Policy", body="Staff accrue leave.")
+
+    findings = await advisor.find_similar_page_pairs(session, workspace_id=workspace.workspace_id)
+    assert findings == []
+
+
+async def test_find_similar_page_pairs_ignores_archived_pages(session, workspace):
+    older = await _indexed_page(session, workspace, title="Restarting Payments")
+    newer = await _indexed_page(session, workspace, title="Payments Restart Runbook")
+    newer.status = PageStatus.archived
+    await session.flush()
+
+    findings = await advisor.find_similar_page_pairs(session, workspace_id=workspace.workspace_id)
+    assert findings == []
+
+
+async def test_run_existing_content_duplicate_detector_creates_one_item(session, workspace):
+    older = await _indexed_page(session, workspace, title="Restarting Payments")
+    newer = await _indexed_page(session, workspace, title="Payments Restart Runbook")
+
+    items = await advisor.run_existing_content_duplicate_detector(
+        session, workspace_id=workspace.workspace_id
+    )
+    await session.commit()
+
+    assert len(items) == 1
+    item = items[0]
+    assert item.kind is ReviewKind.duplicate
+    assert item.subject_ref == str(older.page_id)
+    assert item.detail["raised_by"] == "advisor"
+    assert item.detail["primary_page_id"] == str(older.page_id)
+    assert item.detail["duplicate_page_id"] == str(newer.page_id)
+    assert item.detail["score"] == 1.0
+
+
+async def test_run_existing_content_duplicate_detector_skips_an_open_pair(session, workspace):
+    await _indexed_page(session, workspace, title="Restarting Payments")
+    await _indexed_page(session, workspace, title="Payments Restart Runbook")
+
+    first = await advisor.run_existing_content_duplicate_detector(
+        session, workspace_id=workspace.workspace_id
+    )
+    await session.commit()
+    assert len(first) == 1
+
+    second = await advisor.run_existing_content_duplicate_detector(
+        session, workspace_id=workspace.workspace_id
+    )
+    assert second == []
+
+
+async def test_resolve_existing_duplicate_keep_both_leaves_pages_untouched(session, workspace):
+    older = await _indexed_page(session, workspace, title="Restarting Payments")
+    newer = await _indexed_page(session, workspace, title="Payments Restart Runbook")
+    [item] = await advisor.run_existing_content_duplicate_detector(
+        session, workspace_id=workspace.workspace_id
+    )
+    await session.commit()
+
+    await advisor.resolve_existing_duplicate(session, item=item, action="keep_both", actor="user:admin")
+
+    for page in (older, newer):
+        p = await session.get(type(page), page.page_id)
+        assert p.status is PageStatus.published
+
+
+async def test_resolve_existing_duplicate_reject_leaves_pages_untouched(session, workspace):
+    await _indexed_page(session, workspace, title="Restarting Payments")
+    await _indexed_page(session, workspace, title="Payments Restart Runbook")
+    [item] = await advisor.run_existing_content_duplicate_detector(
+        session, workspace_id=workspace.workspace_id
+    )
+    await session.commit()
+
+    resolved = await advisor.resolve_existing_duplicate(
+        session, item=item, action="reject", actor="user:admin"
+    )
+    assert resolved is None
+    assert item.status is ReviewStatus.resolved
+    assert item.resolved_action == "reject"
+
+
+async def test_resolve_existing_duplicate_supersede_archives_the_duplicate(session, workspace):
+    older = await _indexed_page(session, workspace, title="Restarting Payments")
+    newer = await _indexed_page(session, workspace, title="Payments Restart Runbook")
+    [item] = await advisor.run_existing_content_duplicate_detector(
+        session, workspace_id=workspace.workspace_id
+    )
+    await session.commit()
+
+    await advisor.resolve_existing_duplicate(session, item=item, action="supersede", actor="user:admin")
+
+    primary = await session.get(type(older), older.page_id)
+    duplicate = await session.get(type(newer), newer.page_id)
+    assert primary.status is PageStatus.published
+    assert duplicate.status is PageStatus.archived
+
+
+async def test_resolve_existing_duplicate_merge_writes_a_version_and_archives_the_duplicate(
+    session, workspace
+):
+    older = await _indexed_page(session, workspace, title="Restarting Payments")
+    newer = await _indexed_page(session, workspace, title="Payments Restart Runbook")
+    [item] = await advisor.run_existing_content_duplicate_detector(
+        session, workspace_id=workspace.workspace_id
+    )
+    await session.commit()
+    original_version_id = older.current_version_id
+
+    async def _fake_merge(**_kwargs):
+        return MergedPage(body="Merged body from both pages.", change_summary="Merged a duplicate.")
+
+    await advisor.resolve_existing_duplicate(
+        session, item=item, action="merge", actor="user:admin", call=_fake_merge
+    )
+    await session.commit()
+
+    primary = await session.get(type(older), older.page_id)
+    await session.refresh(primary)
+    duplicate = await session.get(type(newer), newer.page_id)
+    await session.refresh(duplicate)
+
+    assert primary.current_version_id != original_version_id
+    new_version = await session.get(PageVersion, primary.current_version_id)
+    assert "Merged body from both pages." in new_version.content
+    assert duplicate.status is PageStatus.archived
+
+
+async def test_resolve_existing_duplicate_rejects_ingest_time_items(session, workspace):
+    """An ingest-time `duplicate` item (no `raised_by=advisor` tag) must not route here —
+    `ingestion.resolve_duplicate` owns those, untouched."""
+    item = await review.create(session, kind=ReviewKind.duplicate, subject_ref=str(uuid.uuid4()))
+    with pytest.raises(advisor.InvalidResolutionError):
+        await advisor.resolve_existing_duplicate(
+            session, item=item, action="keep_both", actor="user:admin"
+        )
+
+
+async def test_resolve_existing_duplicate_rejects_an_unsupported_action(session, workspace):
+    await _indexed_page(session, workspace, title="Restarting Payments")
+    await _indexed_page(session, workspace, title="Payments Restart Runbook")
+    [item] = await advisor.run_existing_content_duplicate_detector(
+        session, workspace_id=workspace.workspace_id
+    )
+    await session.commit()
+
+    with pytest.raises(advisor.InvalidResolutionError):
+        await advisor.resolve_existing_duplicate(
+            session, item=item, action="bogus", actor="user:admin"
+        )
