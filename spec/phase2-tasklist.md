@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-18): steps 22–36 done, tracks 2a and 2b complete, track 2c started.** Phase 1 (steps 1–21,
+**Status (2026-08-18): steps 22–37 done, tracks 2a and 2b complete, track 2c in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -215,7 +215,17 @@ is a real Authenticator implementation using that pick, not a library search.
     both signals detected correctly, resolved over the real gateway, both pages reindexed. See
     [09](09-implementation-notes.md) §39.
 37. Superseded-Source Detector → `prune` review items, 180-day retention (already decided,
-    [09](09-implementation-notes.md) §8) — [05](05-admin-backend-and-maintenance.md) §4.
+    [09](09-implementation-notes.md) §8) — [05](05-admin-backend-and-maintenance.md) §4. **Done** —
+    `RawSource` gained a `superseded_at` column (migration `da3c87c7d151`, set only in
+    `ingestion._resolve_supersede` — the sole place `status` flips to `superseded`), since nothing
+    otherwise recorded when the retention clock starts. `advisor.find_superseded_sources_past_retention`/
+    `run_superseded_source_detector` follow step 36's batching shape exactly; `resolve_prune`
+    (new, extensible to steps 39-40's other `prune` reasons) implements `delete superseded source`
+    as a status flip to `archived` only — 05 §4 delegates physical erasure to an external
+    object-store lifecycle policy, not application code. Live-verified against real dev Postgres
+    and the real worker containers: a 200-day-old superseded source was flagged, a 30-day-old one
+    correctly excluded, resolved over the real gateway, archived. See
+    [09](09-implementation-notes.md) §40.
 38. Existing-Content Duplicate Detector
     ([05](05-admin-backend-and-maintenance.md) §5) → `duplicate` review items, reusing
     `resolve_duplicate`'s existing reject/merge/supersede/keep_both actions unchanged, tagged

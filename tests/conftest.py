@@ -38,12 +38,23 @@ def dispatched(monkeypatch):
     for tests that don't care about dispatch). Autouse so every test gets this by default;
     a test that DOES care about dispatch takes `dispatched` as a fixture and reads the
     recorded calls straight off it."""
-    calls = {"classify_source": [], "curate_source": [], "reindex": [], "detect_staleness": []}
+    calls = {
+        "classify_source": [],
+        "curate_source": [],
+        "reindex": [],
+        "detect_staleness": [],
+        "detect_superseded_sources": [],
+    }
     monkeypatch.setattr(tasks.classify_source, "delay", lambda arg: calls["classify_source"].append(arg))
     monkeypatch.setattr(tasks.curate_source, "delay", lambda arg: calls["curate_source"].append(arg))
     monkeypatch.setattr(tasks.reindex, "delay", lambda arg: calls["reindex"].append(arg))
     monkeypatch.setattr(
         tasks.detect_staleness, "delay", lambda arg: calls["detect_staleness"].append(arg)
+    )
+    monkeypatch.setattr(
+        tasks.detect_superseded_sources,
+        "delay",
+        lambda arg: calls["detect_superseded_sources"].append(arg),
     )
     return calls
 

@@ -138,9 +138,9 @@ services:
       opensearch:
         condition: service_healthy
 
-  # Maintenance Advisor detectors (track 2c, steps 36+) — the Staleness Detector's
-  # `detect_staleness` task (step 36) is the first one here; nothing schedules it
-  # automatically yet (step 41's Celery beat), so it's dispatched manually per workspace.
+  # Maintenance Advisor detectors (track 2c, steps 36+): `detect_staleness` (step 36),
+  # `detect_superseded_sources` (step 37). Nothing schedules either automatically yet
+  # (step 41's Celery beat), so both are dispatched manually per workspace.
   worker-maintenance:
     image: karpwiki-worker:local
     command: celery -A karpwiki.tasks worker -Q maintenance --loglevel=info -n maintenance@%h

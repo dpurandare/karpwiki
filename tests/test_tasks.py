@@ -67,6 +67,11 @@ def test_maintenance_queue_registers_the_staleness_detector():
     assert routes["karpwiki.maintenance.*"]["queue"] == "maintenance"
 
 
+def test_maintenance_queue_registers_the_superseded_source_detector():
+    """Step 37."""
+    assert tasks.app.tasks["karpwiki.maintenance.detect_superseded_sources"] is not None
+
+
 def test_acks_late_is_set_so_a_crashed_worker_redelivers_the_task():
     """Step 33: a worker process dying mid-task (OOM, SIGKILL) must not silently lose the
     job — acks_late + reject_on_worker_lost means the broker redelivers it instead."""
@@ -204,3 +209,40 @@ async def test_detect_staleness_task_raises_a_review_item(session, workspace, ta
         )
     ).scalar_one()
     assert item.detail["page_count"] == 1
+
+
+async def test_detect_superseded_sources_task_raises_a_review_item(session, workspace, task_db):
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    from karpwiki import objectstore
+    from karpwiki.models import RawSource, RawSourceStatus, ReviewItem, ReviewKind
+
+    source_id = uuid.uuid4()
+    key = f"/{workspace.workspace_id}/sources/{source_id}/old.md"
+    payload = b"old content"
+    objectstore.write_bytes(key, payload)
+    session.add(
+        RawSource(
+            source_id=source_id,
+            workspace_id=workspace.workspace_id,
+            object_key=key,
+            filename="old.md",
+            content_hash=hashlib.sha256(payload).hexdigest(),
+            submitted_by="user:deepak",
+            status=RawSourceStatus.superseded,
+            superseded_at=datetime.now(UTC) - timedelta(days=200),
+        )
+    )
+    await session.commit()
+
+    await tasks._detect_superseded_sources(workspace.workspace_id)
+
+    item = (
+        await session.execute(
+            select(ReviewItem).where(
+                ReviewItem.workspace_id == workspace.workspace_id, ReviewItem.kind == ReviewKind.prune
+            )
+        )
+    ).scalar_one()
+    assert item.detail["source_count"] == 1

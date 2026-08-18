@@ -1,4 +1,4 @@
-"""Maintenance Advisor — Staleness Detector (05 §2-3) — phase2-tasklist.md step 36."""
+"""Maintenance Advisor detectors (05 §2-4) — phase2-tasklist.md steps 36-37."""
 
 import hashlib
 import uuid
@@ -47,7 +47,7 @@ async def _make_stale(session, page, *, days_ago: int):
     await session.flush()
 
 
-async def _superseded_source(session, workspace, *, filename="notes.md"):
+async def _superseded_source(session, workspace, *, filename="notes.md", superseded_days_ago=None):
     source_id = uuid.uuid4()
     key = f"/{workspace.workspace_id}/sources/{source_id}/{filename}"
     payload = b"content"
@@ -60,6 +60,11 @@ async def _superseded_source(session, workspace, *, filename="notes.md"):
         content_hash=hashlib.sha256(payload).hexdigest(),
         submitted_by="user:deepak",
         status=RawSourceStatus.superseded,
+        superseded_at=(
+            datetime.now(UTC) - timedelta(days=superseded_days_ago)
+            if superseded_days_ago is not None
+            else None
+        ),
     )
     session.add(source)
     await session.flush()
@@ -243,3 +248,140 @@ async def test_resolve_reindex_rejects_the_wrong_kind(session, workspace):
     item = await review.create(session, kind=ReviewKind.duplicate, subject_ref="x")
     with pytest.raises(advisor.InvalidResolutionError):
         await advisor.resolve_reindex(session, item=item, action="dismiss", actor="user:admin")
+
+
+# --- Superseded-Source Detector (05 §4) — step 37 ----------------------------------------
+
+
+async def test_find_superseded_sources_only_past_retention(session, workspace):
+    old = await _superseded_source(session, workspace, filename="old.md", superseded_days_ago=200)
+    recent = await _superseded_source(session, workspace, filename="recent.md", superseded_days_ago=30)
+
+    findings = await advisor.find_superseded_sources_past_retention(
+        session, workspace_id=workspace.workspace_id, retention_days=180
+    )
+
+    assert [f.source_id for f in findings] == [old.source_id]
+    assert findings[0].filename == "old.md"
+
+
+async def test_find_superseded_sources_skips_active_sources(session, workspace):
+    source_id = uuid.uuid4()
+    key = f"/{workspace.workspace_id}/sources/{source_id}/f.md"
+    objectstore.write_bytes(key, b"x")
+    active = RawSource(
+        source_id=source_id,
+        workspace_id=workspace.workspace_id,
+        object_key=key,
+        filename="f.md",
+        content_hash="deadbeef",
+        submitted_by="user:deepak",
+        status=RawSourceStatus.active,
+    )
+    session.add(active)
+    await session.flush()
+
+    findings = await advisor.find_superseded_sources_past_retention(
+        session, workspace_id=workspace.workspace_id, retention_days=0
+    )
+    assert findings == []
+
+
+async def test_find_superseded_sources_skips_no_timestamp(session, workspace):
+    """A source superseded before `superseded_at` existed (or by any path that predates
+    this column) has nothing to check against — skipped, not assumed either way."""
+    await _superseded_source(session, workspace, superseded_days_ago=None)
+    findings = await advisor.find_superseded_sources_past_retention(
+        session, workspace_id=workspace.workspace_id, retention_days=0
+    )
+    assert findings == []
+
+
+async def test_run_superseded_source_detector_creates_prune_item(session, workspace):
+    old = await _superseded_source(session, workspace, filename="old.md", superseded_days_ago=200)
+
+    item = await advisor.run_superseded_source_detector(
+        session, workspace_id=workspace.workspace_id, retention_days=180
+    )
+    await session.commit()
+
+    assert item is not None
+    assert item.kind is ReviewKind.prune
+    assert item.workspace_id == workspace.workspace_id
+    assert item.proposed_action == "delete superseded source"
+    assert item.detail["raised_by"] == "advisor"
+    assert item.detail["reason"] == "superseded_source_retention"
+    assert item.detail["source_count"] == 1
+    assert item.detail["sources"][0]["source_id"] == str(old.source_id)
+
+
+async def test_run_superseded_source_detector_no_findings_returns_none(session, workspace):
+    await _superseded_source(session, workspace, superseded_days_ago=30)
+    item = await advisor.run_superseded_source_detector(session, workspace_id=workspace.workspace_id)
+    assert item is None
+
+
+async def test_run_superseded_source_detector_skips_if_already_open(session, workspace):
+    await _superseded_source(session, workspace, filename="a.md", superseded_days_ago=200)
+    first = await advisor.run_superseded_source_detector(
+        session, workspace_id=workspace.workspace_id, retention_days=180
+    )
+    await session.commit()
+    assert first is not None
+
+    await _superseded_source(session, workspace, filename="b.md", superseded_days_ago=200)
+    second = await advisor.run_superseded_source_detector(
+        session, workspace_id=workspace.workspace_id, retention_days=180
+    )
+    assert second is None
+
+
+async def test_resolve_prune_delete_superseded_source_archives_it(session, workspace):
+    old = await _superseded_source(session, workspace, filename="old.md", superseded_days_ago=200)
+    item = await advisor.run_superseded_source_detector(
+        session, workspace_id=workspace.workspace_id, retention_days=180
+    )
+    await session.commit()
+
+    resolved = await advisor.resolve_prune(
+        session, item=item, action="delete superseded source", actor="user:admin"
+    )
+    await session.commit()
+
+    assert resolved.status is ReviewStatus.resolved
+    source = await session.get(RawSource, old.source_id)
+    await session.refresh(source)
+    assert source.status is RawSourceStatus.archived
+
+
+async def test_resolve_prune_dismiss_leaves_source_untouched(session, workspace):
+    old = await _superseded_source(session, workspace, filename="old.md", superseded_days_ago=200)
+    item = await advisor.run_superseded_source_detector(
+        session, workspace_id=workspace.workspace_id, retention_days=180
+    )
+    await session.commit()
+
+    await advisor.resolve_prune(session, item=item, action="dismiss", actor="user:admin")
+
+    source = await session.get(RawSource, old.source_id)
+    await session.refresh(source)
+    assert source.status is RawSourceStatus.superseded
+
+
+async def test_resolve_prune_rejects_the_wrong_kind(session, workspace):
+    item = await review.create(session, kind=ReviewKind.duplicate, subject_ref="x")
+    with pytest.raises(advisor.InvalidResolutionError):
+        await advisor.resolve_prune(session, item=item, action="dismiss", actor="user:admin")
+
+
+async def test_resolve_prune_rejects_an_unbuilt_reason(session, workspace):
+    """`orphaned`/`low_traffic` (step 39) and `contradicted_by` (step 40) don't exist yet."""
+    item = await review.create(
+        session,
+        kind=ReviewKind.prune,
+        subject_ref=workspace.workspace_id,
+        workspace_id=workspace.workspace_id,
+        detail={"reason": "orphaned"},
+    )
+    with pytest.raises(advisor.InvalidResolutionError):
+        await advisor.resolve_prune(session, item=item, action="archive page", actor="user:admin")

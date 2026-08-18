@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Protocol
 
 from sqlalchemy import func, select
@@ -532,6 +532,7 @@ async def _resolve_supersede(
         old_source = await session.get(RawSource, uuid.UUID(old_id))
         if old_source is not None and old_source.status is RawSourceStatus.active:
             old_source.status = RawSourceStatus.superseded
+            old_source.superseded_at = datetime.now(UTC)
 
     await pipeline.transition(
         session,
@@ -642,12 +643,13 @@ async def resolve_review_item(
         await resolve_submission(session, item=item, actor=actor)
         return None
 
-    if item.kind is ReviewKind.reindex:
-        # `subject_ref` is a workspace_id here, not a source_id (phase2-tasklist.md step
-        # 36) — resolved entirely in `advisor.py`, before the RawSource lookup below, which
-        # doesn't apply to this kind.
+    if item.kind in (ReviewKind.reindex, ReviewKind.prune):
+        # `subject_ref` is a workspace_id here, not a source_id (phase2-tasklist.md steps
+        # 36-37) — resolved entirely in `advisor.py`, before the RawSource lookup below,
+        # which doesn't apply to either kind.
+        resolver = advisor.resolve_reindex if item.kind is ReviewKind.reindex else advisor.resolve_prune
         try:
-            await advisor.resolve_reindex(session, item=item, action=action, actor=actor)
+            await resolver(session, item=item, action=action, actor=actor)
         except advisor.InvalidResolutionError as exc:
             raise InvalidResolutionError(str(exc)) from exc
         return None

@@ -149,6 +149,12 @@ async def _detect_staleness(workspace_id: str) -> None:
         await advisor.run_staleness_detector(session, workspace_id=workspace_id)
 
 
+async def _detect_superseded_sources(workspace_id: str) -> None:
+    """Phase 2 step 37 — same manual-dispatch position as `_detect_staleness` above."""
+    async with session_scope() as session:
+        await advisor.run_superseded_source_detector(session, workspace_id=workspace_id)
+
+
 async def _run_and_release(coro) -> None:
     """`db.engine`'s connection pool is a process-level singleton, but each `@app.task`
     below gets its own `asyncio.run()` — a fresh event loop per call — and an asyncpg
@@ -182,3 +188,8 @@ def reindex(page_id: str) -> None:
 @app.task(name="karpwiki.maintenance.detect_staleness")
 def detect_staleness(workspace_id: str) -> None:
     asyncio.run(_run_and_release(_detect_staleness(workspace_id)))
+
+
+@app.task(name="karpwiki.maintenance.detect_superseded_sources")
+def detect_superseded_sources(workspace_id: str) -> None:
+    asyncio.run(_run_and_release(_detect_superseded_sources(workspace_id)))

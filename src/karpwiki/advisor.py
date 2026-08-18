@@ -33,6 +33,10 @@ class InvalidResolutionError(ValueError):
     `ingestion.py` is what calls into this module for `resolve_review_item`'s dispatch."""
 
 
+# 09 §8's decided default — confirms 09 §6's illustrative `retention.superseded_source_days`.
+DEFAULT_SUPERSEDED_SOURCE_RETENTION_DAYS = 180
+
+
 # 09 §6's SCHEMA.md template gives popularity-tiered values (`high_traffic_days: 90`,
 # `low_traffic_days: 365`), but 05 §2 assigns that tiering to the *scheduler* ("a tuning
 # detail of the scheduler, not a hard architectural requirement") — phase2-tasklist.md step
@@ -176,4 +180,123 @@ async def resolve_reindex(
         raise InvalidResolutionError(
             f"{action!r} is not a supported reindex resolution (reindex now | dismiss)"
         )
+    return await review.resolve(session, item=item, action=action, actor=actor)
+
+
+@dataclass(frozen=True)
+class SupersededSourceFinding:
+    source_id: uuid.UUID
+    filename: str
+    superseded_at: datetime
+
+
+async def find_superseded_sources_past_retention(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    retention_days: int = DEFAULT_SUPERSEDED_SOURCE_RETENTION_DAYS,
+) -> list[SupersededSourceFinding]:
+    """05 §4: `raw_source.status = superseded` and past the retention window. Sources
+    superseded before `superseded_at` existed (phase2-tasklist.md step 37) have no
+    timestamp to check against and are skipped rather than assumed either way — they'll
+    be caught once something re-supersedes them or, more likely, never existed in a real
+    deployment since this column landed with the detector that reads it."""
+    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+    rows = (
+        await session.execute(
+            select(RawSource.source_id, RawSource.filename, RawSource.superseded_at).where(
+                RawSource.workspace_id == workspace_id,
+                RawSource.status == RawSourceStatus.superseded,
+                RawSource.superseded_at.is_not(None),
+                RawSource.superseded_at < cutoff,
+            )
+        )
+    ).all()
+    return [
+        SupersededSourceFinding(source_id=sid, filename=filename, superseded_at=at)
+        for sid, filename, at in rows
+    ]
+
+
+async def _open_prune_item(session: AsyncSession, *, workspace_id: str) -> ReviewItem | None:
+    return (
+        await session.execute(
+            select(ReviewItem).where(
+                ReviewItem.workspace_id == workspace_id,
+                ReviewItem.kind == ReviewKind.prune,
+                ReviewItem.status == ReviewStatus.open,
+            )
+        )
+    ).scalars().first()
+
+
+async def run_superseded_source_detector(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    retention_days: int = DEFAULT_SUPERSEDED_SOURCE_RETENTION_DAYS,
+) -> ReviewItem | None:
+    """05 §4: one batched `prune` review item per workspace per run, same shape as
+    `run_staleness_detector` — skips if an equivalent item is already open."""
+    if await _open_prune_item(session, workspace_id=workspace_id) is not None:
+        return None
+
+    findings = await find_superseded_sources_past_retention(
+        session, workspace_id=workspace_id, retention_days=retention_days
+    )
+    if not findings:
+        return None
+
+    severity = "high" if len(findings) >= 20 else "medium" if len(findings) >= 5 else "low"
+    return await review.create(
+        session,
+        kind=ReviewKind.prune,
+        subject_ref=workspace_id,
+        workspace_id=workspace_id,
+        severity=severity,
+        proposed_action="delete superseded source",
+        detail={
+            "raised_by": "advisor",
+            "reason": "superseded_source_retention",
+            "source_count": len(findings),
+            "sources": [
+                {
+                    "source_id": str(f.source_id),
+                    "filename": f.filename,
+                    "superseded_at": f.superseded_at.isoformat(),
+                }
+                for f in findings
+            ],
+        },
+    )
+
+
+async def resolve_prune(session: AsyncSession, *, item: ReviewItem, action: str, actor: str) -> ReviewItem:
+    """Admin resolution of a `prune` review item (05 §4). Only `superseded_source_retention`
+    is built (step 37) — `orphaned`/`low_traffic` (step 39) and `contradicted_by` (step 40)
+    extend this once their detectors exist, the same way `resolve_duplicate` grew one
+    action at a time rather than all four arriving at once.
+
+    "delete superseded source" only ever flips `RawSource.status` to `archived` — 05 §4's
+    "follows the object-store lifecycle tiering" already assigns physical erasure to an
+    external object-store lifecycle policy reacting to that status tag (02 §2), not to
+    application code (`objectstore.delete` is explicitly staging-only, never for a
+    final-key object)."""
+    if item.kind is not ReviewKind.prune:
+        raise InvalidResolutionError(f"review item {item.review_id} is not a prune item")
+    reason = (item.detail or {}).get("reason")
+    if reason != "superseded_source_retention":
+        raise InvalidResolutionError(
+            f"prune resolution for reason {reason!r} is not implemented"
+        )
+    if action not in ("delete superseded source", "dismiss"):
+        raise InvalidResolutionError(
+            f"{action!r} is not a supported prune resolution for a superseded source "
+            "(delete superseded source | dismiss)"
+        )
+    if action == "delete superseded source":
+        for entry in (item.detail or {}).get("sources", []):
+            source = await session.get(RawSource, uuid.UUID(entry["source_id"]))
+            if source is not None and source.status is RawSourceStatus.superseded:
+                source.status = RawSourceStatus.archived
     return await review.resolve(session, item=item, action=action, actor=actor)

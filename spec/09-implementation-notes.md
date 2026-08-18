@@ -1681,5 +1681,49 @@ no LLM), so no bugs and no cost either.
 **Spec touch-point**: `05` §1's review-item kind table already lists `reindex`; no wording changes
 needed — this section records the `detail` column decision and Signal 2's honest scope limit.
 
+## 40. Superseded-Source Detector — Another Missing Timestamp, and What "Delete" Actually Means (Phase 2 Step 37)
+
+Track 2c's second detector (05 §4, retention window already decided at 09 §8: 180 days).
+
+**Same missing-timestamp shape as step 36's staleness signal, same fix.** `RawSource` has no
+`updated_at` or equivalent, and `ingestion._resolve_supersede` — the only place `status` ever
+flips to `superseded` — never recorded when. Rather than proxy through something indirect (the
+successor source's `ingested_at`, which turned out to never actually be set by anything either —
+a separate pre-existing gap, left alone rather than fixed in passing here since nothing in this
+step needs it fixed), added `RawSource.superseded_at` (migration `da3c87c7d151`, nullable, set at
+the exact moment `_resolve_supersede` does its work) — direct and unambiguous rather than another
+proxy. Sources superseded before this column existed have nothing to check against and are
+skipped by `find_superseded_sources_past_retention`, not assumed either way.
+
+**"Delete superseded source" only ever flips a status column.** 05 §4: "Hard deletion... follows
+the object-store lifecycle tiering described in 02 §2 (cold storage before erasure)... unless a
+compliance-driven erasure workflow applies." 02 §2 assigns that tiering to *object-store lifecycle
+rules* reacting to the `RawSourceStatus` tag (`active`/`superseded`/`archived`/`rejected`) —
+external policy, not application code — and `objectstore.delete()` already documents itself as
+staging-only, never for a final-key object. So `advisor.resolve_prune`'s `"delete superseded
+source"` action does exactly one thing: flips `RawSource.status` from `superseded` to `archived`
+(an already-existing enum value, needing no change). Whatever cold-storage/erasure policy a real
+deployment configures on its object store is what actually acts on that tag change — this
+codebase was never meant to implement that policy itself.
+
+**`resolve_prune` built to extend, not to be reopened per detector.** No prune-raising detector
+exists yet beyond this one, but 05 §4 names four reasons (`orphaned`, `low_traffic`,
+`superseded_source_retention`, `contradicted_by`) sharing one `ReviewKind.prune`. Branching on
+`item.detail["reason"]` — only `superseded_source_retention` implemented, everything else a clean
+`InvalidResolutionError` — means steps 39-40 add a branch each rather than a second resolver
+function or a kind split; the same one-action-at-a-time growth `resolve_duplicate` already went
+through for `reject`/`keep_both`/`supersede`/`merge`.
+
+**Live-verified** against real dev Postgres and the real worker containers (not committed): a
+source superseded 200 days ago (past the 180-day default) was flagged, one superseded only 30 days
+ago was correctly excluded, the item's `detail.sources` evidence was correct, resolved as "delete
+superseded source" over the real HTTP gateway, and the source's status flipped to `archived` while
+the recent one stayed untouched. No LLM calls, no dispatch of any kind — this resolution is pure
+synchronous bookkeeping, unlike `reindex`'s.
+
+**Spec touch-point**: none — `05` §4 and `02` §2 already describe this lifecycle; this section
+records where the timestamp gap was closed and confirms the "app flips a tag, storage policy acts
+on it" reading is what got built.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

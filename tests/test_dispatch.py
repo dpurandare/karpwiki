@@ -266,6 +266,55 @@ async def test_resolving_reindex_dismiss_dispatches_nothing(client, session, wor
     assert dispatched["reindex"] == []
 
 
+async def test_resolving_delete_superseded_source_archives_it_no_dispatch(
+    client, session, workspace, dispatched
+):
+    """Step 37: "delete superseded source" is a synchronous status flip (05 §4 delegates
+    physical erasure to an external object-store lifecycle policy) — no task dispatch."""
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    from karpwiki import advisor, objectstore
+    from karpwiki.models import RawSource, RawSourceStatus
+
+    await _grant_admin(session, workspace)
+    source_id = uuid.uuid4()
+    key = f"/{workspace.workspace_id}/sources/{source_id}/old.md"
+    payload = b"old content"
+    objectstore.write_bytes(key, payload)
+    session.add(
+        RawSource(
+            source_id=source_id,
+            workspace_id=workspace.workspace_id,
+            object_key=key,
+            filename="old.md",
+            content_hash=hashlib.sha256(payload).hexdigest(),
+            submitted_by="user:deepak",
+            status=RawSourceStatus.superseded,
+            superseded_at=datetime.now(UTC) - timedelta(days=200),
+        )
+    )
+    await session.flush()
+
+    item = await advisor.run_superseded_source_detector(
+        session, workspace_id=workspace.workspace_id, retention_days=180
+    )
+    await session.commit()
+
+    resp = await client.post(
+        f"/review-items/{item.review_id}/resolve",
+        headers=ADMIN,
+        json={"action": "delete superseded source"},
+    )
+    assert resp.status_code == 200
+    assert dispatched["reindex"] == []
+    assert dispatched["curate_source"] == []
+
+    source = await session.get(RawSource, source_id)
+    await session.refresh(source)
+    assert source.status is RawSourceStatus.archived
+
+
 async def test_curate_task_dispatches_reindex_for_pages_it_wrote(session, workspace, task_db, dispatched):
     """Extends tests/test_tasks.py's coverage: `_curate` itself dispatches reindex for
     whatever it left pending/stale in the source's workspace (step 32), not just the

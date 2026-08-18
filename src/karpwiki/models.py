@@ -193,6 +193,10 @@ class RawSource(Base):
     status: Mapped[RawSourceStatus] = mapped_column(
         Enum(RawSourceStatus, name="raw_source_status"), default=RawSourceStatus.active
     )
+    # Set only where `status` flips to `superseded` (`ingestion._resolve_supersede`) — the
+    # Superseded-Source Detector's retention-window check (05 §4, phase2-tasklist.md step
+    # 37) needs "how long has this been superseded," which nothing else records.
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     pipeline_state: Mapped[PipelineState] = mapped_column(
         PIPELINE_STATE_ENUM, default=PipelineState.submitted
     )
