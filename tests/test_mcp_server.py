@@ -71,38 +71,57 @@ class _FakeAuthenticator:
     def __init__(self, principal: Principal | None):
         self._principal = principal
 
-    def authenticate(self, headers):
+    async def authenticate(self, headers):
         return self._principal
 
 
-def test_resolve_http_principal_returns_the_authenticated_principal():
-    principal = mcp_server._resolve_http_principal(
+async def test_resolve_http_principal_returns_the_authenticated_principal():
+    principal = await mcp_server._resolve_http_principal(
         _FakeAuthenticator(Principal(id="deepak")), {"x-karpwiki-user": "deepak"}
     )
     assert principal.id == "deepak"
 
 
-def test_resolve_http_principal_rejects_unauthenticated():
+async def test_resolve_http_principal_rejects_unauthenticated():
     with pytest.raises(mcp_server.McpAuthError):
-        mcp_server._resolve_http_principal(_FakeAuthenticator(None), {})
+        await mcp_server._resolve_http_principal(_FakeAuthenticator(None), {})
 
 
-def test_resolve_stdio_principal_uses_env_vars(monkeypatch):
+async def test_resolve_stdio_principal_uses_env_vars(monkeypatch):
     monkeypatch.setenv("KARPWIKI_MCP_USER", "deepak")
     monkeypatch.setenv("KARPWIKI_MCP_GROUPS", "eng, ops")
     from karpwiki.auth import TrustedHeaderAuthenticator
 
-    principal = mcp_server._resolve_stdio_principal(TrustedHeaderAuthenticator())
+    principal = await mcp_server._resolve_stdio_principal(TrustedHeaderAuthenticator())
     assert principal.id == "deepak"
     assert principal.groups == ("eng", "ops")
 
 
-def test_resolve_stdio_principal_raises_when_unset(monkeypatch):
+async def test_resolve_stdio_principal_raises_when_unset(monkeypatch):
     monkeypatch.delenv("KARPWIKI_MCP_USER", raising=False)
+    monkeypatch.delenv("KARPWIKI_MCP_TOKEN", raising=False)
     from karpwiki.auth import TrustedHeaderAuthenticator
 
     with pytest.raises(mcp_server.McpAuthError):
-        mcp_server._resolve_stdio_principal(TrustedHeaderAuthenticator())
+        await mcp_server._resolve_stdio_principal(TrustedHeaderAuthenticator())
+
+
+async def test_resolve_stdio_principal_prefers_token_when_set(monkeypatch):
+    """KARPWIKI_MCP_TOKEN synthesizes an Authorization header, not the trusted-header
+    shape — the only env var that can possibly satisfy a real OidcAuthenticator."""
+    monkeypatch.setenv("KARPWIKI_MCP_TOKEN", "abc123")
+    monkeypatch.setenv("KARPWIKI_MCP_USER", "deepak")  # should be ignored when a token is set
+
+    captured = {}
+
+    class _CapturingAuthenticator:
+        async def authenticate(self, headers):
+            captured.update(headers)
+            return Principal(id="from-token")
+
+    principal = await mcp_server._resolve_stdio_principal(_CapturingAuthenticator())
+    assert principal.id == "from-token"
+    assert captured == {"authorization": "Bearer abc123"}
 
 
 # --- tool registration ----------------------------------------------------------------------

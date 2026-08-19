@@ -55,8 +55,8 @@ from . import (
 from .auth import (
     Authenticator,
     Principal,
-    TrustedHeaderAuthenticator,
     any_workspace_with_role,
+    default_authenticator,
     has_role,
 )
 from .db import SessionLocal
@@ -107,7 +107,7 @@ def _envelope(request: Request, exc: ApiError) -> JSONResponse:
 
 def create_app(authenticator: Authenticator | None = None) -> FastAPI:
     app = FastAPI(title="karpwiki gateway")
-    app.state.authenticator = authenticator or TrustedHeaderAuthenticator()
+    app.state.authenticator = authenticator or default_authenticator()
 
     @app.middleware("http")
     async def attach_request_id(request: Request, call_next):
@@ -131,7 +131,7 @@ async def _session() -> AsyncSession:
 
 
 async def _principal(request: Request) -> Principal:
-    resolved = request.app.state.authenticator.authenticate(dict(request.headers))
+    resolved = await request.app.state.authenticator.authenticate(dict(request.headers))
     if resolved is None:
         raise ApiError(401, "unauthenticated", "No authenticated principal on this request.")
     return resolved

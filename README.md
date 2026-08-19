@@ -115,14 +115,21 @@ from karpwiki.mcp_server import create_mcp_server
 create_mcp_server().run(transport="streamable-http", host="0.0.0.0", port=8001)
 ```
 
-`stdio` has no per-call HTTP headers at all, so it resolves one identity at process startup from
-`KARPWIKI_MCP_USER`/`KARPWIKI_MCP_GROUPS` env vars (mirroring the REST trusted-header names) and
-reuses it for every tool call in that process — the same lightweight stand-in
-`TrustedHeaderAuthenticator` itself is (real OIDC/SAML/API-key auth is step 47, unaffected).
-`wiki_submit` supports on-behalf-of delegation via an `acting_as="user:<id>"` argument (09 §5,
-step 46) — both the calling agent and the represented user must independently hold `contributor`
-access somewhere in common, and the represented user (not the agent) is recorded as the
-submitter.
+`stdio` has no per-call HTTP headers at all, so it resolves one identity at process startup —
+either `KARPWIKI_MCP_TOKEN` (a real bearer token, when real OIDC is configured — see below) or
+`KARPWIKI_MCP_USER`/`KARPWIKI_MCP_GROUPS` (mirroring the REST trusted-header names, the default) —
+and reuses it for every tool call in that process. `wiki_submit` supports on-behalf-of delegation
+via an `acting_as="user:<id>"` argument (09 §5, step 46) — both the calling agent and the
+represented user must independently hold `contributor` access somewhere in common, and the
+represented user (not the agent) is recorded as the submitter.
+
+**Auth** ([06 §3](spec/06-api-mcp-and-scaling.md), phase2-tasklist.md step 47): `TrustedHeaderAuthenticator`
+(believes `X-Karpwiki-User`/`X-Karpwiki-Groups`, sound only behind a proxy that actually
+authenticates and strips those headers first) is the default until both `KARPWIKI_OIDC_ISSUER` and
+`KARPWIKI_OIDC_AUDIENCE` are set, at which point `OidcAuthenticator` — real bearer-JWT validation
+against the configured IdP's JWKS, via Authlib/`joserfc` — swaps in automatically, for both REST
+and MCP, with no handler changes. **SAML is not supported**: Authlib (`08 §2`'s pick) has no SAML
+module at all, so only the OIDC half of `06 §3`'s "Enterprise SSO (OIDC/SAML)" is implemented.
 
 Configuration is environment variables, listed with their defaults in
 [`.env.example`](.env.example). `.env` is gitignored and loaded automatically; real environment

@@ -16,11 +16,12 @@ already look — extracting a shared helper for each would be pure ceremony.
 - **`stdio`**: no per-call headers exist at all — `ctx.headers` is `None` on this
   transport by the SDK's own design (a stdio server is one local process for one caller,
   e.g. a local agent/IDE integration). The principal is resolved ONCE, lazily, from
-  `KARPWIKI_MCP_USER`/`KARPWIKI_MCP_GROUPS` (mirroring `TrustedHeaderAuthenticator`'s
-  `X-Karpwiki-User`/`X-Karpwiki-Groups` header names as env vars instead of headers) and
-  reused for every tool call in that process's lifetime — the same lightweight stand-in
-  precedent `TrustedHeaderAuthenticator` itself set in Phase 1 ("so Phase 1 need not wait
-  on an IdP"); real OIDC/SAML/API-key auth (step 47) swaps in later, unaffected.
+  `KARPWIKI_MCP_USER`/`KARPWIKI_MCP_GROUPS` env vars — synthesized into the same
+  header-shaped dict any `Authenticator` (including `OidcAuthenticator`, step 47) expects,
+  since `stdio` has no real headers to carry a bearer token in the first place. This
+  remains a `TrustedHeaderAuthenticator`-shaped stand-in regardless of which
+  `Authenticator` streamable HTTP resolves to — a real IdP has no way to authenticate a
+  bare local subprocess with no browser or token of its own.
 
 **On-behalf-of delegation** (`wiki_submit`'s `acting_as` argument, 09 §5, phase2-tasklist.md
 step 46): the only delegated operation 06 §2 names. Every other tool authenticates as the
@@ -44,7 +45,7 @@ from datetime import date
 from mcp.server.mcpserver import Context, MCPServer
 
 from . import api, review, versioning, workspaces
-from .auth import Authenticator, Principal, TrustedHeaderAuthenticator, any_workspace_with_role, has_role
+from .auth import Authenticator, Principal, any_workspace_with_role, default_authenticator, has_role
 from .db import session_scope
 from .models import RawSource, ReviewKind, ReviewStatus, Role
 
@@ -54,48 +55,61 @@ class McpAuthError(Exception):
     raise a plain exception and let the SDK surface it as a tool-call error."""
 
 
-def _resolve_http_principal(authenticator: Authenticator, headers) -> Principal:
+async def _resolve_http_principal(authenticator: Authenticator, headers) -> Principal:
     """The streamable-HTTP identity path — a standalone, directly testable function
     (unlike the stdio path's caching, this needs no per-server-instance state)."""
-    principal = authenticator.authenticate(dict(headers))
+    principal = await authenticator.authenticate(dict(headers))
     if principal is None:
         raise McpAuthError("No authenticated principal on this request.")
     return principal
 
 
-def _resolve_stdio_principal(authenticator: Authenticator) -> Principal:
-    headers: dict[str, str] = {}
-    user = os.environ.get("KARPWIKI_MCP_USER", "").strip()
-    if user:
-        headers["x-karpwiki-user"] = user
-    groups = os.environ.get("KARPWIKI_MCP_GROUPS", "")
-    if groups:
-        headers["x-karpwiki-groups"] = groups
-    principal = authenticator.authenticate(headers)
+async def _resolve_stdio_principal(authenticator: Authenticator) -> Principal:
+    """stdio has no real headers, so this synthesizes whichever shape the active
+    `Authenticator` actually expects, from env vars — the two aren't interchangeable:
+    `TrustedHeaderAuthenticator` reads `x-karpwiki-user`/`_groups`; `OidcAuthenticator`
+    (step 47) reads `authorization: Bearer <token>`, and a bare local stdio process can't
+    run an interactive OIDC login to obtain one itself, so it has to already be handed
+    one. `KARPWIKI_MCP_TOKEN` is tried first (the only shape that can possibly satisfy
+    `OidcAuthenticator`); falling back to `KARPWIKI_MCP_USER`/`_GROUPS` preserves the
+    unconfigured-OIDC (`TrustedHeaderAuthenticator`) default from steps 45/46 unchanged."""
+    token = os.environ.get("KARPWIKI_MCP_TOKEN", "").strip()
+    if token:
+        headers = {"authorization": f"Bearer {token}"}
+    else:
+        headers = {}
+        user = os.environ.get("KARPWIKI_MCP_USER", "").strip()
+        if user:
+            headers["x-karpwiki-user"] = user
+        groups = os.environ.get("KARPWIKI_MCP_GROUPS", "")
+        if groups:
+            headers["x-karpwiki-groups"] = groups
+    principal = await authenticator.authenticate(headers)
     if principal is None:
         raise McpAuthError(
-            "No stdio identity configured — set KARPWIKI_MCP_USER (and optionally "
-            "KARPWIKI_MCP_GROUPS) in the environment this MCP server process runs in."
+            "No stdio identity configured — set KARPWIKI_MCP_TOKEN (a bearer token, for "
+            "real OIDC) or KARPWIKI_MCP_USER (and optionally KARPWIKI_MCP_GROUPS, for the "
+            "trusted-header default) in the environment this MCP server process runs in."
         )
     return principal
 
 
 def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
     """Mirrors `api.create_app`'s own factory shape (an injectable `Authenticator` for
-    tests, a real `TrustedHeaderAuthenticator` by default) — a separate process/entry
-    point from the REST gateway, so it can't just reuse `create_app`'s own instance."""
-    resolved_authenticator = authenticator or TrustedHeaderAuthenticator()
+    tests, `auth.default_authenticator()` otherwise) — a separate process/entry point from
+    the REST gateway, so it can't just reuse `create_app`'s own instance."""
+    resolved_authenticator = authenticator or default_authenticator()
     mcp = MCPServer("karpwiki")
     # Resolved lazily on first stdio call, then cached — a stdio server is one process
     # for one caller, so this never needs to change within a run.
     stdio_principal: Principal | None = None
 
-    def _resolve_principal(ctx: Context) -> Principal:
+    async def _resolve_principal(ctx: Context) -> Principal:
         nonlocal stdio_principal
         if ctx.headers is not None:
-            return _resolve_http_principal(resolved_authenticator, ctx.headers)
+            return await _resolve_http_principal(resolved_authenticator, ctx.headers)
         if stdio_principal is None:
-            stdio_principal = _resolve_stdio_principal(resolved_authenticator)
+            stdio_principal = await _resolve_stdio_principal(resolved_authenticator)
         return stdio_principal
 
     @mcp.tool()
@@ -112,7 +126,7 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
     ) -> dict:
         """Single-stage lexical/catalog search (04 §1) — ranked, cited page snippets, no
         synthesis. Maps to `GET /search`."""
-        principal = _resolve_principal(ctx)
+        principal = await _resolve_principal(ctx)
         async with session_scope() as session:
             return await api.run_search(
                 session,
@@ -131,7 +145,7 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
     async def wiki_get_page(ctx: Context, page_id: str) -> dict:
         """Fetch a specific page by id, e.g. for an agent following a citation. Maps to
         `GET /pages/{id}`."""
-        principal = _resolve_principal(ctx)
+        principal = await _resolve_principal(ctx)
         async with session_scope() as session:
             page = await api._reader_page(session, principal, uuid.UUID(page_id))
             version = (
@@ -157,7 +171,7 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
         programmatically. Maps to `GET /pages`. `status="draft"` needs `contributor`
         (elevated scope, 04 §6's reasoning applied the same way `api.py`'s own
         `list_pages_endpoint` does)."""
-        principal = _resolve_principal(ctx)
+        principal = await _resolve_principal(ctx)
         async with session_scope() as session:
             required = Role.contributor if status == "draft" else Role.reader
             if not await has_role(
@@ -185,7 +199,7 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
     async def wiki_list_workspaces(ctx: Context) -> dict:
         """Discover which workspaces the caller can search or submit to. Maps to
         `GET /workspaces`."""
-        principal = _resolve_principal(ctx)
+        principal = await _resolve_principal(ctx)
         async with session_scope() as session:
             found = await workspaces.list_for_principal(session, principal_keys=principal.policy_keys)
             return {"items": [api._workspace_body(w) for w in found]}
@@ -206,7 +220,7 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
         agent's own identity is recorded in the `ingestion_log` entry's `detail` for
         audit, no new core field. Omit `acting_as` for an ordinary, non-delegated
         submission as the calling identity itself."""
-        principal = _resolve_principal(ctx)
+        principal = await _resolve_principal(ctx)
         async with session_scope() as session:
             agent_workspaces = set(
                 await any_workspace_with_role(session, principal=principal, required=Role.contributor)
@@ -257,7 +271,7 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
         """Check a submission's pipeline state — typically polled after `wiki_submit`.
         Maps to `GET /sources/{id}` (submitter-only, no admin override, matching that
         endpoint exactly: "whether a source exists is not public")."""
-        principal = _resolve_principal(ctx)
+        principal = await _resolve_principal(ctx)
         async with session_scope() as session:
             source = await session.get(RawSource, uuid.UUID(source_id))
             if source is None or source.submitted_by != f"user:{principal.id}":
@@ -281,7 +295,7 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
         cursor: str | None = None,
     ) -> dict:
         """List/filter the admin review queue (05 §1). Maps to `GET /review-items`."""
-        principal = _resolve_principal(ctx)
+        principal = await _resolve_principal(ctx)
         async with session_scope() as session:
             admin_workspaces = await any_workspace_with_role(
                 session, principal=principal, required=Role.admin
@@ -309,7 +323,7 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
     ) -> dict:
         """Execute a resolution — action set depends on `kind` (03 §3-5, 05 §3-5). Maps to
         `POST /review-items/{id}/resolve`."""
-        principal = _resolve_principal(ctx)
+        principal = await _resolve_principal(ctx)
         async with session_scope() as session:
             return await api.run_resolve_review_item(
                 session, principal, review_id=uuid.UUID(review_id), action=action, note=note
@@ -323,7 +337,7 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
         cursor: str | None = None,
     ) -> dict:
         """List version history (05 §6). Maps to `GET /pages/{id}/versions`."""
-        principal = _resolve_principal(ctx)
+        principal = await _resolve_principal(ctx)
         async with session_scope() as session:
             await api._admin_page(session, principal, uuid.UUID(page_id))
             versions, next_cursor = await versioning.list_versions(
@@ -342,7 +356,7 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
         deletes history. Maps to `POST /pages/{id}/rollback` (no idempotency support here,
         same reasoning as `wiki_resolve_review_item` — that's a REST-specific header
         convention)."""
-        principal = _resolve_principal(ctx)
+        principal = await _resolve_principal(ctx)
         async with session_scope() as session:
             page = await api._admin_page(session, principal, uuid.UUID(page_id))
             try:

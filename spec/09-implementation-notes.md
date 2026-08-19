@@ -2327,5 +2327,81 @@ either way).
 **Spec touch-point**: none required — `09` §5 already fully specifies this feature; this section
 records the target-workspace adaptation and the `wiki_get_source_status` scope boundary.
 
+## 50. Real OIDC `Authenticator` (Phase 2 Step 47)
+
+The second `Authenticator` implementation `09` §15 always intended: `OidcAuthenticator`, real
+bearer-JWT validation against a configured IdP's JWKS, swapped in for `TrustedHeaderAuthenticator`
+with no handler changes once configured — the exact property §15's pluggable-provider design was
+built to deliver.
+
+**A real, confirmed spec/implementation-stack mismatch, resolved via AskUserQuestion**: `08` §2
+names "Authlib (OIDC/SAML)" as the auth library, but Authlib has no SAML support at all — checked
+directly against the installed package (`authlib.oauth1`/`oauth2`/`oidc` only, no `saml` module
+anywhere). Real SP-side SAML (XML signature validation, IdP metadata exchange, an assertion-
+consumer endpoint) is a materially larger, separate feature needing a different library
+(`python3-saml`/`pysaml2`), and nothing in `08` §4's dependency list or any tasklist step names
+one. Resolved as: build real OIDC only, document SAML as unsupported by this pick rather than
+silently missing — the same "flag it, don't build around it silently" treatment step 45 gave the
+MCP SDK's own real API-surface surprise.
+
+**`Authenticator.authenticate` became `async`, a real interface change confirmed with the user
+first.** Phase 1's `TrustedHeaderAuthenticator` does no I/O, so a synchronous `authenticate` never
+mattered; `OidcAuthenticator` fetches/caches a JWKS over the network, and blocking the event loop
+on every cache miss is the wrong tradeoff for a gateway meant to serve more than one request
+concurrently. The change touched three call sites — `api.py`'s `_principal` dependency and
+`mcp_server.py`'s two principal-resolution helpers — all already inside async functions, so each
+needed only an added `await`; `TrustedHeaderAuthenticator.authenticate` itself needed only
+`async def`, no logic change, and the full pre-existing test suite caught every missed call site
+immediately (four failing tests, all fixed by adding `await`/`async`).
+
+**Uses `joserfc`, not `authlib.jose`, for the actual JWS/claims verification.** `authlib.jose` is
+deprecated as of Authlib 1.7 ("please use joserfc instead") — `joserfc` is already an Authlib
+dependency, not a separate library choice, and is what Authlib's own current documentation points
+to. `authlib` itself contributes little concrete code to this implementation beyond being the
+named dependency `08` §2 picked; the real validation logic is `joserfc.jwt.decode` (against a
+`joserfc.jwk.KeySet` built from the fetched JWKS) plus `joserfc.jwt.JWTClaimsRegistry` for
+`iss`/`aud`/`exp` validation. Confirmed empirically before writing `OidcAuthenticator` itself:
+minted a real token with a real generated RSA keypair, decoded and validated it, and confirmed
+wrong-audience/unknown-`kid`/expired cases each raise their own distinct, catchable error type
+(`InvalidClaimError`, `InvalidKeyIdError`, `ExpiredTokenError`) rather than one generic failure.
+
+**JWKS caching**: fetched once (via OIDC discovery, `{issuer}/.well-known/openid-configuration`,
+unless `KARPWIKI_OIDC_JWKS_URI` is set directly) and cached indefinitely on the `OidcAuthenticator`
+instance, refetched exactly once, inline, whenever a token's `kid` isn't in the cache — the
+standard client pattern for surviving IdP key rotation without polling on a timer. A per-instance
+`asyncio.Lock` serializes concurrent refreshes. `http_client` is injectable and built fresh per
+instance rather than at module scope — a module-level async client bound to whichever event loop
+is running on first use already broke across test functions once in this codebase (`09` §29's
+OpenSearch-client lesson); each `OidcAuthenticator` getting its own client avoids that failure mode
+by construction rather than by remembering not to repeat it.
+
+**A real interaction bug caught before it shipped, not by a test but by re-reading what step
+45/46 already built**: `stdio`'s identity resolution synthesized only `x-karpwiki-user`-shaped
+headers from env vars — correct for `TrustedHeaderAuthenticator`, but `OidcAuthenticator` only
+ever looks at an `Authorization: Bearer` header, so a deployment that configured real OIDC would
+have silently broken stdio MCP auth entirely (every stdio tool call would 401-equivalent, with no
+code path able to succeed). Fixed by adding `KARPWIKI_MCP_TOKEN` — a real bearer token, tried
+first — falling back to `KARPWIKI_MCP_USER`/`_GROUPS` when unset, so the pre-existing
+(`TrustedHeaderAuthenticator`-backed) default behavior from steps 45/46 is completely unchanged.
+A bare local stdio process can't run an interactive OIDC login itself, so this is the only shape
+that could possibly work — the caller has to already hold a token from somewhere.
+
+**Live-verified against a real local HTTP server acting as the IdP** (not committed, unlike the
+committed unit tests' `httpx.MockTransport`) — a real `http.server.HTTPServer` served a real
+discovery document and JWKS on a real port; a real `uvicorn karpwiki.api:app` subprocess, started
+with only `KARPWIKI_OIDC_ISSUER`/`_AUDIENCE` set (no code change, no `KARPWIKI_OIDC_JWKS_URI` —
+exercising real discovery, not just a direct JWKS URI), correctly accepted a real signed token on
+`GET /workspaces` (200) and correctly rejected no token, a wrong-audience token, and an expired
+token (401 each) — confirming `default_authenticator()` really does swap providers from
+configuration alone. The `KARPWIKI_MCP_TOKEN` fix was verified the same way: a real
+`python -m karpwiki.mcp_server` stdio subprocess, launched against the same real IdP-issued token
+with real OIDC active, authenticated correctly.
+
+**Spec touch-point** (applied): `08` §2's "Authlib (OIDC/SAML)" line now needs read alongside this
+section's SAML caveat — no wording change to `08` itself, since `09` is explicitly the
+implementation-readiness appendix for exactly this kind of gap; `06` §3 needed no changes, its
+auth model already anticipated a real OIDC provider without specifying the library-level details
+this section fills in.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

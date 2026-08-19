@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–46 done, tracks 2a, 2b, and 2c all complete and closed out; track
+**Status (2026-08-19): steps 22–47 done, tracks 2a, 2b, and 2c all complete and closed out; track
 2d in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
@@ -387,7 +387,29 @@ is a real Authenticator implementation using that pick, not a library search.
     [09](09-implementation-notes.md) §49.
 47. Real OIDC/SAML `Authenticator` implementation using Authlib
     ([08](08-implementation-stack.md) §2's pick) — [09](09-implementation-notes.md) §15 named this
-    as Phase 2's second provider, swapped in with no handler changes.
+    as Phase 2's second provider, swapped in with no handler changes. **Done** —
+    `OidcAuthenticator` (new, `auth.py`): real bearer-JWT validation against a configured
+    IdP's JWKS (via `joserfc`, Authlib's own currently-recommended JWT library —
+    `authlib.jose` is deprecated), with OIDC discovery, indefinite JWKS caching, and a
+    refetch-once-on-unknown-`kid` retry for key rotation. `auth.default_authenticator()`
+    picks it automatically once `KARPWIKI_OIDC_ISSUER`/`_AUDIENCE` are both set, otherwise
+    keeps `TrustedHeaderAuthenticator` — no handler changes, confirmed live. **SAML is not
+    supported**: Authlib genuinely has no SAML module (verified directly against the
+    installed package) — resolved via AskUserQuestion as an explicit, documented gap
+    rather than pulling in a second, much larger SAML-specific library nothing else names.
+    `Authenticator.authenticate` became `async` (confirmed via AskUserQuestion first) so a
+    real JWKS fetch never blocks the event loop — a small, mechanical change across three
+    already-async call sites, caught immediately by the full test suite. Found and fixed a
+    real interaction bug before it shipped: stdio's env-var identity synthesis only
+    produced trusted-header-shaped headers, which would have silently broken stdio MCP
+    auth entirely once real OIDC was configured (`OidcAuthenticator` only reads
+    `Authorization: Bearer`) — fixed by adding `KARPWIKI_MCP_TOKEN`, tried first, falling
+    back to the existing `KARPWIKI_MCP_USER`/`_GROUPS` behavior unchanged. Live-verified
+    against a real local HTTP server acting as the IdP (real discovery + JWKS, not just
+    the committed tests' `MockTransport`): a real `uvicorn` subprocess with only the two
+    OIDC env vars set correctly accepted a real signed token and correctly rejected no
+    token/wrong audience/expired token; the `KARPWIKI_MCP_TOKEN` fix verified the same way
+    via a real stdio subprocess. See [09](09-implementation-notes.md) §50.
 48. Rate limiting ([07](07-additional-features-and-roadmap.md) §3) — the `RateLimit-*` headers
     were already specified in [09](09-implementation-notes.md) §14 but never implemented, since no
     limiter existed to emit them.

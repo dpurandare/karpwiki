@@ -80,3 +80,19 @@ MAINTENANCE_CONTRADICTION_INTERVAL_HOURS = float(
 # call than to the workspace-authored content thresholds SCHEMA.md would otherwise own.
 STALENESS_HIGH_TRAFFIC_DAYS = int(os.environ.get("KARPWIKI_STALENESS_HIGH_TRAFFIC_DAYS", "90"))
 STALENESS_LOW_TRAFFIC_DAYS = int(os.environ.get("KARPWIKI_STALENESS_LOW_TRAFFIC_DAYS", "365"))
+
+# Real OIDC `Authenticator` (06 §3, 08 §2's Authlib pick; phase2-tasklist.md step 47) —
+# the second `Authenticator` implementation, alongside `TrustedHeaderAuthenticator`
+# (09 §15's Phase 1 stand-in, still the default when these are unset). Empty by default;
+# `auth.default_authenticator()` only builds an `OidcAuthenticator` once `OIDC_ISSUER` and
+# `OIDC_AUDIENCE` are both set, so an unconfigured deployment keeps today's behavior.
+OIDC_ISSUER = os.environ.get("KARPWIKI_OIDC_ISSUER", "")
+OIDC_AUDIENCE = os.environ.get("KARPWIKI_OIDC_AUDIENCE", "")
+# Direct JWKS URI — skips OIDC discovery (`{issuer}/.well-known/openid-configuration`)
+# when the IdP's JWKS endpoint doesn't live at the discovery-document's default location,
+# or to avoid the extra discovery round trip entirely. Optional; discovery is the default.
+OIDC_JWKS_URI = os.environ.get("KARPWIKI_OIDC_JWKS_URI", "")
+# Which token claims carry the principal id and its groups — real IdPs vary here (`sub`
+# vs `email`/`preferred_username`; `groups` is common but not standardized).
+OIDC_PRINCIPAL_CLAIM = os.environ.get("KARPWIKI_OIDC_PRINCIPAL_CLAIM", "sub")
+OIDC_GROUPS_CLAIM = os.environ.get("KARPWIKI_OIDC_GROUPS_CLAIM", "groups")
