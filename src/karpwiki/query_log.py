@@ -23,12 +23,14 @@ async def record(
     query_text: str,
     resolved_workspaces: list[str],
     results: list[dict],
+    duration_ms: int | None = None,
 ) -> QueryLog:
     entry = QueryLog(
         principal=principal,
         query_text=query_text,
         resolved_workspaces=resolved_workspaces,
         results=results,
+        duration_ms=duration_ms,
     )
     session.add(entry)
     await session.flush()

@@ -401,6 +401,10 @@ class QueryLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.clock_timestamp(), index=True
     )
+    # Added phase2-tasklist.md step 44: the Search Performance dashboard (05 §8) needs
+    # p50/p95 latency, and nothing recorded a call's duration before this. Nullable — a
+    # row from before this column existed has no value to backfill.
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
 
 
 class IdempotencyRecord(Base):

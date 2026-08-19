@@ -2121,5 +2121,80 @@ standalone `uvicorn` process afterward, same as step 42's precedent.
 **Spec touch-point**: none required — `06` §1 and `05` §7 already fully describe these resources;
 this section records the `RawSource.created_at` decision and the draft-visibility/stub-scope calls.
 
+## 47. Performance Monitoring Dashboards (Phase 2 Step 44)
+
+`05` §8's five dashboards, exposed as five new `GET /metrics/*` admin endpoints (a genuinely new
+REST surface — `06` §1's resource table never named one, unlike `pages`/`sources`/`connectors` in
+step 43). `00` §1 scopes this whole implementation to "admin console scope, not pixel-level UI
+design," so this is backend data a real dashboard would render, not a UI — the same framing every
+other admin-console feature (review queue, version browser, workspace management) already followed.
+
+**Two real forks resolved via AskUserQuestion before writing code**, since the five dashboards vary
+wildly in feasibility given what's actually built:
+
+- **Search latency** (`p50`/`p95`): nothing recorded how long a `/search` call took. Added
+  `QueryLog.duration_ms` (migration `f8fb063dacdb`, nullable — historical rows have nothing to
+  backfill) and a wall-clock timer around `/search`'s existing work, timed from the top of the
+  handler (not just the retrieval call) since that's what a caller actually experiences.
+  `monitoring.search_performance` computes `percentile_cont(0.5|0.95)` over recent
+  `query_log.duration_ms` rows via raw SQL (`text()`, matching `search.py`'s own established
+  pattern for anything beyond ORM's comfortable zone) and flags a real `p95 > 1000ms` SLA breach
+  against `06` §1's already-documented target.
+- **Queue depth**: real Celery/Redis queue lengths, not a placeholder. `monitoring.queue_depths()`
+  is the first code in this repo where `api.py`'s dependency graph reaches Redis directly (every
+  other read here is Postgres-only; `tasks.*.delay()` is the only prior Redis touchpoint, and that's
+  write-only) — a bare `LLEN` per `tasks.QUEUES` name via `redis.asyncio`, since Celery's Redis
+  transport keys each queue by its plain name and no Celery inspection API is needed. Kept as its
+  own function (no DB session) rather than folded into `ingestion_pipeline()`, so that function
+  stays pure-DB and testable without a live Redis connection — the `/metrics/ingestion-pipeline`
+  endpoint merges both into one response.
+
+**Two accepted gaps, documented in `monitoring.py`'s own module docstring rather than silently
+missing or faked**: **cache hit rate** (`02` §6's optional cache layer was never built in this
+implementation — flagged roadmap-only since step 34's writeup; nothing to report a rate for, so
+`search_performance()` returns `cache_hit_rate: None`) and **storage trend** (no metrics-history/
+time-series mechanism exists anywhere in this codebase; `storage_utilization()` reports a current
+snapshot only, `trend: None`). Neither needed a question — unlike the two forks above, there was no
+real alternative to consider (no cache exists at all; building a time-series subsystem is clearly
+outside "add a monitoring endpoint").
+
+**`IndexStatus` has no "entered this state at" timestamp, the same gap `advisor.find_stale_pages`
+already worked around (`09` §39) — reused its exact proxy rather than inventing a second one.**
+`index_health`'s "stuck beyond threshold" count uses `COALESCE(last_indexed_at, current_version's
+created_at)` against a 24-hour default threshold, consistent with the advisor's own reasoning for
+why `last_indexed_at` alone (the last *successful* index, not "since when has this needed one")
+isn't sufficient on its own.
+
+**Storage figures are content-byte approximations, not real Postgres storage accounting** — `SUM
+octet_length(page_version.content)` and `SUM pg_column_size(page_index.tsv)` per workspace, not
+`pg_total_relation_size` (which sizes whole tables, including indexes/TOAST/WAL/free space, and
+can't be filtered per workspace at all). Documented directly in `storage_utilization`'s own
+docstring so the approximation isn't mistaken for exact accounting later. Object store volume is
+real, via a new `objectstore.size_bytes()` using fsspec's generic `fs.du()` — works across every
+backend this module already supports with no backend-specific branch.
+
+**Every dashboard but `queue_depths()` takes an optional `workspace_id`**, reusing `document-types`'
+already-established optional-scope shape exactly (`_require_admin_scope`, new in `api.py`, shared
+by all five endpoints): scoped and admin-gated to one workspace when given, "admin somewhere"
+otherwise. `queue_depths()` is the deliberate exception — a Celery queue mixes every workspace's
+work, so per-workspace depth isn't a coherent concept, reported globally regardless of the caller's
+`workspace_id` param.
+
+**Live-verified against real dev Postgres, a real running gateway, and the real Redis broker** (not
+committed): three real `/search` calls produced real `duration_ms` values, and `/metrics/search-
+performance` computed a real p50/p95 from them (3.0ms/3.9ms locally — comfortably inside the 1s
+SLA). `/metrics/storage-utilization` first came back with `object_store_bytes: 0` — not a bug: the
+live script's first pass only created a page (whose content lives in Postgres, not the object
+store) with no accompanying `raw_source`, so there was genuinely nothing under that workspace's
+object-store prefix to measure. Re-verified after adding a real raw source to the script: real
+non-zero bytes. `queue_depths()` deliberately never pushes synthetic data onto a real queue name in
+either the live check or the committed test — this dev environment's real worker containers
+actively consume from those same names on the same broker, and a hand-crafted, non-Celery-shaped
+message could be popped and crash a live worker; both just confirm the function connects and
+reports every known queue.
+
+**Spec touch-point**: none required — `05` §8 already names all five dashboards' metrics; this
+section records the `duration_ms`/direct-Redis-read decisions and the two accepted gaps.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

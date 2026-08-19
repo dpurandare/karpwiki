@@ -25,6 +25,7 @@ endpoint only ever queries the one shared index.
 """
 
 import hashlib
+import time
 import uuid
 from datetime import date
 from typing import Annotated, Any
@@ -41,6 +42,7 @@ from . import (
     dedicated_index,
     document_types,
     ingestion,
+    monitoring,
     objectstore,
     pipeline,
     query_log,
@@ -1222,7 +1224,12 @@ def _register_routes(app: FastAPI) -> None:
         retrieval itself is `search.search()`. Seeing drafts needs `contributor`, not just
         `reader` — "elevated scope" per 04 §6 — so resolution uses a stricter role when
         requested rather than filtering drafts out of a reader-scoped set after the fact.
+
+        Times the call for `query_log.duration_ms` (phase2-tasklist.md step 44's Search
+        Performance dashboard) — wall-clock from here, not just the retrieval call, since
+        that's what a caller actually experiences.
         """
+        started_at = time.monotonic()
         required_role = Role.contributor if include_drafts else Role.reader
         accessible = await any_workspace_with_role(
             session, principal=principal, required=required_role
@@ -1285,10 +1292,78 @@ def _register_routes(app: FastAPI) -> None:
             query_text=q,
             resolved_workspaces=resolved,
             results=[{"page_id": str(r.page_id), "score": r.score} for r in results],
+            duration_ms=round((time.monotonic() - started_at) * 1000),
         )
         await session.commit()
 
         return {"items": [_search_result_body(r) for r in results]}
+
+    async def _require_admin_scope(
+        session: AsyncSession, principal: Principal, workspace_id: str | None
+    ) -> None:
+        """Shared by every `/metrics/*` dashboard below (05 §8, phase2-tasklist.md step
+        44) — the same optional-workspace admin shape `document-types`' list endpoint
+        already established: scoped+gated to one workspace when given, "admin somewhere"
+        otherwise."""
+        if workspace_id is not None:
+            if not await has_role(
+                session, principal=principal, workspace_id=workspace_id, required=Role.admin
+            ):
+                raise ApiError(
+                    403, "forbidden", "This dashboard requires the admin role for this workspace."
+                )
+        elif not await any_workspace_with_role(session, principal=principal, required=Role.admin):
+            raise ApiError(403, "forbidden", "This dashboard requires the admin role somewhere.")
+
+    @app.get("/metrics/index-health")
+    async def index_health_metrics(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        workspace_id: str | None = None,
+    ):
+        await _require_admin_scope(session, principal, workspace_id)
+        return await monitoring.index_health(session, workspace_id=workspace_id)
+
+    @app.get("/metrics/ingestion-pipeline")
+    async def ingestion_pipeline_metrics(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        workspace_id: str | None = None,
+    ):
+        await _require_admin_scope(session, principal, workspace_id)
+        result = await monitoring.ingestion_pipeline(session, workspace_id=workspace_id)
+        # Global, not workspace-scoped (a Celery queue mixes every workspace's work) —
+        # merged in here rather than returned by `monitoring.ingestion_pipeline` itself,
+        # which stays pure-DB and needs no live Redis connection to test.
+        result["queue_depths"] = await monitoring.queue_depths()
+        return result
+
+    @app.get("/metrics/search-performance")
+    async def search_performance_metrics(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        workspace_id: str | None = None,
+    ):
+        await _require_admin_scope(session, principal, workspace_id)
+        return await monitoring.search_performance(session, workspace_id=workspace_id)
+
+    @app.get("/metrics/storage-utilization")
+    async def storage_utilization_metrics(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        workspace_id: str | None = None,
+    ):
+        await _require_admin_scope(session, principal, workspace_id)
+        return await monitoring.storage_utilization(session, workspace_id=workspace_id)
+
+    @app.get("/metrics/review-queue-health")
+    async def review_queue_health_metrics(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        workspace_id: str | None = None,
+    ):
+        await _require_admin_scope(session, principal, workspace_id)
+        return await monitoring.review_queue_health(session, workspace_id=workspace_id)
 
 
 async def _taxonomy_prefilter(

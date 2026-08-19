@@ -62,3 +62,15 @@ def delete(path: str, *, url: str | None = None) -> None:
 def exists(path: str, *, url: str | None = None) -> bool:
     fs, root = _fs_and_root(url)
     return fs.exists(f"{root.rstrip('/')}{path}")
+
+
+def size_bytes(prefix: str, *, url: str | None = None) -> int:
+    """Total bytes stored under a path prefix — the Storage Utilization dashboard's
+    object-store metric (05 §8, phase2-tasklist.md step 44). `fs.du()` is one of fsspec's
+    generic operations, implemented across every backend this module supports (local,
+    s3, ...), so this needs no backend-specific branch."""
+    fs, root = _fs_and_root(url)
+    full = f"{root.rstrip('/')}{prefix}"
+    if not fs.exists(full):
+        return 0
+    return fs.du(full)

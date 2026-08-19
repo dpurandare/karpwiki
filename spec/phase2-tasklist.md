@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–43 done, tracks 2a, 2b, and 2c all complete and closed out; track
+**Status (2026-08-19): steps 22–44 done, tracks 2a, 2b, and 2c all complete and closed out; track
 2d in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
@@ -334,7 +334,22 @@ is a real Authenticator implementation using that pick, not a library search.
     storage utilization, review queue health
     ([05](05-admin-backend-and-maintenance.md) §8) — the "performance-focused" half of
     [00](00-overview.md) §7's admin-UI requirement that 2a–2c's queue/version/workspace surfaces
-    don't cover on their own.
+    don't cover on their own. **Done** — five new `GET /metrics/*` admin endpoints
+    (`monitoring.py`, new), all but queue depth taking an optional `workspace_id` (same
+    optional-scope shape `document-types` established). Two real forks resolved via
+    AskUserQuestion first: added `QueryLog.duration_ms` (migration `f8fb063dacdb`) and
+    instrumented `/search` for real p50/p95 latency; added a direct real Redis `LLEN` per
+    queue (`monitoring.queue_depths`, `redis.asyncio`) for real queue depth — the first
+    place `api.py` reads Redis directly rather than only enqueuing through `tasks.*`. Two
+    accepted gaps documented rather than faked: cache hit rate (no cache layer exists, `02`
+    §6 is roadmap-only) and storage trend (no time-series mechanism exists anywhere in this
+    codebase) both report `None`. `index_health`'s "stuck" detection reuses
+    `advisor.find_stale_pages`'s exact missing-timestamp proxy (09 §39). Storage figures are
+    documented content-byte approximations, not real Postgres storage accounting. Live-
+    verified against real dev Postgres, gateway, and Redis — a first pass correctly showed
+    `object_store_bytes: 0` for a page-only workspace (no raw source, nothing to measure;
+    not a bug), re-verified with a real raw source added. See
+    [09](09-implementation-notes.md) §47.
 45. MCP server via the official `mcp` Python SDK
     ([08](08-implementation-stack.md) §2's pick; package name in §4; not yet in `pyproject.toml`)
     — a thin 1:1 adapter over existing gateway operations

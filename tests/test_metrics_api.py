@@ -1,0 +1,90 @@
+"""Phase 2 step 44 — the `GET /metrics/*` admin dashboard endpoints (05 §8)."""
+
+from karpwiki.models import AccessPolicy, Role
+
+READER = {"X-Karpwiki-User": "casey"}
+ADMIN = {"X-Karpwiki-User": "avery"}
+
+ENDPOINTS = (
+    "/metrics/index-health",
+    "/metrics/ingestion-pipeline",
+    "/metrics/search-performance",
+    "/metrics/storage-utilization",
+    "/metrics/review-queue-health",
+)
+
+
+async def test_metrics_endpoints_reject_non_admin(client, session, workspace):
+    for path in ENDPOINTS:
+        r = await client.get(path, headers=READER, params={"workspace_id": workspace.workspace_id})
+        assert r.status_code == 403, path
+
+
+async def test_metrics_endpoints_allow_admin_scoped_to_workspace(client, session, workspace):
+    session.add(AccessPolicy(workspace_id=workspace.workspace_id, principal="avery", role=Role.admin))
+    await session.commit()
+
+    for path in ENDPOINTS:
+        r = await client.get(path, headers=ADMIN, params={"workspace_id": workspace.workspace_id})
+        assert r.status_code == 200, path
+
+
+async def test_metrics_endpoints_reject_admin_in_a_different_workspace(
+    client, session, workspace, other_workspace
+):
+    session.add(
+        AccessPolicy(workspace_id=other_workspace.workspace_id, principal="avery", role=Role.admin)
+    )
+    await session.commit()
+
+    for path in ENDPOINTS:
+        r = await client.get(path, headers=ADMIN, params={"workspace_id": workspace.workspace_id})
+        assert r.status_code == 403, path
+
+
+async def test_metrics_endpoints_allow_admin_anywhere_when_workspace_omitted(
+    client, session, other_workspace
+):
+    session.add(
+        AccessPolicy(workspace_id=other_workspace.workspace_id, principal="avery", role=Role.admin)
+    )
+    await session.commit()
+
+    for path in ENDPOINTS:
+        r = await client.get(path, headers=ADMIN)
+        assert r.status_code == 200, path
+
+
+async def test_ingestion_pipeline_endpoint_includes_queue_depths(client, session, workspace):
+    session.add(AccessPolicy(workspace_id=workspace.workspace_id, principal="avery", role=Role.admin))
+    await session.commit()
+
+    r = await client.get(
+        "/metrics/ingestion-pipeline", headers=ADMIN, params={"workspace_id": workspace.workspace_id}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "queue_depths" in body
+    assert set(body["queue_depths"].keys()) == {"classification", "curation", "indexing", "maintenance"}
+
+
+async def test_search_performance_endpoint_reports_accepted_cache_gap(client, session, workspace):
+    session.add(AccessPolicy(workspace_id=workspace.workspace_id, principal="avery", role=Role.admin))
+    await session.commit()
+
+    r = await client.get(
+        "/metrics/search-performance", headers=ADMIN, params={"workspace_id": workspace.workspace_id}
+    )
+    assert r.status_code == 200
+    assert r.json()["cache_hit_rate"] is None
+
+
+async def test_storage_utilization_endpoint_reports_accepted_trend_gap(client, session, workspace):
+    session.add(AccessPolicy(workspace_id=workspace.workspace_id, principal="avery", role=Role.admin))
+    await session.commit()
+
+    r = await client.get(
+        "/metrics/storage-utilization", headers=ADMIN, params={"workspace_id": workspace.workspace_id}
+    )
+    assert r.status_code == 200
+    assert r.json()["trend"] is None
