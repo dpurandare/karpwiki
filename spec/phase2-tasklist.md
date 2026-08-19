@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–45 done, tracks 2a, 2b, and 2c all complete and closed out; track
+**Status (2026-08-19): steps 22–46 done, tracks 2a, 2b, and 2c all complete and closed out; track
 2d in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
@@ -374,7 +374,17 @@ is a real Authenticator implementation using that pick, not a library search.
     karpwiki.mcp_server` subprocess (the real stdio entry point) listed all ten tools and
     resolved its env-var identity. See [09](09-implementation-notes.md) §48.
 46. On-behalf-of delegation for `wiki_submit` — fully designed already
-    ([09](09-implementation-notes.md) §5).
+    ([09](09-implementation-notes.md) §5). **Done** — `wiki_submit` gained an `acting_as:
+    "user:<id>"` argument; AuthZ requires the calling agent's and the represented user's
+    contributor-workspace sets to intersect (the two-principal generalization of the
+    existing "contributor anywhere" check, since — like the non-delegated path — no target
+    workspace is known until classification runs). `api._store` gained `extra_detail`, used
+    to record the agent's own identity in the `ingestion_log` entry (no new core field, per
+    09 §5). `wiki_get_source_status` intentionally not extended — a known, flagged scope
+    boundary (the represented user can always check status themselves). Live-verified via
+    the real stdio subprocess entry point: a real delegated submission succeeded with the
+    real audit trail, a real under-privileged delegation was correctly rejected. See
+    [09](09-implementation-notes.md) §49.
 47. Real OIDC/SAML `Authenticator` implementation using Authlib
     ([08](08-implementation-stack.md) §2's pick) — [09](09-implementation-notes.md) §15 named this
     as Phase 2's second provider, swapped in with no handler changes.

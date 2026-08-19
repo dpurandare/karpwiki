@@ -2273,5 +2273,59 @@ USER` from its subprocess environment. Cleaned up both throwaway workspaces afte
 this section records the shared-logic-vs-duplication call, the stdio identity mechanism, and the
 installed SDK's real API surface.
 
+## 49. MCP On-Behalf-Of Delegation, Implemented (Phase 2 Step 46)
+
+`09` §5 already made every real design decision here — the dual-identity AuthZ rule, the
+`acting_as: user:<id>` claim shape, `submitted_by`/`author` recording the represented user, the
+agent's own identity going into `ingestion_log` detail rather than a new core field. This step is
+the implementation of that decision, not a new one — only one genuine adaptation was needed, plus
+one deliberate scope boundary.
+
+**"Contributor on the target workspace" has no literal target workspace at submission time.**
+`09` §5's rule is written as if a target workspace is already known, but `wiki_submit` (the only
+operation `06` §2 names as delegatable) works exactly like the plain, non-delegated submission
+path (`03` §2): the workspace is undetermined until classification runs later. The existing
+non-delegated check already handles this by asking "does the caller have `contributor`
+*anywhere*" (`any_workspace_with_role`) rather than against one workspace. The delegated version
+extends this the same way, for two principals: `wiki_submit`'s `acting_as` branch computes the
+agent's own contributor-workspace set and the represented user's contributor-workspace set
+independently, then requires their **intersection** to be non-empty — "somewhere in common" rather
+than one named workspace, the direct two-principal generalization of the one-principal check
+already there. Like the existing non-delegated path, this doesn't guarantee the workspace
+classification eventually picks is one where both hold access — that's a pre-existing property of
+how classification routes purely on content, identical for delegated and non-delegated submissions
+alike, not a gap this step introduces or is scoped to fix.
+
+**Mechanism**: `api._store` (already shared by REST's `POST /sources` and MCP's `wiki_submit`
+since step 45) gained one new optional parameter, `extra_detail: dict | None = None`, merged into
+the first `ingestion_log` entry's `detail` alongside the existing `object_key`. `wiki_submit`
+passes `{"acting_agent": "user:<agent's own id>"}` only on the delegated path; the non-delegated
+path passes nothing, so `entry.detail` looks exactly as it always has when `acting_as` is omitted
+— verified directly (`"acting_agent" not in entry.detail` for a plain submission).
+
+**A known, deliberate scope boundary, not a silent gap**: `wiki_get_source_status`'s existing
+submitter-only check (`source.submitted_by != f"user:{principal.id}"`) is unchanged — it still
+matches the literal `submitted_by`, which for a delegated submission is the *represented user*,
+not the calling agent. The agent that made a delegated submission therefore can't poll its status
+itself. `09` §5 never names status-checking as part of delegation's scope, and the represented
+user — who by the AuthZ rule's own requirement holds a real, independent `contributor` credential
+— can always check it themselves, so this isn't a capability gap for the represented user, only a
+convenience gap for the agent. Flagged in `mcp_server.py`'s own module docstring rather than
+silently narrowing `wiki_submit`'s scope without saying so.
+
+**Live-verified against real dev Postgres via the real `python -m karpwiki.mcp_server` stdio
+subprocess entry point** (not committed, same mechanism step 45's own stdio live check used): two
+real principals, both granted `contributor` — a real delegated submission succeeded, with the
+real `raw_source.submitted_by` recording the represented user and the real `ingestion_log` entry's
+`detail.acting_agent` recording the calling agent. A second real call, delegating to a principal
+holding only `reader`, was correctly rejected with the intersection-empty message. Cleaned up the
+throwaway workspace and the one real `raw_source` row the successful delegated call created
+(classification had already run against it for real by cleanup time, parking it at
+`pending_review` — cleaned up regardless of which state it reached, since it's throwaway data
+either way).
+
+**Spec touch-point**: none required — `09` §5 already fully specifies this feature; this section
+records the target-workspace adaptation and the `wiki_get_source_status` scope boundary.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

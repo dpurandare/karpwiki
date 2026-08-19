@@ -118,8 +118,11 @@ create_mcp_server().run(transport="streamable-http", host="0.0.0.0", port=8001)
 `stdio` has no per-call HTTP headers at all, so it resolves one identity at process startup from
 `KARPWIKI_MCP_USER`/`KARPWIKI_MCP_GROUPS` env vars (mirroring the REST trusted-header names) and
 reuses it for every tool call in that process — the same lightweight stand-in
-`TrustedHeaderAuthenticator` itself is (real OIDC/SAML/API-key auth is step 47, unaffected). On-
-behalf-of delegation for `wiki_submit` isn't built yet (step 46).
+`TrustedHeaderAuthenticator` itself is (real OIDC/SAML/API-key auth is step 47, unaffected).
+`wiki_submit` supports on-behalf-of delegation via an `acting_as="user:<id>"` argument (09 §5,
+step 46) — both the calling agent and the represented user must independently hold `contributor`
+access somewhere in common, and the represented user (not the agent) is recorded as the
+submitter.
 
 Configuration is environment variables, listed with their defaults in
 [`.env.example`](.env.example). `.env` is gitignored and loaded automatically; real environment

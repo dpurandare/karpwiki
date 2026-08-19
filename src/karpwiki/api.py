@@ -1471,9 +1471,19 @@ async def _replay(
 
 
 async def _store(
-    session: AsyncSession, payload: bytes, filename: str, *, submitted_by: str
+    session: AsyncSession,
+    payload: bytes,
+    filename: str,
+    *,
+    submitted_by: str,
+    extra_detail: dict | None = None,
 ) -> RawSource:
-    """Write the object, create the raw_source row, and open its ingestion_log history."""
+    """Write the object, create the raw_source row, and open its ingestion_log history.
+
+    `extra_detail` merges into that first log entry's `detail` — currently only the MCP
+    `wiki_submit` tool's on-behalf-of path (09 §5, phase2-tasklist.md step 46) uses it, to
+    record the calling agent's own identity for audit without a new core field ("no new
+    core field required" is 09 §5's own wording)."""
     source_id = uuid.uuid4()
     # Staged outside any workspace prefix: 02 §2's /{workspace_id}/sources/... scheme
     # cannot apply yet because 03 §2 accepts the source before the workspace is known.
@@ -1498,7 +1508,7 @@ async def _store(
             from_state=None,
             to_state=PipelineState.submitted,
             actor=submitted_by,
-            detail={"object_key": object_key},
+            detail={"object_key": object_key, **(extra_detail or {})},
         )
     )
     # 03 §5: every submission gets an always-on informational review item, unconditionally

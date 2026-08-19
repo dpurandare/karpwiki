@@ -17,6 +17,7 @@ from datetime import date
 
 import pytest
 from mcp.client.client import Client
+from sqlalchemy import select
 
 from karpwiki import mcp_server, search, versioning
 from karpwiki.auth import Principal
@@ -327,3 +328,99 @@ async def test_wiki_rollback_page_end_to_end(
     await session.refresh(refreshed)
     new_version = await session.get(PageVersion, refreshed.current_version_id)
     assert "v1 body" in new_version.content
+
+
+# --- wiki_submit on-behalf-of delegation (09 §5, phase2-tasklist.md step 46) --------------
+
+
+async def test_wiki_submit_acting_as_succeeds_when_both_have_contributor(
+    client, session, workspace, mcp_client_factory, dispatched, monkeypatch
+):
+    session.add(AccessPolicy(workspace_id=workspace.workspace_id, principal="alice", role=Role.contributor))
+    await session.commit()
+    monkeypatch.setenv("KARPWIKI_MCP_USER", "deepak")  # the agent's own credential
+
+    async with mcp_client_factory() as mcp_client:
+        is_error, body = await _call(
+            mcp_client, "wiki_submit", text="On alice's behalf.", acting_as="user:alice"
+        )
+    assert not is_error
+    assert dispatched["classify_source"] == [body["source_id"]]
+
+    from karpwiki.models import IngestionLog
+
+    source_id = uuid.UUID(body["source_id"])
+    entry = (
+        await session.execute(
+            select(IngestionLog).where(IngestionLog.source_id == source_id, IngestionLog.from_state.is_(None))
+        )
+    ).scalar_one()
+    assert entry.actor == "user:alice"
+    assert entry.detail["acting_agent"] == "user:deepak"
+
+    from karpwiki.models import RawSource
+
+    source = await session.get(RawSource, source_id)
+    assert source.submitted_by == "user:alice"
+
+
+async def test_wiki_submit_acting_as_rejects_when_represented_user_lacks_access(
+    client, session, workspace, mcp_client_factory, monkeypatch
+):
+    await session.commit()
+    monkeypatch.setenv("KARPWIKI_MCP_USER", "deepak")  # contributor
+    async with mcp_client_factory() as mcp_client:
+        # casey is only a reader on `workspace` (client fixture default) -- not enough.
+        is_error, text = await _call(
+            mcp_client, "wiki_submit", text="Should be rejected.", acting_as="user:casey"
+        )
+    assert is_error
+    assert "contributor" in text
+
+
+async def test_wiki_submit_acting_as_rejects_when_agent_lacks_access(
+    client, session, workspace, mcp_client_factory, monkeypatch
+):
+    session.add(AccessPolicy(workspace_id=workspace.workspace_id, principal="alice", role=Role.contributor))
+    await session.commit()
+    monkeypatch.setenv("KARPWIKI_MCP_USER", "casey")  # reader only -- the agent itself lacks access
+    async with mcp_client_factory() as mcp_client:
+        is_error, _ = await _call(
+            mcp_client, "wiki_submit", text="Should be rejected.", acting_as="user:alice"
+        )
+    assert is_error
+
+
+async def test_wiki_submit_acting_as_rejects_malformed_claim(
+    client, session, workspace, mcp_client_factory, monkeypatch
+):
+    await session.commit()
+    monkeypatch.setenv("KARPWIKI_MCP_USER", "deepak")
+    async with mcp_client_factory() as mcp_client:
+        is_error, text = await _call(mcp_client, "wiki_submit", text="Bad claim.", acting_as="alice")
+    assert is_error
+    assert "user:<id>" in text
+
+
+async def test_wiki_submit_without_acting_as_is_unaffected(
+    client, session, workspace, mcp_client_factory, dispatched, monkeypatch
+):
+    """No behavior change to the plain (non-delegated) path — submitted_by is still the
+    calling identity itself, no acting_agent detail recorded."""
+    await session.commit()
+    monkeypatch.setenv("KARPWIKI_MCP_USER", "deepak")
+    async with mcp_client_factory() as mcp_client:
+        is_error, body = await _call(mcp_client, "wiki_submit", text="Ordinary submission.")
+    assert not is_error
+
+    from karpwiki.models import IngestionLog, RawSource
+
+    source_id = uuid.UUID(body["source_id"])
+    source = await session.get(RawSource, source_id)
+    assert source.submitted_by == "user:deepak"
+    entry = (
+        await session.execute(
+            select(IngestionLog).where(IngestionLog.source_id == source_id, IngestionLog.from_state.is_(None))
+        )
+    ).scalar_one()
+    assert "acting_agent" not in entry.detail

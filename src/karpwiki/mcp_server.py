@@ -22,8 +22,14 @@ already look — extracting a shared helper for each would be pure ceremony.
   precedent `TrustedHeaderAuthenticator` itself set in Phase 1 ("so Phase 1 need not wait
   on an IdP"); real OIDC/SAML/API-key auth (step 47) swaps in later, unaffected.
 
-On-behalf-of delegation for `wiki_submit` (09 §5) is step 46, not built here — every tool
-call authenticates as the calling agent's own credential only, for now.
+**On-behalf-of delegation** (`wiki_submit`'s `acting_as` argument, 09 §5, phase2-tasklist.md
+step 46): the only delegated operation 06 §2 names. Every other tool authenticates as the
+calling agent's own credential only. `wiki_get_source_status`'s submitter-only check is
+NOT extended for this — it still matches the literal `submitted_by` (the represented
+user, for a delegated submission), so the calling agent itself can't poll status on a
+submission it made on someone else's behalf. Not named anywhere in `09` §5, and a real,
+known gap rather than a silent omission — the represented user (who does have a direct
+credential, by the AuthZ check's own requirement) can always check it themselves.
 
 `wiki_submit` accepts pasted text only, not a file/URL upload — `POST /sources`'s other
 two input modes don't map cleanly onto MCP's JSON-shaped tool arguments, and every
@@ -185,18 +191,57 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
             return {"items": [api._workspace_body(w) for w in found]}
 
     @mcp.tool()
-    async def wiki_submit(ctx: Context, text: str) -> dict:
-        """Submit a pasted-text document on the caller's behalf (03 §2) — still goes
-        through the full pipeline, including the `submission` review item. Maps to
-        `POST /sources` (text mode only — see module docstring)."""
+    async def wiki_submit(ctx: Context, text: str, acting_as: str | None = None) -> dict:
+        """Submit a pasted-text document — still goes through the full pipeline,
+        including the `submission` review item. Maps to `POST /sources` (text mode
+        only — see module docstring).
+
+        `acting_as` (format `"user:<id>"`, phase2-tasklist.md step 46, 09 §5) lets the
+        calling agent submit on a represented end user's behalf: AuthZ requires BOTH the
+        agent's own credential and the represented user to independently hold
+        `contributor` access somewhere in common — whichever is more restrictive
+        applies, so an agent can't use its own broader access to submit "as" a user who
+        couldn't have submitted there themselves. On success, `submitted_by` (and any
+        resulting page's `author`) record the represented user, not the agent; the
+        agent's own identity is recorded in the `ingestion_log` entry's `detail` for
+        audit, no new core field. Omit `acting_as` for an ordinary, non-delegated
+        submission as the calling identity itself."""
         principal = _resolve_principal(ctx)
         async with session_scope() as session:
-            if not await any_workspace_with_role(
-                session, principal=principal, required=Role.contributor
-            ):
-                raise McpAuthError("Submitting requires the contributor role in at least one workspace.")
+            agent_workspaces = set(
+                await any_workspace_with_role(session, principal=principal, required=Role.contributor)
+            )
+            if acting_as is None:
+                if not agent_workspaces:
+                    raise McpAuthError(
+                        "Submitting requires the contributor role in at least one workspace."
+                    )
+                submitted_by = f"user:{principal.id}"
+                extra_detail = None
+            else:
+                if not acting_as.startswith("user:"):
+                    raise McpAuthError('acting_as must be in the form "user:<id>" (09 §5).')
+                acted_id = acting_as.removeprefix("user:")
+                acted_workspaces = set(
+                    await any_workspace_with_role(
+                        session, principal=Principal(id=acted_id), required=Role.contributor
+                    )
+                )
+                if not (agent_workspaces & acted_workspaces):
+                    raise McpAuthError(
+                        "On-behalf-of submission requires both the calling agent and the "
+                        "represented user to independently hold the contributor role "
+                        "somewhere in common (09 §5) — whichever is more restrictive applies."
+                    )
+                submitted_by = acting_as
+                extra_detail = {"acting_agent": f"user:{principal.id}"}
+
             source = await api._store(
-                session, text.encode(), "pasted.txt", submitted_by=f"user:{principal.id}"
+                session,
+                text.encode(),
+                "pasted.txt",
+                submitted_by=submitted_by,
+                extra_detail=extra_detail,
             )
             body = {
                 "source_id": str(source.source_id),
