@@ -11,8 +11,8 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–41 done, tracks 2a, 2b, and 2c all complete.** Track 2c's closing
-verify (step 42) is next, then track 2d. Phase 1 (steps 1–21,
+**Status (2026-08-19): steps 22–42 done, tracks 2a, 2b, and 2c all complete and closed out.**
+Track 2d (Full API + MCP + Horizontal Scaling, steps 43+) is next. Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -300,7 +300,17 @@ is a real Authenticator implementation using that pick, not a library search.
     not fixed as part of this step. See [09](09-implementation-notes.md) §44.
 42. **Verify**: seed stale, orphaned, superseded, and duplicate content; run the advisor; confirm
     review items appear in the existing queue with correct evidence and resolve through the same
-    endpoints ingest-time items already use.
+    endpoints ingest-time items already use. **Done** — `tests/test_end_to_end_2c.py` (new,
+    committed) seeds all five signals (stale, orphaned, superseded source, near-duplicate pair,
+    contradicting pair) in one workspace, runs all five detectors, and resolves every resulting
+    item through the real `GET /review-items`/`POST /review-items/{id}/resolve` endpoints — mocked
+    LLM, no broker, matching steps 29/35's own closing-verify convention. Found a real (non-bug)
+    overlap while seeding: most pages are incidentally also orphans by the Orphan Detector's own
+    definition, fixed by giving non-orphan-detector pages a `query_log` entry so each detector's
+    evidence assertion stays cleanly attributable. Live-verified the one combination no prior
+    step's check had exercised together: a Contradiction Detector item raised by a real
+    `gpt-5-nano` call, resolved through the real running HTTP gateway. See
+    [09](09-implementation-notes.md) §45. **Track 2c (Maintenance Advisor) is now fully closed.**
 
 ## 2d — Full API + MCP + Horizontal Scaling
 

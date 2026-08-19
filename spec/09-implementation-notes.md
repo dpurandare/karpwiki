@@ -2009,5 +2009,49 @@ scheduler works, not to curate what it sweeps.
 **Spec touch-point**: none required — `05` §2 already frames scheduling as scheduler-owned tuning;
 this section records the cadence/env-var split, the tiering mechanism, and the beat permission fix.
 
+## 45. Track 2c Closing Verify (Phase 2 Step 42)
+
+Ties together, through the same surfaces ingest-time review items already use, what steps 36-41
+built individually: all five detectors, one consolidated queue, resolution through the real
+`POST /review-items/{id}/resolve` endpoint — the same pattern step 29 (2a) and step 35 (2b) each
+closed their own track with.
+
+**`tests/test_end_to_end_2c.py` (new, committed)**: seeds one workspace with all five signals at
+once — a stale page, an orphaned page, a superseded source past retention, a near-duplicate pair,
+and a contradicting pair — runs each detector's real task body directly (`tasks._detect_*`,
+`task_db`), and resolves every resulting item through the real HTTP `client` fixture: `GET
+/review-items` returns exactly 5 items with correct per-kind evidence, each resolved via `POST
+.../resolve`, ending with an empty queue. Mocked LLM (a fake `call` for the Contradiction
+Detector, the only one that spends one at detection) and no broker (the autouse `dispatched`
+fixture) — fast and deterministic, matching test_end_to_end_2a.py/2b.py's own convention.
+
+**A real, useful design conflict found while writing the seed data, not a bug**: nearly every
+concept page seeded for one detector is *also* a legitimate orphan (zero inbound `page_link` rows,
+zero `query_log` appearances) by the Orphan Detector's own correct definition — the five
+signals aren't independent axes in a shared workspace, they overlap by construction whenever
+content isn't deliberately cross-linked or queried. Fixed by giving every non-orphan-detector page
+a `query_log` entry, which excludes it from orphan candidacy without affecting any other detector
+(staleness keys off `index_status`/version age, duplicate/contradiction key off page bodies —
+none of them read `query_log`) — keeps each detector's evidence assertion cleanly attributable to
+its own seed rather than accidentally asserting on a moving target. Also surfaced (already known
+from step 36, reconfirmed here): the Staleness Detector's Signal 1 and Signal 2 land in the *same*
+batched `reindex` item, so a workspace seeded with both a stale page and a superseded-source page
+gets one item covering both, not two.
+
+**Live-verified against the real dev Postgres, a real running gateway (`uvicorn
+karpwiki.api:app`), and a real `gpt-5-nano` call** (not committed) — closing the one combination
+no prior step's live check had actually exercised together: a Contradiction Detector item, raised
+by a real model call (not the committed test's fake `call`), resolved through the real HTTP
+`POST /review-items/{id}/resolve` endpoint (not a direct Python call, which is what step 40's own
+live check used). A real conflicting-claim pair (the same proven "Friday deploys: allowed vs.
+banned" pair from step 40/41) was correctly confirmed, listed via `GET /review-items`, and
+resolved via `archive page` over real HTTP — all in ~10s. The throwaway workspace this created was
+deleted immediately after (same cleanup precedent step 41 established once `celery-beat` went
+live), and the standalone `uvicorn` process started for this check was stopped afterward — it
+isn't part of `docker-compose.yml`'s persistent dev stack.
+
+**Spec touch-point**: none required — `05` §1's consolidated queue and resolution model were
+already fully specified; this section records the closing-verify test and its one real live gap.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)
