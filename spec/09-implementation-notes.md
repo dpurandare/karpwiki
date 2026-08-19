@@ -2576,5 +2576,84 @@ replica afterward.
 **Spec touch-point** (applied): none — `06` §2 and §5 already fully specified both claims this step
 verifies; nothing here required a wording change to either.
 
+## 54. `Connector` Model and API (Phase 2 Step 51)
+
+Track 2e (Connector Framework) starts. `02` §3 already named the full `connector` table
+(`connector_id`, `workspace_id`, `type`, `config`, `credential_ref`, `schedule`,
+`ingestion_policy`, `state`, `last_sync_cursor`, `last_run_at`) and `06` §1 already named the API
+(`connectors`: list, configure) — this step makes both real, replacing step 43's deliberate stub.
+Storage and admin CRUD only: the polling worker pool that actually runs a connector (§4/step 52),
+credential resolution against a real secrets manager (step 53), and the first concrete connector
+type (step 54 — a naming collision with this section number is coincidental, tasklist step 54 is
+the Git poller) are separate, later steps.
+
+**`workspace_id` is fixed at creation, never reassignable** — unlike `document_type`. `09` §13's
+permission boundary is "contributor on exactly one workspace, never several," and 05 §7 never
+lists reassignment as a configurable connector property the way it explicitly does for document
+types ("reassign a type's target workspace"). Reassigning would also mean atomically moving the
+connector's own `access_policy` grant (below) to a new workspace — real complexity nothing in the
+spec asks for, so `connectors.update` simply has no `workspace_id` parameter at all.
+
+**`type` is a plain string, not a closed enum.** `05` §7's own list ("Git repos, websites,
+Confluence, Notion, OpenAPI, etc.") is explicitly open-ended, and no concrete connector type is
+implemented until tasklist step 54 — inventing a registry now would be building ahead of the step
+that owns it.
+
+**`config`/`schedule`/`last_sync_cursor` are opaque JSONB**, deliberately uninterpreted at this
+step. `09` §4 calls the sync cursor "connector-type-specific"; `schedule`'s own internal shape
+(a plain interval vs. cron vs. webhook-only, per §4's "polling vs. webhook" note) is left to
+whichever step actually builds the poller (step 52) — committing to one shape now, before a real
+poller exists to consume it, would be a guess this step doesn't need to make. `02` §3 names the
+column `schedule`, not `schedule_interval_minutes` or similar, which reads as the spec itself
+leaving this open.
+
+**`credential_ref` never accepts a raw secret — a deliberate, flagged scope boundary, not an
+oversight.** `09` §13 describes the *eventual* full contract: "accepts a secret write-only on
+configure/update and never returns it; reads return the `credential_ref` plus non-sensitive
+metadata." Read literally, that implies the API's real endpoint state takes a raw secret in and
+exchanges it for a ref via the secrets manager — but that exchange is exactly what step 53
+("Credential resolution via the secrets-manager interface") is scoped to build, and no secrets
+manager integration exists yet. Storing whatever a caller passes directly into `credential_ref`
+would risk exactly what `09` §13 forbids twice over ("Connector secrets are never stored in the
+Metadata DB... any log stream") the moment an admin pastes a real API key into the field thinking
+it's write-only-and-safe. Resolved as: `credential_ref` accepts only a pointer the caller already
+holds from their *own* secrets manager — documented explicitly in the Pydantic model's docstring —
+so nothing in this step's code path ever touches a raw credential. Step 53 will need to add the
+real write-only-secret-in path; this step's `credential_ref` field name and contract can stay
+exactly as-is underneath it. Confirmed against the model, not asked of the user — no genuine two-
+sided fork remained once `09` §13's own "never stored" rule ruled out the alternative.
+
+**`connector:<connector_id>` gets its `access_policy` grant automatically, at creation time.**
+`09` §13 states the permission boundary ("granted `contributor` on exactly one workspace") as an
+established fact about every connector, but nothing else could ever create that row — there is no
+separate "invite a connector" flow the way there is for a user or group joining a workspace.
+`connectors.create` inserts both rows in one transaction. Live-verified this specifically: a real
+`POST /connectors` through the real, load-balanced gateway produced a real `access_policy` row for
+`connector:<id>` with role `contributor`, confirmed by querying real dev Postgres directly.
+
+**`ingestion_policy` stays a plain string** (`"auto"`/`"gated"`), matching
+`ingestion.check_duplicates`'s own existing parameter convention exactly rather than introducing a
+new enum for a two-value field nothing else in the codebase treats as one. Validated at the API
+layer (400 on anything else) since, unlike `ingestion.py`'s call sites, this is admin-supplied
+external input.
+
+**Migration required an explicit downgrade fix, caught by this project's own round-trip
+discipline, not assumed clean.** Alembic's `create_table`/`drop_table` autogenerate doesn't create
+a symmetric `DROP TYPE` for the new `connector_state` enum — `drop_table` alone leaves the
+Postgres enum type orphaned, so a downgrade-then-upgrade round trip failed with `type
+"connector_state" already exists` on the first attempt. Fixed by adding an explicit
+`sa.Enum(name='connector_state').drop(op.get_bind(), checkfirst=True)` to `downgrade()` after the
+table drop. Re-verified clean: upgrade → downgrade → upgrade round trip against real dev Postgres,
+and a full `upgrade head` against a genuinely empty throwaway database, both clean.
+
+**Live-verified against a real, load-balanced gateway** (reusing step 49's `gateway`/`nginx`
+infra, rebuilt with the new image): real `POST /connectors` → `GET /connectors` →
+`POST /connectors/{id}` (disable) all succeeded through `nginx`'s published port against real dev
+Postgres; a real unauthorized caller correctly got `403`. Cleaned up the throwaway workspace/
+connector afterward.
+
+**Spec touch-point**: none required — `02` §3 and `06` §1 already fully specified the table and
+API this step builds; nothing here needed a wording change to either.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

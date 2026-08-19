@@ -135,6 +135,16 @@ class Role(enum.Enum):
     admin = "admin"
 
 
+class ConnectorState(enum.Enum):
+    """09 §13: an auth failure disables a connector rather than retrying, distinctly from
+    an admin-initiated disable — so the Notification Service / operational-health surface
+    (05 §8, phase2-tasklist.md step 55) can tell the two apart."""
+
+    enabled = "enabled"
+    disabled = "disabled"
+    disabled_auth = "disabled_auth"
+
+
 class Workspace(Base):
     __tablename__ = "workspace"
 
@@ -440,3 +450,47 @@ class AccessPolicy(Base):
     )
     principal: Mapped[str] = mapped_column(String(255), primary_key=True)
     role: Mapped[Role] = mapped_column(Enum(Role, name="role"))
+
+
+class Connector(Base):
+    """An ingestion connector (02 §3, phase2-tasklist.md step 51) — "just another
+    submission source" (03 §2): its polling worker pool (§4/step 52, not yet built) creates
+    a normal `raw_source` per discovered item, `submitted_by=connector:<connector_id>`.
+
+    `workspace_id` is fixed at creation and never reassigned (unlike `document_type`) — 09
+    §13's permission boundary is "contributor on exactly one workspace, never several,"
+    and 05 §7 never lists reassignment as a configurable connector property the way it
+    does for document types.
+
+    `type` is a plain string, not a closed enum: 05 §7's own list ("Git repos, websites,
+    Confluence, Notion, OpenAPI, etc.") is explicitly open-ended, and no concrete connector
+    type is implemented until step 54.
+
+    `config`/`schedule`/`last_sync_cursor` are opaque JSONB, connector-type-specific (09
+    §4's "connector-type-specific" cursor shape; `schedule`'s own internal shape — interval
+    vs. cron vs. webhook-only — is left to whichever step actually builds the poller, step
+    52).
+
+    `credential_ref` is a pointer into the deployment's secrets manager, never a raw secret
+    (09 §13: "Connector secrets are never stored in the Metadata DB... any log stream").
+    Step 51 does not yet build the secrets-manager write path (that's step 53) — callers
+    must already hold a ref from their own secrets manager; nothing in this table or API
+    ever accepts or stores a raw credential value.
+    """
+
+    __tablename__ = "connector"
+
+    connector_id: Mapped[uuid.UUID] = _uuid_pk()
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspace.workspace_id"), index=True)
+    type: Mapped[str] = mapped_column(String(128))
+    config: Mapped[dict] = mapped_column(JSONB, default=dict)
+    credential_ref: Mapped[str | None] = mapped_column(String(512))
+    schedule: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # 03 §7's auto|gated, same convention as ingestion.check_duplicates' own parameter —
+    # a plain string, not an enum, matching that existing precedent.
+    ingestion_policy: Mapped[str] = mapped_column(String(16), default="auto")
+    state: Mapped[ConnectorState] = mapped_column(
+        Enum(ConnectorState, name="connector_state"), default=ConnectorState.enabled
+    )
+    last_sync_cursor: Mapped[dict] = mapped_column(JSONB, default=dict)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

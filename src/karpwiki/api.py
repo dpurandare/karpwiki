@@ -16,8 +16,9 @@ execute — 05 §7, 09 §11 — the batch-loop/commit-per-batch boundary belongs
 `bulk_move.py`, matching every other module's "caller commits" convention), and phase2-
 tasklist.md step 43 (`pages` get/list — 06 §1's other row, previously unbuilt since
 version history/rollback only ever took a `page_id` path param, never a listing call to
-discover one; `sources` list — 05 §7's admin Raw Source Browser; `connectors` list/
-configure, stubbed until track 2e's real `Connector` model lands, step 51).
+discover one; `sources` list — 05 §7's admin Raw Source Browser), and step 51
+(`connectors` list/create/update — the real `Connector` model and its own admin CRUD,
+storage only; the polling worker pool that actually runs one is step 52).
 
 Not implemented here, deliberately: dedicated-index score normalization (04 §4) is step
 26 — this endpoint only ever queries the one shared index.
@@ -40,6 +41,7 @@ from . import (
     bulk_move,
     classify,
     config,
+    connectors,
     dedicated_index,
     document_types,
     ingestion,
@@ -64,6 +66,8 @@ from .auth import (
 from .db import SessionLocal
 from .models import (
     AccessPolicy,
+    Connector,
+    ConnectorState,
     DocumentType,
     IdempotencyRecord,
     PageStatus,
@@ -405,6 +409,69 @@ async def _admin_document_type(
     ):
         raise ApiError(403, "forbidden", "This operation requires the admin role.")
     return doc_type
+
+
+INGESTION_POLICIES = ("auto", "gated")
+
+
+class CreateConnectorRequest(BaseModel):
+    """POST /connectors body (06 §1, 05 §7, 09 §13, phase2-tasklist.md step 51).
+
+    `credential_ref` must already be a pointer into the deployment's own secrets manager —
+    step 51 does not build the secrets-manager write path (step 53), so nothing here ever
+    accepts or stores a raw credential value (09 §13's "never stored in the Metadata DB").
+    `config`/`schedule` are opaque, connector-type-specific JSON (no type is implemented
+    until step 54, so nothing here validates their shape).
+    """
+
+    workspace_id: str
+    type: str
+    config: dict = {}
+    credential_ref: str | None = None
+    schedule: dict = {}
+    ingestion_policy: str = "auto"
+
+
+class UpdateConnectorRequest(BaseModel):
+    """POST /connectors/{id} body — only supplied fields change. `workspace_id` is
+    deliberately not reassignable, see `models.Connector`'s docstring."""
+
+    type: str | None = None
+    config: dict | None = None
+    credential_ref: str | None = None
+    schedule: dict | None = None
+    ingestion_policy: str | None = None
+    state: ConnectorState | None = None
+
+
+def _connector_body(connector: Connector) -> dict[str, Any]:
+    return {
+        "connector_id": str(connector.connector_id),
+        "workspace_id": connector.workspace_id,
+        "type": connector.type,
+        "config": connector.config,
+        # The pointer name only, per 09 §13 — never the secret it points at, which this
+        # table never holds in the first place.
+        "credential_ref": connector.credential_ref,
+        "schedule": connector.schedule,
+        "ingestion_policy": connector.ingestion_policy,
+        "state": connector.state.value,
+        "last_sync_cursor": connector.last_sync_cursor,
+        "last_run_at": connector.last_run_at.isoformat() if connector.last_run_at else None,
+    }
+
+
+async def _admin_connector(
+    session: AsyncSession, principal: Principal, connector_id: uuid.UUID
+) -> Connector:
+    connector = await session.get(Connector, connector_id)
+    if connector is None:
+        raise ApiError(404, "not_found", f"No connector {connector_id}.")
+    if not await has_role(
+        session, principal=principal, workspace_id=connector.workspace_id, required=Role.admin
+    ):
+        raise ApiError(403, "forbidden", "This operation requires the admin role.")
+    return connector
 
 
 class CreateWorkspaceRequest(BaseModel):
@@ -945,12 +1012,8 @@ def _register_routes(app: FastAPI) -> None:
         session: Annotated[AsyncSession, Depends(_session)],
         workspace_id: str | None = None,
     ):
-        """06 §1's `connectors` list — stubbed until track 2e's real `Connector` model and
-        polling worker pool land (phase2-tasklist.md step 51; execution model already
-        designed, 09 §4). Real admin auth (same shape as `document-types`' list) so this
-        endpoint's access behavior is meaningful now rather than deferred along with the
-        data; always returns empty, since nothing is stored yet — a deliberate stub, not a
-        silently-incomplete real implementation."""
+        """06 §1's `connectors` list (phase2-tasklist.md step 51) — same admin-scoping
+        shape as `document-types`' list."""
         if workspace_id is not None:
             if not await has_role(
                 session, principal=principal, workspace_id=workspace_id, required=Role.admin
@@ -958,30 +1021,80 @@ def _register_routes(app: FastAPI) -> None:
                 raise ApiError(
                     403, "forbidden", "Listing connectors for this workspace requires the admin role."
                 )
+            found = await connectors.list_for_workspace(session, workspace_id=workspace_id)
         else:
-            if not await any_workspace_with_role(session, principal=principal, required=Role.admin):
+            admin_workspaces = await any_workspace_with_role(
+                session, principal=principal, required=Role.admin
+            )
+            if not admin_workspaces:
                 raise ApiError(
                     403, "forbidden", "Listing connectors requires the admin role somewhere."
                 )
-        return {"items": []}
+            found = await connectors.list_for_workspaces(session, workspace_ids=admin_workspaces)
+        return {"items": [_connector_body(c) for c in found]}
 
-    @app.post("/connectors")
-    async def configure_connector(
+    @app.post("/connectors", status_code=201)
+    async def create_connector(
         principal: Annotated[Principal, Depends(_principal)],
         session: Annotated[AsyncSession, Depends(_session)],
+        payload: CreateConnectorRequest,
     ):
-        """Deliberately refuses rather than silently accepting and discarding a payload —
-        no `Connector` storage exists until track 2e (step 51). Still admin-gated first
-        (no request body/workspace_id defined yet, so "admin somewhere," the same
-        bootstrap check `POST /workspaces` uses) — a non-admin shouldn't get a different
-        response shape than what 06 §1's `connectors` caller column already promises."""
-        if not await any_workspace_with_role(session, principal=principal, required=Role.admin):
-            raise ApiError(403, "forbidden", "Configuring connectors requires the admin role somewhere.")
-        raise ApiError(
-            501,
-            "not_implemented",
-            "Connector configuration is not yet implemented (phase2-tasklist.md track 2e).",
+        """06 §1's `connectors` configure (create half), 09 §13 — admin-gated on the
+        connector's own target workspace, same as `POST /document-types`."""
+        if not await has_role(
+            session, principal=principal, workspace_id=payload.workspace_id, required=Role.admin
+        ):
+            raise ApiError(
+                403, "forbidden", "Creating a connector requires the admin role in its workspace."
+            )
+        if payload.ingestion_policy not in INGESTION_POLICIES:
+            raise ApiError(
+                400,
+                "invalid_request",
+                f"ingestion_policy must be one of {INGESTION_POLICIES}.",
+                {"ingestion_policy": payload.ingestion_policy},
+            )
+        connector = await connectors.create(
+            session,
+            workspace_id=payload.workspace_id,
+            type=payload.type,
+            config=payload.config,
+            credential_ref=payload.credential_ref,
+            schedule=payload.schedule,
+            ingestion_policy=payload.ingestion_policy,
         )
+        await session.commit()
+        return _connector_body(connector)
+
+    @app.post("/connectors/{connector_id}")
+    async def update_connector(
+        connector_id: uuid.UUID,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        payload: UpdateConnectorRequest,
+    ):
+        """06 §1's `connectors` configure (update half) — schedule/policy/credential/state,
+        09 §13's admin-driven enable/disable included via `state`."""
+        connector = await _admin_connector(session, principal, connector_id)
+        if payload.ingestion_policy is not None and payload.ingestion_policy not in INGESTION_POLICIES:
+            raise ApiError(
+                400,
+                "invalid_request",
+                f"ingestion_policy must be one of {INGESTION_POLICIES}.",
+                {"ingestion_policy": payload.ingestion_policy},
+            )
+        updated = await connectors.update(
+            session,
+            connector=connector,
+            type=payload.type,
+            config=payload.config,
+            credential_ref=payload.credential_ref,
+            schedule=payload.schedule,
+            ingestion_policy=payload.ingestion_policy,
+            state=payload.state,
+        )
+        await session.commit()
+        return _connector_body(updated)
 
     @app.get("/workspaces")
     async def list_workspaces(

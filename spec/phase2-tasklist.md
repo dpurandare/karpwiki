@@ -11,8 +11,8 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–50 done, tracks 2a, 2b, 2c, and 2d all complete and closed out;
-track 2e (Connector Framework) not yet started.** Phase 1 (steps 1–21,
+**Status (2026-08-19): steps 22–51 done, tracks 2a, 2b, 2c, and 2d all complete and closed out;
+track 2e (Connector Framework) in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -478,7 +478,25 @@ is a real Authenticator implementation using that pick, not a library search.
 
 51. `Connector` model (schema already named in [09](09-implementation-notes.md) §13,
     [02](02-storage-and-indexing.md) §3) + `connectors` API
-    ([06](06-api-mcp-and-scaling.md) §1).
+    ([06](06-api-mcp-and-scaling.md) §1). **Done** — `models.Connector` (new table, migration
+    `7c8a26059991`) + `connectors.py` (create/list/update) + real `GET`/`POST /connectors` and
+    new `POST /connectors/{id}`, replacing step 43's deliberate stub. Storage and admin CRUD
+    only — the polling worker pool (step 52), credential resolution via a secrets manager (step
+    53), and the first concrete connector type (step 54) are separate. `workspace_id` fixed at
+    creation, never reassigned (09 §13's "exactly one workspace" boundary); `type`/`config`/
+    `schedule`/`last_sync_cursor` stay open-ended (no connector type exists yet to interpret
+    them); `credential_ref` accepts only a caller-supplied secrets-manager pointer, never a raw
+    secret — step 53's own scope, kept out of this step's code path entirely, since storing a
+    pasted-in raw secret would violate 09 §13's "never stored in the Metadata DB" rule.
+    `connectors.create` auto-grants the new `connector:<id>` principal `contributor` on its one
+    workspace in the same transaction, since nothing else could ever establish that grant. A
+    migration round-trip bug caught by this project's own discipline, not assumed clean:
+    `drop_table` alone doesn't drop the new `connector_state` enum type, so downgrade-then-
+    upgrade failed until an explicit `DROP TYPE` was added to `downgrade()`; re-verified clean
+    against real dev Postgres and a genuinely empty database. Live-verified against the real,
+    load-balanced gateway (step 49's infra, rebuilt): real create → list → disable, a real
+    unauthorized 403, and the real `access_policy` grant confirmed by querying Postgres
+    directly. See [09](09-implementation-notes.md) §54.
 52. Connector polling worker pool — fetch, diff against a per-connector cursor, create a
     `raw_source` — fully designed already ([09](09-implementation-notes.md) §4).
 53. Credential resolution via the secrets-manager interface
