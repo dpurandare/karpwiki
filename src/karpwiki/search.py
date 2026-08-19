@@ -35,7 +35,7 @@ from .models import (
     Workspace,
     WikiPage,
 )
-from .search_result import SearchResult, extract_citations
+from .search_result import DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT, SearchResult, extract_citations
 
 # Postgres text-search configuration. A per-workspace analyzer is a multi-language
 # roadmap item (08 §3); one configuration is correct for Phase 1.
@@ -113,7 +113,7 @@ async def search(
     *,
     query: str,
     workspace_ids: list[str],
-    limit: int = 20,
+    limit: int = DEFAULT_SEARCH_LIMIT,
     include_drafts: bool = False,
     page_types: list[str] | None = None,
     tags: list[str] | None = None,
@@ -129,6 +129,7 @@ async def search(
     read the frontmatter already stored on the indexed version, so no extra join or
     denormalized column is needed for them.
     """
+    limit = min(limit, MAX_SEARCH_LIMIT)
     if not workspace_ids or not query.strip():
         return []
 

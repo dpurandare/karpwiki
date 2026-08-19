@@ -50,15 +50,35 @@ OBJECT_STORE_URL = _pin_object_store(
 
 CELERY_BROKER_URL = os.environ.get("KARPWIKI_CELERY_BROKER_URL", "redis://localhost:6379/0")
 
+# Celery's Redis transport doesn't notice a dropped consumer — it only redelivers an
+# unacked message after this elapses (default 3600s is far too slow, found live via a real
+# kill-and-restart check, 09 §36). 600s comfortably covers the slowest real path
+# (curate_source's several sequential LLM-touched page writes) while bounding genuine-crash
+# recovery to minutes.
+CELERY_VISIBILITY_TIMEOUT_SECONDS = int(
+    os.environ.get("KARPWIKI_CELERY_VISIBILITY_TIMEOUT_SECONDS", "600")
+)
+
 # Dedicated Full-Text Index backend for large/isolated workspaces (02 §4, 08 §2's pick;
 # phase2-tasklist.md step 26). Only read for a workspace with `dedicated_index=True`.
 OPENSEARCH_URL = os.environ.get("KARPWIKI_OPENSEARCH_URL", "http://localhost:9200")
+# One shared index holds every dedicated workspace's pages (dedicated_index.py) — a
+# deployment sharing one OpenSearch cluster across multiple karpwiki environments needs a
+# distinct name per environment to avoid collision.
+OPENSEARCH_INDEX_NAME = os.environ.get("KARPWIKI_OPENSEARCH_INDEX_NAME", "karpwiki-pages")
 
 # Platform-default model per agent role, as a Pydantic AI "provider:model" string.
 # A workspace's SCHEMA.md `llm.<role>.model` takes precedence (09 §16); the API key is
 # never configured here — it resolves from the secrets manager at call time (09 §13).
 LLM_CLASSIFIER_MODEL = os.environ.get("KARPWIKI_LLM_CLASSIFIER_MODEL", "")
 LLM_CURATOR_MODEL = os.environ.get("KARPWIKI_LLM_CURATOR_MODEL", "")
+
+# Retry/backoff for the three real LLM calls (llm.py) — 03 §1 requires retry-with-backoff
+# but names no specific count/delay, so these are this implementation's defaults (doubling
+# from the base delay, capping a stuck call rather than blocking a worker slot forever).
+# Deployment-wide operational tuning, not a per-workspace content threshold.
+LLM_RETRY_ATTEMPTS = int(os.environ.get("KARPWIKI_LLM_RETRY_ATTEMPTS", "3"))
+LLM_RETRY_BASE_DELAY_SECONDS = float(os.environ.get("KARPWIKI_LLM_RETRY_BASE_DELAY_SECONDS", "1.0"))
 
 # Maintenance Advisor Celery beat cadence (phase2-tasklist.md step 41, 05 §2's
 # "scheduling philosophy"). Deployment-wide operational tuning — how often *this
@@ -82,6 +102,9 @@ MAINTENANCE_CONTRADICTION_INTERVAL_HOURS = float(
 CONNECTOR_DISPATCH_INTERVAL_MINUTES = float(
     os.environ.get("KARPWIKI_CONNECTOR_DISPATCH_INTERVAL_MINUTES", "5")
 )
+# Git clone timeout (connectors_git.py, step 54) — scales with the repos a deployment's
+# connectors actually poll, which varies per deployment.
+GIT_CLONE_TIMEOUT_SECONDS = int(os.environ.get("KARPWIKI_GIT_CLONE_TIMEOUT_SECONDS", "60"))
 
 # Staleness popularity tiering (05 §2, `09` §6's SCHEMA.md `high_traffic_days`/
 # `low_traffic_days` illustrative defaults) — env-overridable like the cadence settings
@@ -106,6 +129,9 @@ OIDC_JWKS_URI = os.environ.get("KARPWIKI_OIDC_JWKS_URI", "")
 # vs `email`/`preferred_username`; `groups` is common but not standardized).
 OIDC_PRINCIPAL_CLAIM = os.environ.get("KARPWIKI_OIDC_PRINCIPAL_CLAIM", "sub")
 OIDC_GROUPS_CLAIM = os.environ.get("KARPWIKI_OIDC_GROUPS_CLAIM", "groups")
+# JWKS/discovery HTTP client timeout — network-dependent, so worth a deployment override
+# rather than a bare constant on `OidcAuthenticator`.
+OIDC_JWKS_TIMEOUT_SECONDS = float(os.environ.get("KARPWIKI_OIDC_JWKS_TIMEOUT_SECONDS", "5.0"))
 
 # Rate limiting (01 §1-2, 07 §3, 09 §14; phase2-tasklist.md step 48) — deployment-wide
 # operational tuning, the same category cadence/staleness-tiering env vars above already
@@ -120,3 +146,7 @@ RATE_LIMIT_SEARCH_PER_PRINCIPAL = int(os.environ.get("KARPWIKI_RATE_LIMIT_SEARCH
 RATE_LIMIT_SEARCH_PER_WORKSPACE = int(os.environ.get("KARPWIKI_RATE_LIMIT_SEARCH_PER_WORKSPACE", "600"))
 RATE_LIMIT_GENERAL_PER_PRINCIPAL = int(os.environ.get("KARPWIKI_RATE_LIMIT_GENERAL_PER_PRINCIPAL", "300"))
 RATE_LIMIT_GENERAL_PER_WORKSPACE = int(os.environ.get("KARPWIKI_RATE_LIMIT_GENERAL_PER_WORKSPACE", "3000"))
+
+# Taxonomy bulk-move batch size (bulk_move.py, 09 §11/§30) — larger batches finish an
+# admin's move faster but hold a longer-running transaction per batch; deployment-tunable.
+BULK_MOVE_BATCH_SIZE = int(os.environ.get("KARPWIKI_BULK_MOVE_BATCH_SIZE", "100"))

@@ -24,6 +24,7 @@ from . import advisor, connector_polling, ingestion, pipeline, search
 from . import connectors_git  # noqa: F401 — registers "git" into connector_polling.ADAPTERS (step 54)
 from .config import (
     CELERY_BROKER_URL,
+    CELERY_VISIBILITY_TIMEOUT_SECONDS,
     CONNECTOR_DISPATCH_INTERVAL_MINUTES,
     MAINTENANCE_CONTRADICTION_INTERVAL_HOURS,
     MAINTENANCE_INTERVAL_HOURS,
@@ -61,7 +62,7 @@ app.conf.task_reject_on_worker_lost = True
 # never came back at the default) — 09 §36 has the full story. 600s comfortably covers the
 # slowest real path today (curate_source: several sequential LLM-touched page writes) with
 # margin, while keeping a genuine crash's recovery bounded to minutes, not up to an hour.
-app.conf.broker_transport_options = {"visibility_timeout": 600}
+app.conf.broker_transport_options = {"visibility_timeout": CELERY_VISIBILITY_TIMEOUT_SECONDS}
 
 # Phase 2 step 41 (05 §2's "scheduling philosophy") — the two dispatcher tasks defined
 # below enumerate active workspaces at fire time (beat's own static schedule can't know

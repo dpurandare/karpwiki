@@ -2941,5 +2941,64 @@ step this time. Cleaned up the throwaway workspace/connector/source/pages afterw
 **Spec touch-point** (applied): none required — this step's own text in phase2-tasklist.md already
 specified exactly what to verify; nothing here needed a wording change.
 
+## 60. Hardcoding Remediation (post-Phase-2 code-health pass)
+
+Requested directly: a sweep of `src/karpwiki/` for hardcoded values that should be deployment
+configuration instead, following [implementation-audit.md](implementation-audit.md)'s
+code-vs-spec review. Found 7 real cases — a bare module constant standing in for what should be
+a `KARPWIKI_*` env var, same category as every existing entry in `config.py` — plus one DRY/
+missing-cap gap in the search path. All fixed directly (confirmed via AskUserQuestion rather than
+assumed), not just documented, since every fix is small, additive, and follows a pattern already
+used throughout this codebase.
+
+**Seven env vars added to `config.py`**, each read live where used (never frozen into a
+module-level constant at plain import time, except where the constant itself already lived at
+module scope and is only ever read through that module's own name — the step-48
+`_RATE_LIMIT_CATEGORIES` lesson, `09` this file's own step 48 entry): `CELERY_VISIBILITY_TIMEOUT_SECONDS`
+(`tasks.py`'s `broker_transport_options`, previously a bare `600`), `OPENSEARCH_INDEX_NAME`
+(`dedicated_index.py`'s `INDEX_NAME`, previously `"karpwiki-pages"`), `LLM_RETRY_ATTEMPTS`/
+`LLM_RETRY_BASE_DELAY_SECONDS` (`llm.py`'s `retry_transient`, previously its own module
+constants — now read from `config` on every call, not cached), `OIDC_JWKS_TIMEOUT_SECONDS`
+(`auth.py`'s `OidcAuthenticator.__init__` default `httpx.AsyncClient` timeout, previously a bare
+`5.0`), `GIT_CLONE_TIMEOUT_SECONDS` (`connectors_git.py`'s `_clone`, previously
+`_CLONE_TIMEOUT_SECONDS = 60`), and `BULK_MOVE_BATCH_SIZE` (`bulk_move.py`'s `BATCH_SIZE`,
+previously a bare `100` — kept as a module-level `bulk_move.BATCH_SIZE = config.BULK_MOVE_BATCH_SIZE`
+since `api.py` reads it as `bulk_move.BATCH_SIZE`, an existing test monkeypatches that same
+attribute name, and this module is imported once at process start like every other domain
+module).
+
+**Search limit DRY violation + missing cap, found in the same pass**: `search.search()` and
+`dedicated_index.search()` each independently declared an identical, uncapped `limit: int = 20`
+default — unlike every list endpoint's own `pagination.py` (`DEFAULT_LIST_LIMIT`/
+`MAX_LIST_LIMIT`, enforced via `limit = min(limit, MAX_LIST_LIMIT)` inside `ingestion.py`/
+`versioning.py`/`review.py`), a caller could pass an arbitrarily large `limit` straight into the
+`LIMIT :limit` SQL clause. Added `DEFAULT_SEARCH_LIMIT = 20`/`MAX_SEARCH_LIMIT = 100` to
+`search_result.py` — not `pagination.py`, since search isn't cursor-paginated (`09` §28's own
+flagged gap, still open, `phase3-tasklist.md` step 66) and `search_result.py` is the module both
+`search.py` and `dedicated_index.py` already import for their shared `SearchResult` type, avoiding
+the same circular-import problem that put `SearchResult` there in the first place (`search.py` →
+`dedicated_index.py` → `search_result.py`, one-directional). Both `search()` functions now enforce
+`limit = min(limit, MAX_SEARCH_LIMIT)` before building their query, matching the existing list
+endpoints' pattern exactly. `api.py`'s `search_endpoint`/`run_search` and `mcp_server.py`'s
+`wiki_search` — the three callers `09` §14 names as sharing this contract — now default to
+`DEFAULT_SEARCH_LIMIT` instead of each separately hardcoding `20`. This is a distinct finding from
+`phase3-tasklist.md` step 66 (the four non-search list endpoints' missing cursor pagination) —
+that gap is still open; this fix only adds a cap to `/search`'s existing non-paginated `limit`
+param, not real pagination.
+
+**Verification**: full test suite (529 tests) passes unchanged. `tests/test_llm.py`/
+`test_ingestion.py` updated to monkeypatch `config.LLM_RETRY_BASE_DELAY_SECONDS` instead of the
+now-removed `llm.LLM_RETRY_BASE_DELAY_S` module constant. Live-verified every new env var actually
+overrides its config value and propagates to the consuming module (`bulk_move.BATCH_SIZE`,
+`dedicated_index.INDEX_NAME`, `connectors_git`'s live `config.GIT_CLONE_TIMEOUT_SECONDS` read) via
+a real interpreter session with the env vars set; live-verified `search.search()` accepts and
+silently clamps an oversized `limit=99999` against the real dev Postgres database rather than
+erroring or passing it through unbounded to the `LIMIT` clause.
+
+**Spec touch-point**: none required — `09` §14's own pagination/rate-limit contract language
+already covers "deployment-wide operational tuning belongs in config," and no spec document names
+any of these seven values as anything other than an implementation-internal timeout/batch-size
+constant.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

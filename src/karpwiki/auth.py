@@ -113,7 +113,7 @@ class OidcAuthenticator:
         self._jwks_uri = jwks_uri
         self._principal_claim = principal_claim
         self._groups_claim = groups_claim
-        self._http = http_client or httpx.AsyncClient(timeout=5.0)
+        self._http = http_client or httpx.AsyncClient(timeout=config.OIDC_JWKS_TIMEOUT_SECONDS)
         self._keyset: KeySet | None = None
         self._lock = asyncio.Lock()
 

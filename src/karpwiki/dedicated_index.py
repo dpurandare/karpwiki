@@ -29,11 +29,11 @@ from datetime import date
 
 from opensearchpy import AsyncOpenSearch
 
-from .config import OPENSEARCH_URL
+from .config import OPENSEARCH_INDEX_NAME, OPENSEARCH_URL
 from .models import PageStatus, PageVersion, WikiPage
-from .search_result import SearchResult, extract_citations
+from .search_result import DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT, SearchResult, extract_citations
 
-INDEX_NAME = "karpwiki-pages"
+INDEX_NAME = OPENSEARCH_INDEX_NAME
 
 _MAPPING = {
     "mappings": {
@@ -105,7 +105,7 @@ async def search(
     *,
     query: str,
     workspace_ids: list[str],
-    limit: int = 20,
+    limit: int = DEFAULT_SEARCH_LIMIT,
     include_drafts: bool = False,
     page_types: list[str] | None = None,
     tags: list[str] | None = None,
@@ -115,6 +115,7 @@ async def search(
     """The OpenSearch-backed twin of `search.search` — same filter contract (04 §6), same
     `SearchResult` shape (04 §7), scored on OpenSearch's own BM25 relevance rather than
     `ts_rank_cd`. `search.merge_federated` is what reconciles the two scales."""
+    limit = min(limit, MAX_SEARCH_LIMIT)
     if not workspace_ids or not query.strip():
         return []
 

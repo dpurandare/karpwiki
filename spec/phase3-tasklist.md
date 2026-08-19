@@ -143,6 +143,12 @@ findings that don't need a roadmap step (tracked there instead).
     closes the gap between the written contract and actual behavior; which one is a design call
     for whoever picks up this step, not pre-decided here.
 
+    Distinct from, and not closed by, the post-Phase-2 hardcoding-remediation pass ([09](
+    09-implementation-notes.md) §60): that pass added a `MAX_SEARCH_LIMIT` cap to `/search`'s
+    existing non-paginated `limit` param (a DRY/uncapped-value fix, found in the same audit), but
+    `/search` still has no cursor pagination, and none of the four endpoints this step names were
+    touched. This step remains open.
+
 ## 3b — Notification Service, Feedback Loop, Content Quality ([07](07-additional-features-and-roadmap.md) §3-4)
 
 67. **Real Notification Service delivery.** Step 55 (Phase 2) already built the pluggable

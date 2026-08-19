@@ -79,6 +79,7 @@ from .models import (
     WikiPage,
     Workspace,
 )
+from .search_result import DEFAULT_SEARCH_LIMIT
 
 SUBMIT_ENDPOINT = "POST /sources"
 RESOLVE_ENDPOINT = "POST /review-items/{id}/resolve"
@@ -1352,7 +1353,7 @@ def _register_routes(app: FastAPI) -> None:
         date_from: date | None = None,
         date_to: date | None = None,
         include_drafts: bool = False,
-        limit: int = 20,
+        limit: int = DEFAULT_SEARCH_LIMIT,
     ):
         """04 §1, §4-8: single-stage federated lexical search — any authenticated caller
         (06 §1). Thin wrapper around `run_search` below, the shared Common Gateway logic
@@ -1483,7 +1484,7 @@ async def run_search(
     date_from: date | None = None,
     date_to: date | None = None,
     include_drafts: bool = False,
-    limit: int = 20,
+    limit: int = DEFAULT_SEARCH_LIMIT,
 ) -> dict[str, Any]:
     """04 §1, §4-8: single-stage federated lexical search — the shared Common Gateway
     logic (01 §2) both `GET /search` and the MCP `wiki_search` tool (phase2-tasklist.md

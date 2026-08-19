@@ -28,11 +28,9 @@ import urllib.parse
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from . import connector_polling
+from . import config, connector_polling
 from .connector_polling import ConnectorAuthError, DiscoveredItem
 from .models import Connector
-
-_CLONE_TIMEOUT_SECONDS = 60
 
 _AUTH_FAILURE_MARKERS = (
     "authentication failed",
@@ -63,7 +61,7 @@ def _with_credential(repo_url: str, credential: str | None) -> str:
 async def _run(args: list[str], *, cwd: str | None = None, timeout: float | None = None) -> str:
     # GIT_TERMINAL_PROMPT=0: a worker process has no TTY, so without this an auth failure
     # would hang waiting for a username/password prompt instead of failing fast with a
-    # message `_clone` can actually classify — `_CLONE_TIMEOUT_SECONDS` is a backstop, not
+    # message `_clone` can actually classify — the clone timeout is a backstop, not
     # the intended path.
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     proc = await asyncio.create_subprocess_exec(
@@ -91,7 +89,7 @@ async def _clone(repo_url: str, branch: str, credential: str | None, dest: str) 
     try:
         await _run(
             ["clone", "--branch", branch, "--single-branch", url, dest],
-            timeout=_CLONE_TIMEOUT_SECONDS,
+            timeout=config.GIT_CLONE_TIMEOUT_SECONDS,
         )
     except RuntimeError as exc:
         message = str(exc)

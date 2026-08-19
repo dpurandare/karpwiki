@@ -48,6 +48,7 @@ from . import api, ingestion, review, versioning, workspaces
 from .auth import Authenticator, Principal, any_workspace_with_role, default_authenticator, has_role
 from .db import session_scope
 from .models import RawSource, ReviewKind, ReviewStatus, Role
+from .search_result import DEFAULT_SEARCH_LIMIT
 
 
 class McpAuthError(Exception):
@@ -122,7 +123,7 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
         date_from: date | None = None,
         date_to: date | None = None,
         include_drafts: bool = False,
-        limit: int = 20,
+        limit: int = DEFAULT_SEARCH_LIMIT,
     ) -> dict:
         """Single-stage lexical/catalog search (04 §1) — ranked, cited page snippets, no
         synthesis. Maps to `GET /search`."""

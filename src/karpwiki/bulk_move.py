@@ -15,13 +15,13 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import versioning
+from . import config, versioning
 from .dedicated_index import delete_page as delete_dedicated_page
 from .frontmatter import split_frontmatter
 from .ingestion import relocate
 from .models import AdminActionLog, PageVersion, RawSource, VersionTrigger, WikiPage, Workspace
 
-BATCH_SIZE = 100
+BATCH_SIZE = config.BULK_MOVE_BATCH_SIZE
 
 
 @dataclass

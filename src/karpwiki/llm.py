@@ -22,15 +22,6 @@ logger = logging.getLogger(__name__)
 
 AgentRole = Literal["classifier", "curator"]
 
-# 03 §1: "a rate-limited or timed-out LLM call ... is retried inside the worker with
-# backoff. Only exhausted retries transition to error." No specific count/backoff is given
-# anywhere in spec/ (phase2-tasklist.md step 33), so these are this implementation's
-# defaults — 3 attempts, doubling from 1s, caps a stuck call at ~3s of backoff before
-# giving up rather than blocking a worker slot indefinitely.
-LLM_RETRY_ATTEMPTS = 3
-LLM_RETRY_BASE_DELAY_S = 1.0
-
-
 class TransientCallFailed(Exception):
     """Every attempt failed. `attempts` and the chained `__cause__` (the last underlying
     exception) are what a caller's except block reads to fill in a review-item/log's
@@ -50,17 +41,18 @@ async def retry_transient(fn):
     provider (08 §2), so pinning to e.g. OpenAI's `RateLimitError` would be brittle across
     providers and isn't asked for anywhere in spec/ — a permanent failure just costs a few
     wasted attempts before giving up, same as a transient one exhausting its budget."""
-    for attempt in range(1, LLM_RETRY_ATTEMPTS + 1):
+    attempts = config.LLM_RETRY_ATTEMPTS
+    for attempt in range(1, attempts + 1):
         try:
             return await fn()
         except Exception as exc:
-            if attempt == LLM_RETRY_ATTEMPTS:
+            if attempt == attempts:
                 raise TransientCallFailed(attempt) from exc
-            delay = LLM_RETRY_BASE_DELAY_S * 2 ** (attempt - 1)
+            delay = config.LLM_RETRY_BASE_DELAY_SECONDS * 2 ** (attempt - 1)
             logger.warning(
                 "transient call failure (attempt %d/%d): %s — retrying in %.1fs",
                 attempt,
-                LLM_RETRY_ATTEMPTS,
+                attempts,
                 exc,
                 delay,
             )

@@ -10,6 +10,12 @@ import re
 import uuid
 from dataclasses import dataclass
 
+# Shared by search.py's and dedicated_index.py's own `search()` — both had an identical,
+# uncapped `limit: int = 20` default with no way to cap an arbitrarily large caller-supplied
+# value, unlike every list endpoint's own `pagination.py` (DEFAULT_LIST_LIMIT/MAX_LIST_LIMIT).
+DEFAULT_SEARCH_LIMIT = 20
+MAX_SEARCH_LIMIT = 100
+
 # 01 §6: citations are markdown footnote *definitions* — "[^1]: filename.pdf, p. 4" — at
 # the start of a line. Captures the marker and the definition text separately so callers
 # get the definition text without re-parsing the bracket syntax themselves.

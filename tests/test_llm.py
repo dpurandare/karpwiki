@@ -6,7 +6,7 @@ shared, dependency-free module.
 
 import pytest
 
-from karpwiki import llm
+from karpwiki import config, llm
 
 
 def test_workspace_schema_overrides_the_platform_default(monkeypatch):
@@ -38,28 +38,28 @@ def test_unconfigured_role_raises_rather_than_guessing(monkeypatch):
 
 
 async def test_retry_transient_succeeds_after_failures(monkeypatch):
-    monkeypatch.setattr(llm, "LLM_RETRY_BASE_DELAY_S", 0.0)
+    monkeypatch.setattr(config, "LLM_RETRY_BASE_DELAY_SECONDS", 0.0)
     attempts = []
 
     async def flaky():
         attempts.append(1)
-        if len(attempts) < llm.LLM_RETRY_ATTEMPTS:
+        if len(attempts) < config.LLM_RETRY_ATTEMPTS:
             raise TimeoutError("upstream")
         return "ok"
 
     assert await llm.retry_transient(flaky) == "ok"
-    assert len(attempts) == llm.LLM_RETRY_ATTEMPTS
+    assert len(attempts) == config.LLM_RETRY_ATTEMPTS
 
 
 async def test_retry_transient_raises_once_exhausted(monkeypatch):
-    monkeypatch.setattr(llm, "LLM_RETRY_BASE_DELAY_S", 0.0)
+    monkeypatch.setattr(config, "LLM_RETRY_BASE_DELAY_SECONDS", 0.0)
 
     async def always_fails():
         raise TimeoutError("upstream")
 
     with pytest.raises(llm.TransientCallFailed) as exc_info:
         await llm.retry_transient(always_fails)
-    assert exc_info.value.attempts == llm.LLM_RETRY_ATTEMPTS
+    assert exc_info.value.attempts == config.LLM_RETRY_ATTEMPTS
     assert isinstance(exc_info.value.__cause__, TimeoutError)
 
 
