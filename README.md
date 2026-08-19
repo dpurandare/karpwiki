@@ -46,17 +46,25 @@ Start with [`spec/00-overview.md`](spec/00-overview.md).
 
 ## Implementation
 
-Phase 1 of [`spec/phase1-tasklist.md`](spec/phase1-tasklist.md) is built in this repo under
-[`src/karpwiki/`](src/karpwiki/). **Phase 1 is complete** (steps 1–21, all of 1a/1b/1c) — see
-[`phase1-tasklist.md`](spec/phase1-tasklist.md) for what each step maps to in the code. In short:
-submit a document, it's classified against the workspace's taxonomy with a lexical cross-check,
-checked for duplicates against a real Postgres full-text index, and curated by an LLM into a cited
-source page plus concept/entity pages — with `overview.md`/`log.md` kept in sync and a review item
-raised whenever a human needs to look at something. Once indexed, the curated wiki is searchable
-with lexical ranking and a catalog-match boost; an admin can list and resolve every review-item
-kind (including duplicate `merge`, `supersede`, and `keep_both`) and roll back a page version, both
-through the gateway. Phase 2+ scope (multi-workspace routing, connectors, the Maintenance Advisor,
-MCP, horizontal scaling) is [`07-additional-features-and-roadmap.md`](spec/07-additional-features-and-roadmap.md).
+This repo builds [`spec/phase1-tasklist.md`](spec/phase1-tasklist.md) and
+[`spec/phase2-tasklist.md`](spec/phase2-tasklist.md) under [`src/karpwiki/`](src/karpwiki/).
+**Phase 1 and Phase 2 are both complete** (steps 1–56 — all of 1a/1b/1c and 2a–2e) — see those
+two files for what each step maps to in the code.
+[`phase3-tasklist.md`](spec/phase3-tasklist.md) plans what's next (notifications, the search
+feedback loop, fine-grained access control, analytics, plus a handful of real gaps carried
+forward from Phase 1/2 — the `index.md` catalog page and the structured-data Curator treatment
+among them) but nothing in it is built yet.
+
+In short: submit a document, it's classified against the workspace's taxonomy with a lexical
+cross-check, checked for duplicates against a real Postgres full-text index, and curated by an LLM
+into a cited source page plus concept/entity pages — with `overview.md`/`log.md` kept in sync and
+a review item raised whenever a human needs to look at something. Once indexed, the curated wiki
+is searchable with lexical ranking and a catalog-match boost; an admin can list and resolve every
+review-item kind (including duplicate `merge`, `supersede`, and `keep_both`) and roll back a page
+version, both through the gateway. Multi-workspace routing, connectors, the Maintenance Advisor,
+MCP, and horizontal scaling are all real too (Phase 2) — see the sections below for each. Phase 3+
+scope is [`07-additional-features-and-roadmap.md`](spec/07-additional-features-and-roadmap.md)'s
+roadmap.
 
 Pipeline stages run as real automatic background jobs (steps 30–33): submitting a document
 enqueues classification, an accepted classification enqueues dedup-then-curation, every page write
