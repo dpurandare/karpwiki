@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–44 done, tracks 2a, 2b, and 2c all complete and closed out; track
+**Status (2026-08-19): steps 22–45 done, tracks 2a, 2b, and 2c all complete and closed out; track
 2d in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
@@ -356,7 +356,23 @@ is a real Authenticator implementation using that pick, not a library search.
     ([06](06-api-mcp-and-scaling.md) §2's tool table: `wiki_search`, `wiki_get_page`,
     `wiki_list_pages`, `wiki_list_workspaces`, `wiki_submit`, `wiki_get_source_status`,
     `wiki_list_review_items`, `wiki_resolve_review_item`, `wiki_get_page_versions`,
-    `wiki_rollback_page`).
+    `wiki_rollback_page`). **Done** — `mcp_server.py` (new), all ten tools, both `stdio` and
+    streamable-HTTP transports. Two forks resolved via AskUserQuestion first: extracted
+    `api.run_search`/`api.run_resolve_review_item` (the two operations with real gateway
+    orchestration, per `01` §2's shared-Common-Gateway framing) so both REST and MCP call the
+    same functions — a behavior-preserving refactor verified by the full pre-existing test
+    suite passing unchanged; the other eight tools stay thin, duplicating a role check plus
+    one service-layer call, matching `api.py`'s own style. stdio (no per-call headers) resolves
+    one identity at startup from `KARPWIKI_MCP_USER`/`KARPWIKI_MCP_GROUPS`, reusing
+    `TrustedHeaderAuthenticator` as-is; streamable HTTP reuses real per-request headers via
+    `ctx.headers`. `wiki_submit` is text-only (file/URL don't map onto MCP's JSON args, not
+    named in `06` §2's table). The installed SDK (`mcp` 2.0.0, pinned `>=2.0`) exposes a
+    different API surface than "FastMCP" docs describe (`mcp.server.mcpserver.MCPServer`, not
+    `mcp.server.fastmcp.FastMCP`) — worth knowing before assuming an older example applies.
+    Live-verified both transports for real: a real `streamable_http_client` connection with a
+    real header found real content and a headerless one correctly errored; a real `python -m
+    karpwiki.mcp_server` subprocess (the real stdio entry point) listed all ten tools and
+    resolved its env-var identity. See [09](09-implementation-notes.md) §48.
 46. On-behalf-of delegation for `wiki_submit` — fully designed already
     ([09](09-implementation-notes.md) §5).
 47. Real OIDC/SAML `Authenticator` implementation using Authlib

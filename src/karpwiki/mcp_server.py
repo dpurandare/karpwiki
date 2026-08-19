@@ -1,0 +1,323 @@
+"""MCP server (06 §2, phase2-tasklist.md step 45) — a thin protocol adapter over the
+same Common Gateway logic `api.py`'s REST endpoints call. `01` §2 frames AuthN/AuthZ,
+workspace resolution, and dispatch as ONE shared Common Gateway layer with REST/MCP as
+two protocol adapters on top of it, not two independent copies of that logic — so the two
+genuinely complex operations here (`wiki_search`, `wiki_resolve_review_item`) call the
+exact same `api.run_search`/`api.run_resolve_review_item` the REST endpoints do. The other
+eight tools are thin enough (one role check plus one existing service-layer call) that
+writing the equivalent code directly here matches how `api.py`'s own many endpoints
+already look — extracting a shared helper for each would be pure ceremony.
+
+**Identity per transport** (06 §2 wants both `stdio` and streamable HTTP):
+
+- **Streamable HTTP**: a real per-request `Principal`, resolved from `ctx.headers`
+  through the exact same `Authenticator` interface every REST endpoint already uses
+  (`api._principal`'s equivalent, `_resolve_principal` below).
+- **`stdio`**: no per-call headers exist at all — `ctx.headers` is `None` on this
+  transport by the SDK's own design (a stdio server is one local process for one caller,
+  e.g. a local agent/IDE integration). The principal is resolved ONCE, lazily, from
+  `KARPWIKI_MCP_USER`/`KARPWIKI_MCP_GROUPS` (mirroring `TrustedHeaderAuthenticator`'s
+  `X-Karpwiki-User`/`X-Karpwiki-Groups` header names as env vars instead of headers) and
+  reused for every tool call in that process's lifetime — the same lightweight stand-in
+  precedent `TrustedHeaderAuthenticator` itself set in Phase 1 ("so Phase 1 need not wait
+  on an IdP"); real OIDC/SAML/API-key auth (step 47) swaps in later, unaffected.
+
+On-behalf-of delegation for `wiki_submit` (09 §5) is step 46, not built here — every tool
+call authenticates as the calling agent's own credential only, for now.
+
+`wiki_submit` accepts pasted text only, not a file/URL upload — `POST /sources`'s other
+two input modes don't map cleanly onto MCP's JSON-shaped tool arguments, and every
+existing test in this codebase already exercises the text path as primary; file/URL
+support isn't named anywhere in 06 §2's tool table as its own requirement.
+"""
+
+import os
+import uuid
+from datetime import date
+
+from mcp.server.mcpserver import Context, MCPServer
+
+from . import api, review, versioning, workspaces
+from .auth import Authenticator, Principal, TrustedHeaderAuthenticator, any_workspace_with_role, has_role
+from .db import session_scope
+from .models import RawSource, ReviewKind, ReviewStatus, Role
+
+
+class McpAuthError(Exception):
+    """No authenticated principal for this call. MCP has no HTTP status codes, so tools
+    raise a plain exception and let the SDK surface it as a tool-call error."""
+
+
+def _resolve_http_principal(authenticator: Authenticator, headers) -> Principal:
+    """The streamable-HTTP identity path — a standalone, directly testable function
+    (unlike the stdio path's caching, this needs no per-server-instance state)."""
+    principal = authenticator.authenticate(dict(headers))
+    if principal is None:
+        raise McpAuthError("No authenticated principal on this request.")
+    return principal
+
+
+def _resolve_stdio_principal(authenticator: Authenticator) -> Principal:
+    headers: dict[str, str] = {}
+    user = os.environ.get("KARPWIKI_MCP_USER", "").strip()
+    if user:
+        headers["x-karpwiki-user"] = user
+    groups = os.environ.get("KARPWIKI_MCP_GROUPS", "")
+    if groups:
+        headers["x-karpwiki-groups"] = groups
+    principal = authenticator.authenticate(headers)
+    if principal is None:
+        raise McpAuthError(
+            "No stdio identity configured — set KARPWIKI_MCP_USER (and optionally "
+            "KARPWIKI_MCP_GROUPS) in the environment this MCP server process runs in."
+        )
+    return principal
+
+
+def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
+    """Mirrors `api.create_app`'s own factory shape (an injectable `Authenticator` for
+    tests, a real `TrustedHeaderAuthenticator` by default) — a separate process/entry
+    point from the REST gateway, so it can't just reuse `create_app`'s own instance."""
+    resolved_authenticator = authenticator or TrustedHeaderAuthenticator()
+    mcp = MCPServer("karpwiki")
+    # Resolved lazily on first stdio call, then cached — a stdio server is one process
+    # for one caller, so this never needs to change within a run.
+    stdio_principal: Principal | None = None
+
+    def _resolve_principal(ctx: Context) -> Principal:
+        nonlocal stdio_principal
+        if ctx.headers is not None:
+            return _resolve_http_principal(resolved_authenticator, ctx.headers)
+        if stdio_principal is None:
+            stdio_principal = _resolve_stdio_principal(resolved_authenticator)
+        return stdio_principal
+
+    @mcp.tool()
+    async def wiki_search(
+        ctx: Context,
+        q: str,
+        workspace_id: list[str] | None = None,
+        page_type: list[str] | None = None,
+        tags: list[str] | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        include_drafts: bool = False,
+        limit: int = 20,
+    ) -> dict:
+        """Single-stage lexical/catalog search (04 §1) — ranked, cited page snippets, no
+        synthesis. Maps to `GET /search`."""
+        principal = _resolve_principal(ctx)
+        async with session_scope() as session:
+            return await api.run_search(
+                session,
+                principal,
+                q=q,
+                workspace_id=workspace_id,
+                page_type=page_type,
+                tags=tags,
+                date_from=date_from,
+                date_to=date_to,
+                include_drafts=include_drafts,
+                limit=limit,
+            )
+
+    @mcp.tool()
+    async def wiki_get_page(ctx: Context, page_id: str) -> dict:
+        """Fetch a specific page by id, e.g. for an agent following a citation. Maps to
+        `GET /pages/{id}`."""
+        principal = _resolve_principal(ctx)
+        async with session_scope() as session:
+            page = await api._reader_page(session, principal, uuid.UUID(page_id))
+            version = (
+                await session.get(api.PageVersion, page.current_version_id)
+                if page.current_version_id
+                else None
+            )
+            return api._page_body(page, version)
+
+    @mcp.tool()
+    async def wiki_list_pages(
+        ctx: Context,
+        workspace_id: str,
+        page_type: list[str] | None = None,
+        tags: list[str] | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        status: str | None = None,
+        limit: int = versioning.DEFAULT_LIST_LIMIT,
+        cursor: str | None = None,
+    ) -> dict:
+        """Browse/filter a workspace's pages — e.g. to walk its `index.md` catalog
+        programmatically. Maps to `GET /pages`. `status="draft"` needs `contributor`
+        (elevated scope, 04 §6's reasoning applied the same way `api.py`'s own
+        `list_pages_endpoint` does)."""
+        principal = _resolve_principal(ctx)
+        async with session_scope() as session:
+            required = Role.contributor if status == "draft" else Role.reader
+            if not await has_role(
+                session, principal=principal, workspace_id=workspace_id, required=required
+            ):
+                raise McpAuthError(f"Listing pages here requires the {required.value} role.")
+            statuses = [status] if status else ["published"]
+            pages, next_cursor = await versioning.list_pages(
+                session,
+                workspace_id=workspace_id,
+                page_types=page_type,
+                tags=tags,
+                date_from=date_from,
+                date_to=date_to,
+                statuses=statuses,
+                limit=limit,
+                cursor=cursor,
+            )
+            return {
+                "items": [api._page_summary_body(p) for p in pages],
+                "next_cursor": next_cursor,
+            }
+
+    @mcp.tool()
+    async def wiki_list_workspaces(ctx: Context) -> dict:
+        """Discover which workspaces the caller can search or submit to. Maps to
+        `GET /workspaces`."""
+        principal = _resolve_principal(ctx)
+        async with session_scope() as session:
+            found = await workspaces.list_for_principal(session, principal_keys=principal.policy_keys)
+            return {"items": [api._workspace_body(w) for w in found]}
+
+    @mcp.tool()
+    async def wiki_submit(ctx: Context, text: str) -> dict:
+        """Submit a pasted-text document on the caller's behalf (03 §2) — still goes
+        through the full pipeline, including the `submission` review item. Maps to
+        `POST /sources` (text mode only — see module docstring)."""
+        principal = _resolve_principal(ctx)
+        async with session_scope() as session:
+            if not await any_workspace_with_role(
+                session, principal=principal, required=Role.contributor
+            ):
+                raise McpAuthError("Submitting requires the contributor role in at least one workspace.")
+            source = await api._store(
+                session, text.encode(), "pasted.txt", submitted_by=f"user:{principal.id}"
+            )
+            body = {
+                "source_id": str(source.source_id),
+                "pipeline_state": source.pipeline_state.value,
+                "filename": source.filename,
+            }
+            await session.commit()
+            api.tasks.classify_source.delay(str(source.source_id))
+            return body
+
+    @mcp.tool()
+    async def wiki_get_source_status(ctx: Context, source_id: str) -> dict:
+        """Check a submission's pipeline state — typically polled after `wiki_submit`.
+        Maps to `GET /sources/{id}` (submitter-only, no admin override, matching that
+        endpoint exactly: "whether a source exists is not public")."""
+        principal = _resolve_principal(ctx)
+        async with session_scope() as session:
+            source = await session.get(RawSource, uuid.UUID(source_id))
+            if source is None or source.submitted_by != f"user:{principal.id}":
+                raise McpAuthError(f"No source {source_id}.")
+            return {
+                "source_id": str(source.source_id),
+                "pipeline_state": source.pipeline_state.value,
+                "status": source.status.value,
+                "workspace_id": source.workspace_id,
+                "filename": source.filename,
+            }
+
+    @mcp.tool()
+    async def wiki_list_review_items(
+        ctx: Context,
+        workspace_id: str | None = None,
+        kind: str | None = None,
+        status: str = "open",
+        severity: str | None = None,
+        limit: int = review.DEFAULT_LIST_LIMIT,
+        cursor: str | None = None,
+    ) -> dict:
+        """List/filter the admin review queue (05 §1). Maps to `GET /review-items`."""
+        principal = _resolve_principal(ctx)
+        async with session_scope() as session:
+            admin_workspaces = await any_workspace_with_role(
+                session, principal=principal, required=Role.admin
+            )
+            if not admin_workspaces:
+                raise McpAuthError("Listing review items requires the admin role somewhere.")
+            items, next_cursor = await review.list_items(
+                session,
+                admin_workspaces=admin_workspaces,
+                workspace_id=workspace_id,
+                kind=ReviewKind(kind) if kind else None,
+                status=ReviewStatus(status) if status else None,
+                severity=severity,
+                limit=limit,
+                cursor=cursor,
+            )
+            return {
+                "items": [api._review_item_body(i) for i in items],
+                "next_cursor": next_cursor,
+            }
+
+    @mcp.tool()
+    async def wiki_resolve_review_item(
+        ctx: Context, review_id: str, action: str, note: str | None = None
+    ) -> dict:
+        """Execute a resolution — action set depends on `kind` (03 §3-5, 05 §3-5). Maps to
+        `POST /review-items/{id}/resolve`."""
+        principal = _resolve_principal(ctx)
+        async with session_scope() as session:
+            return await api.run_resolve_review_item(
+                session, principal, review_id=uuid.UUID(review_id), action=action, note=note
+            )
+
+    @mcp.tool()
+    async def wiki_get_page_versions(
+        ctx: Context,
+        page_id: str,
+        limit: int = versioning.DEFAULT_LIST_LIMIT,
+        cursor: str | None = None,
+    ) -> dict:
+        """List version history (05 §6). Maps to `GET /pages/{id}/versions`."""
+        principal = _resolve_principal(ctx)
+        async with session_scope() as session:
+            await api._admin_page(session, principal, uuid.UUID(page_id))
+            versions, next_cursor = await versioning.list_versions(
+                session, page_id=uuid.UUID(page_id), limit=limit, cursor=cursor
+            )
+            return {
+                "items": [api._page_version_body(v) for v in versions],
+                "next_cursor": next_cursor,
+            }
+
+    @mcp.tool()
+    async def wiki_rollback_page(
+        ctx: Context, page_id: str, target_version_id: str, change_summary: str | None = None
+    ) -> dict:
+        """Roll back a page to a prior version (01 §5) — creates a new version, never
+        deletes history. Maps to `POST /pages/{id}/rollback` (no idempotency support here,
+        same reasoning as `wiki_resolve_review_item` — that's a REST-specific header
+        convention)."""
+        principal = _resolve_principal(ctx)
+        async with session_scope() as session:
+            page = await api._admin_page(session, principal, uuid.UUID(page_id))
+            try:
+                version = await versioning.rollback(
+                    session,
+                    page=page,
+                    target_version_id=uuid.UUID(target_version_id),
+                    author=f"user:{principal.id}",
+                    change_summary=change_summary,
+                )
+            except ValueError as exc:
+                raise api.ApiError(400, "invalid_request", str(exc)) from exc
+            await api.ingestion.refresh_log(session, workspace_id=page.workspace_id)
+            body = api._page_version_body(version)
+            await session.commit()
+            api.tasks.reindex.delay(str(page.page_id))
+            return body
+
+    return mcp
+
+
+if __name__ == "__main__":
+    create_mcp_server().run()

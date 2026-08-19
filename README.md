@@ -97,6 +97,30 @@ instead of the shared Postgres index, merged and normalized into one ranked resu
 are at `http://localhost:8000/docs` once running — FastAPI generates them from the route
 definitions, nothing to write by hand.
 
+**MCP server** ([06 §2](spec/06-api-mcp-and-scaling.md), phase2-tasklist.md step 45): a thin
+protocol adapter over the same gateway operations above — `wiki_search`, `wiki_get_page`,
+`wiki_list_pages`, `wiki_list_workspaces`, `wiki_submit`, `wiki_get_source_status`,
+`wiki_list_review_items`, `wiki_resolve_review_item`, `wiki_get_page_versions`,
+`wiki_rollback_page`. Two transports:
+
+```bash
+python -m karpwiki.mcp_server                    # stdio, for local agent/IDE integration
+```
+
+or, for streamable HTTP (real per-request auth via `X-Karpwiki-User`/`X-Karpwiki-Groups`, same as
+the REST endpoints):
+
+```python
+from karpwiki.mcp_server import create_mcp_server
+create_mcp_server().run(transport="streamable-http", host="0.0.0.0", port=8001)
+```
+
+`stdio` has no per-call HTTP headers at all, so it resolves one identity at process startup from
+`KARPWIKI_MCP_USER`/`KARPWIKI_MCP_GROUPS` env vars (mirroring the REST trusted-header names) and
+reuses it for every tool call in that process — the same lightweight stand-in
+`TrustedHeaderAuthenticator` itself is (real OIDC/SAML/API-key auth is step 47, unaffected). On-
+behalf-of delegation for `wiki_submit` isn't built yet (step 46).
+
 Configuration is environment variables, listed with their defaults in
 [`.env.example`](.env.example). `.env` is gitignored and loaded automatically; real environment
 variables always win over it, so a deployment passes its own and needs no file.

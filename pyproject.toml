@@ -19,6 +19,7 @@ dependencies = [
     "fsspec>=2024.6.0",
     "s3fs>=2024.6.0",
     "opensearch-py[async]>=2.6",
+    "mcp>=2.0",
 ]
 
 [project.optional-dependencies]

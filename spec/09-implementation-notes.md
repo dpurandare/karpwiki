@@ -2196,5 +2196,82 @@ reports every known queue.
 **Spec touch-point**: none required — `05` §8 already names all five dashboards' metrics; this
 section records the `duration_ms`/direct-Redis-read decisions and the two accepted gaps.
 
+## 48. MCP Server (Phase 2 Step 45)
+
+Track 2d's third step: a real MCP server, all ten tools `06` §2's table names, over both
+transports it asks for. On-behalf-of delegation for `wiki_submit` (`09` §5) is step 46, not this
+one — every tool authenticates as the calling agent's own credential only, for now.
+
+**The installed SDK's API surface is not what "FastMCP" documentation elsewhere describes.**
+`08` §4 just says `mcp`, no version; the version that actually installs today is `2.0.0`, whose
+high-level server class lives at `mcp.server.mcpserver.MCPServer` (not `mcp.server.fastmcp.
+FastMCP`, which doesn't exist in this version at all). Pinned `mcp>=2.0` in `pyproject.toml`
+rather than `>=1.0` specifically so a future install lands on an API compatible with what this
+module actually calls — worth knowing before assuming any older "FastMCP" example applies here.
+
+**Two real forks resolved via AskUserQuestion before writing code**:
+
+- **Shared logic vs. per-protocol duplication.** `01` §2 frames the Common Gateway as *one*
+  shared AuthN/AuthZ/workspace-resolution/dispatch layer with REST and MCP as two protocol
+  adapters on top of it — not two independent copies of that logic. The two operations with
+  genuinely substantial orchestration (`/search`'s ~90-line federated resolution/taxonomy-
+  prefilter/dedicated-index-split/`query_log`-write chain, and `/review-items/{id}/resolve`'s
+  multi-branch post-resolution dispatch) were extracted out of `api.py`'s route closures into two
+  new module-level functions, `run_search`/`run_resolve_review_item`, that both `api.py`'s REST
+  endpoints and `mcp_server.py`'s `wiki_search`/`wiki_resolve_review_item` tools call. This is a
+  genuine, behavior-preserving refactor of working, tested code — verified by the full existing
+  test suite passing completely unchanged (443 tests, no new failures, no assertions touched)
+  before any MCP-specific test was added. The other eight tools are thin enough (one role check
+  plus one existing service-layer call — `versioning.list_pages`, `workspaces.list_for_principal`,
+  `review.list_items`, etc.) that writing the equivalent code directly in `mcp_server.py` matches
+  how `api.py`'s own many endpoints already look; extracting a shared helper for each would be
+  pure ceremony, not genuine gateway-orchestration reuse.
+- **stdio identity.** `06` §2 wants both `stdio` and streamable HTTP. Streamable HTTP carries real
+  per-request headers (`ctx.headers`, populated by the SDK whenever the transport is HTTP-based) —
+  a straight reuse of the existing `Authenticator` interface, identical to how `api.py`'s
+  `_principal` dependency already works. `stdio` carries none at all (`ctx.headers` is `None` —
+  confirmed live, not just from the docstring, at `python -m karpwiki.mcp_server`'s real entry
+  point below), since a stdio server is one local process for one caller. Resolved once, lazily, on
+  first tool call from `KARPWIKI_MCP_USER`/`KARPWIKI_MCP_GROUPS` env vars — the same lightweight
+  stand-in precedent `TrustedHeaderAuthenticator` itself set in Phase 1 ("so Phase 1 need not wait
+  on an IdP"), reusing that exact class rather than inventing a new `Authenticator` implementation:
+  the env vars are just fed through as a synthesized `headers` dict with the same header-name
+  keys `TrustedHeaderAuthenticator.authenticate` already expects.
+
+**`_resolve_http_principal`/`_resolve_stdio_principal` are standalone functions, not both buried
+in one closure**, specifically so the header-based path is unit-testable without any real
+transport, while the stdio path's server-instance-scoped caching (`stdio_principal`, `nonlocal`)
+stays where it has to live — inside `create_mcp_server`'s closure, mirroring `api.create_app`'s
+own factory shape (an injectable `Authenticator`, real `TrustedHeaderAuthenticator` by default).
+
+**`wiki_submit` accepts pasted text only** — `POST /sources`'s file/URL input modes don't map
+cleanly onto MCP's JSON-shaped tool arguments, nothing in `06` §2's tool table calls for file/URL
+support specifically, and every existing test in this codebase already exercises the text path as
+primary. A real gap, not silently dropped — flagged in both the module docstring and here.
+
+**Testing an MCP server needed real protocol machinery, not raw function calls.** The ten tool
+closures aren't individually importable (they're defined inside `create_mcp_server`'s closure,
+mirroring `api.py`'s own `_register_routes` shape), and calling `MCPServer.call_tool()` directly
+with no real transport raises `ValueError: Context is not available outside of a request` — `ctx.
+headers` needs a real `request_context`, which only a real transport populates. `tests/
+test_mcp_server.py` uses `mcp.client.client.Client(server)`, an in-process client the SDK ships
+specifically for this, which runs calls through the real protocol (real argument validation, real
+`Context` machinery) with no network involved — `ctx.headers` is `None` over this transport
+(same as real stdio), so every committed tool test exercises the stdio env-var identity path;
+`_resolve_http_principal` gets its own direct unit tests for the header path since no committed
+test exercises a real HTTP transport.
+
+**Live-verified against real dev Postgres, both real transports** (not committed): a real
+`streamable_http_client` connection with an `X-Karpwiki-User` header round-tripped through a real
+running `run_streamable_http_async` server and found real indexed content; a second connection
+with no header correctly errored (`No authenticated principal on this request`), not crashed. A
+real `python -m karpwiki.mcp_server` subprocess, launched exactly as a real local agent/IDE
+integration would via `stdio_client`, listed all ten tools and correctly resolved `KARPWIKI_MCP_
+USER` from its subprocess environment. Cleaned up both throwaway workspaces afterward.
+
+**Spec touch-point**: none required — `06` §2 already names the ten tools and both transports;
+this section records the shared-logic-vs-duplication call, the stdio identity mechanism, and the
+installed SDK's real API surface.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

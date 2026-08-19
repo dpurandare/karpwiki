@@ -548,101 +548,21 @@ def _register_routes(app: FastAPI) -> None:
         idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     ):
         """Execute a resolution (06 §1, 05 §1) — action semantics depend on `kind`, see
-        `ResolveRequest`. Admin-gated against the item's own workspace when it has one;
-        against any workspace the caller administers when it doesn't yet (09 §22). A
-        `classification` resolution additionally needs admin in the workspace the chosen
-        `document_type` routes to (09 §27) — that workspace isn't known until `action` is
-        read, so it's checked as a second, more specific gate below."""
-        item = await session.get(ReviewItem, review_id)
-        if item is None:
-            raise ApiError(404, "not_found", f"No review item {review_id}.")
-
-        if item.workspace_id is not None:
-            authorized = await has_role(
-                session, principal=principal, workspace_id=item.workspace_id, required=Role.admin
-            )
-        else:
-            authorized = bool(
-                await any_workspace_with_role(session, principal=principal, required=Role.admin)
-            )
-        if not authorized:
-            raise ApiError(403, "forbidden", "Resolving this review item requires the admin role.")
-
-        if item.kind is ReviewKind.classification:
-            doc_type = await session.get(DocumentType, payload.action)
-            if doc_type is None:
-                raise ApiError(
-                    400, "invalid_request", f"{payload.action!r} is not a registered document type."
-                )
-            if not await has_role(
-                session,
-                principal=principal,
-                workspace_id=doc_type.workspace_id,
-                required=Role.admin,
-            ):
-                raise ApiError(
-                    403,
-                    "forbidden",
-                    "Resolving into this workspace requires the admin role there.",
-                    {"workspace_id": doc_type.workspace_id},
-                )
-
+        `ResolveRequest`. Idempotency-key replay is REST-specific (no equivalent MCP
+        convention, 06 §2), so it wraps `run_resolve_review_item` below rather than living
+        inside it — that function is the shared Common Gateway logic (01 §2) the MCP
+        `wiki_resolve_review_item` tool (phase2-tasklist.md step 45) also calls, with no
+        idempotency support of its own."""
         if idempotency_key:
             replayed = await _replay(session, idempotency_key, principal, RESOLVE_ENDPOINT)
             if replayed is not None:
                 response.headers["Idempotency-Replayed"] = "true"
                 return replayed
 
-        try:
-            state = await ingestion.resolve_review_item(
-                session,
-                item=item,
-                action=payload.action,
-                actor=f"user:{principal.id}",
-                note=payload.note,
-            )
-        except review.AlreadyResolvedError as exc:
-            raise ApiError(409, "conflict", str(exc)) from exc
-        except ingestion.InvalidResolutionError as exc:
-            raise ApiError(400, "invalid_request", str(exc)) from exc
+        body = await run_resolve_review_item(
+            session, principal, review_id=review_id, action=payload.action, note=payload.note
+        )
 
-        # phase2-tasklist.md step 32's "acceptance enqueues dedup then curate": a
-        # `classification` resolution always lands at `classified` (fresh dedup still to
-        # run); `duplicate`'s `keep_both`/`supersede` land at `ingesting` (dedup already
-        # resolved by this admin action — `tasks._curate` skips re-running it, 09 §35).
-        # `merge` writes its target page directly and reaches `ingested` here, so it needs
-        # a reindex dispatch instead — the page it touched isn't returned by
-        # `resolve_review_item`, so it's read back off `ingestion_log` the same way
-        # `ingestion._duplicate_evidence` reads other resolution detail.
-        merge_page_id: uuid.UUID | None = None
-        if item.kind is ReviewKind.duplicate and payload.action == "merge" and state is PipelineState.ingested:
-            for entry in reversed(await pipeline.history(session, uuid.UUID(item.subject_ref))):
-                if entry.detail.get("resolution") == "merge" and "target_page_id" in entry.detail:
-                    merge_page_id = uuid.UUID(entry.detail["target_page_id"])
-                    break
-
-        # phase2-tasklist.md step 36: approving a Staleness Detector `reindex` item
-        # dispatches reindex for exactly the pages it found (05 §3) — read from the item's
-        # own `detail` (advisor.py), the same evidence the admin console would have shown.
-        reindex_page_ids: list[str] = []
-        if item.kind is ReviewKind.reindex and payload.action == "reindex now":
-            reindex_page_ids = [p["page_id"] for p in (item.detail or {}).get("pages", [])]
-        # Step 38: an advisor-raised duplicate's `merge` writes a new version on the
-        # primary page directly (advisor.resolve_existing_duplicate) — the page id is
-        # already in `detail`, no ingestion_log archaeology needed for this one.
-        elif (
-            item.kind is ReviewKind.duplicate
-            and (item.detail or {}).get("raised_by") == "advisor"
-            and payload.action == "merge"
-        ):
-            reindex_page_ids = [item.detail["primary_page_id"]]
-
-        body = {
-            "review_id": str(item.review_id),
-            "status": item.status.value,
-            "resolved_action": item.resolved_action,
-            "pipeline_state": state.value if state is not None else None,
-        }
         if idempotency_key:
             session.add(
                 IdempotencyRecord(
@@ -653,13 +573,7 @@ def _register_routes(app: FastAPI) -> None:
                     response_body=body,
                 )
             )
-        await session.commit()
-        if state in (PipelineState.classified, PipelineState.ingesting):
-            tasks.curate_source.delay(item.subject_ref)
-        elif merge_page_id is not None:
-            tasks.reindex.delay(str(merge_page_id))
-        for page_id in reindex_page_ids:
-            tasks.reindex.delay(page_id)
+            await session.commit()
         return body
 
     @app.get("/pages")
@@ -1219,84 +1133,20 @@ def _register_routes(app: FastAPI) -> None:
         limit: int = 20,
     ):
         """04 §1, §4-8: single-stage federated lexical search — any authenticated caller
-        (06 §1). Workspace resolution and the taxonomy pre-filter (04 §4, 01 §2's Workspace
-        Router) and the `query_log` write (04 §8) are gateway concerns handled here; the
-        retrieval itself is `search.search()`. Seeing drafts needs `contributor`, not just
-        `reader` — "elevated scope" per 04 §6 — so resolution uses a stricter role when
-        requested rather than filtering drafts out of a reader-scoped set after the fact.
-
-        Times the call for `query_log.duration_ms` (phase2-tasklist.md step 44's Search
-        Performance dashboard) — wall-clock from here, not just the retrieval call, since
-        that's what a caller actually experiences.
-        """
-        started_at = time.monotonic()
-        required_role = Role.contributor if include_drafts else Role.reader
-        accessible = await any_workspace_with_role(
-            session, principal=principal, required=required_role
-        )
-
-        if workspace_id:
-            # Intersected with what the caller can access, never expanded (04 §4).
-            resolved = [w for w in workspace_id if w in accessible]
-        else:
-            resolved = await _taxonomy_prefilter(session, query=q, accessible=accessible)
-
-        # Split by backend (phase2-tasklist.md step 26): a dedicated workspace's traffic
-        # goes to OpenSearch, everything else to the shared Postgres index. Either list can
-        # be empty — both search()/dedicated_index.search() already return [] for that.
-        dedicated_ids = (
-            set(
-                (
-                    await session.execute(
-                        select(Workspace.workspace_id).where(
-                            Workspace.workspace_id.in_(resolved),
-                            Workspace.dedicated_index.is_(True),
-                        )
-                    )
-                ).scalars()
-            )
-            if resolved
-            else set()
-        )
-        shared_ids = [w for w in resolved if w not in dedicated_ids]
-
-        shared_hits = await search.search(
+        (06 §1). Thin wrapper around `run_search` below, the shared Common Gateway logic
+        (01 §2) the MCP `wiki_search` tool (phase2-tasklist.md step 45) also calls."""
+        return await run_search(
             session,
-            query=q,
-            workspace_ids=shared_ids,
-            limit=limit,
-            include_drafts=include_drafts,
-            page_types=page_type,
+            principal,
+            q=q,
+            workspace_id=workspace_id,
+            page_type=page_type,
             tags=tags,
             date_from=date_from,
             date_to=date_to,
-        )
-        dedicated_hits = await dedicated_index.search(
-            query=q,
-            workspace_ids=list(dedicated_ids),
-            limit=limit,
             include_drafts=include_drafts,
-            page_types=page_type,
-            tags=tags,
-            date_from=date_from,
-            date_to=date_to,
+            limit=limit,
         )
-        # 04 §4: normalize the dedicated backend's scores, merge, sort, truncate to `limit`
-        # only after the two pools are combined — taking `limit` from each independently
-        # first could drop a higher-ranked hit in favor of a lower one from the other pool.
-        results = search.merge_federated(shared_hits, dedicated_hits)[:limit]
-
-        await query_log.record(
-            session,
-            principal=principal.id,
-            query_text=q,
-            resolved_workspaces=resolved,
-            results=[{"page_id": str(r.page_id), "score": r.score} for r in results],
-            duration_ms=round((time.monotonic() - started_at) * 1000),
-        )
-        await session.commit()
-
-        return {"items": [_search_result_body(r) for r in results]}
 
     async def _require_admin_scope(
         session: AsyncSession, principal: Principal, workspace_id: str | None
@@ -1398,6 +1248,206 @@ def _search_result_body(result: search.SearchResult) -> dict[str, Any]:
         "excerpt": result.excerpt,
         "citations": list(result.citations),
     }
+
+
+async def run_search(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    q: str,
+    workspace_id: list[str] | None = None,
+    page_type: list[str] | None = None,
+    tags: list[str] | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    include_drafts: bool = False,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """04 §1, §4-8: single-stage federated lexical search — the shared Common Gateway
+    logic (01 §2) both `GET /search` and the MCP `wiki_search` tool (phase2-tasklist.md
+    step 45) call, rather than each re-deriving it. Workspace resolution and the taxonomy
+    pre-filter (04 §4, 01 §2's Workspace Router) and the `query_log` write (04 §8) are
+    gateway concerns handled here; the retrieval itself is `search.search()`. Seeing
+    drafts needs `contributor`, not just `reader` — "elevated scope" per 04 §6 — so
+    resolution uses a stricter role when requested rather than filtering drafts out of a
+    reader-scoped set after the fact.
+
+    Times the call for `query_log.duration_ms` (phase2-tasklist.md step 44's Search
+    Performance dashboard) — wall-clock from here, not just the retrieval call, since
+    that's what a caller actually experiences.
+    """
+    started_at = time.monotonic()
+    required_role = Role.contributor if include_drafts else Role.reader
+    accessible = await any_workspace_with_role(session, principal=principal, required=required_role)
+
+    if workspace_id:
+        # Intersected with what the caller can access, never expanded (04 §4).
+        resolved = [w for w in workspace_id if w in accessible]
+    else:
+        resolved = await _taxonomy_prefilter(session, query=q, accessible=accessible)
+
+    # Split by backend (phase2-tasklist.md step 26): a dedicated workspace's traffic
+    # goes to OpenSearch, everything else to the shared Postgres index. Either list can
+    # be empty — both search()/dedicated_index.search() already return [] for that.
+    dedicated_ids = (
+        set(
+            (
+                await session.execute(
+                    select(Workspace.workspace_id).where(
+                        Workspace.workspace_id.in_(resolved),
+                        Workspace.dedicated_index.is_(True),
+                    )
+                )
+            ).scalars()
+        )
+        if resolved
+        else set()
+    )
+    shared_ids = [w for w in resolved if w not in dedicated_ids]
+
+    shared_hits = await search.search(
+        session,
+        query=q,
+        workspace_ids=shared_ids,
+        limit=limit,
+        include_drafts=include_drafts,
+        page_types=page_type,
+        tags=tags,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    dedicated_hits = await dedicated_index.search(
+        query=q,
+        workspace_ids=list(dedicated_ids),
+        limit=limit,
+        include_drafts=include_drafts,
+        page_types=page_type,
+        tags=tags,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    # 04 §4: normalize the dedicated backend's scores, merge, sort, truncate to `limit`
+    # only after the two pools are combined — taking `limit` from each independently
+    # first could drop a higher-ranked hit in favor of a lower one from the other pool.
+    results = search.merge_federated(shared_hits, dedicated_hits)[:limit]
+
+    await query_log.record(
+        session,
+        principal=principal.id,
+        query_text=q,
+        resolved_workspaces=resolved,
+        results=[{"page_id": str(r.page_id), "score": r.score} for r in results],
+        duration_ms=round((time.monotonic() - started_at) * 1000),
+    )
+    await session.commit()
+
+    return {"items": [_search_result_body(r) for r in results]}
+
+
+async def run_resolve_review_item(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    review_id: uuid.UUID,
+    action: str,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Execute a resolution (06 §1, 05 §1) — the shared Common Gateway logic (01 §2) both
+    `POST /review-items/{id}/resolve` and the MCP `wiki_resolve_review_item` tool
+    (phase2-tasklist.md step 45) call. No idempotency support here (that's REST-specific,
+    06 §2 names no MCP equivalent) — the REST endpoint wraps this with its own replay
+    check/record around it, in a separate commit; a crash between the two just means a
+    retried request sees a 409 (`AlreadyResolvedError`) instead of a replayed 200, never a
+    duplicate side effect, so splitting the commit this way is safe.
+
+    Admin-gated against the item's own workspace when it has one; against any workspace
+    the caller administers when it doesn't yet (09 §22). A `classification` resolution
+    additionally needs admin in the workspace the chosen `document_type` routes to (09
+    §27) — that workspace isn't known until `action` is read, so it's checked as a
+    second, more specific gate below."""
+    item = await session.get(ReviewItem, review_id)
+    if item is None:
+        raise ApiError(404, "not_found", f"No review item {review_id}.")
+
+    if item.workspace_id is not None:
+        authorized = await has_role(
+            session, principal=principal, workspace_id=item.workspace_id, required=Role.admin
+        )
+    else:
+        authorized = bool(
+            await any_workspace_with_role(session, principal=principal, required=Role.admin)
+        )
+    if not authorized:
+        raise ApiError(403, "forbidden", "Resolving this review item requires the admin role.")
+
+    if item.kind is ReviewKind.classification:
+        doc_type = await session.get(DocumentType, action)
+        if doc_type is None:
+            raise ApiError(400, "invalid_request", f"{action!r} is not a registered document type.")
+        if not await has_role(
+            session, principal=principal, workspace_id=doc_type.workspace_id, required=Role.admin
+        ):
+            raise ApiError(
+                403,
+                "forbidden",
+                "Resolving into this workspace requires the admin role there.",
+                {"workspace_id": doc_type.workspace_id},
+            )
+
+    try:
+        state = await ingestion.resolve_review_item(
+            session, item=item, action=action, actor=f"user:{principal.id}", note=note
+        )
+    except review.AlreadyResolvedError as exc:
+        raise ApiError(409, "conflict", str(exc)) from exc
+    except ingestion.InvalidResolutionError as exc:
+        raise ApiError(400, "invalid_request", str(exc)) from exc
+
+    # phase2-tasklist.md step 32's "acceptance enqueues dedup then curate": a
+    # `classification` resolution always lands at `classified` (fresh dedup still to
+    # run); `duplicate`'s `keep_both`/`supersede` land at `ingesting` (dedup already
+    # resolved by this admin action — `tasks._curate` skips re-running it, 09 §35).
+    # `merge` writes its target page directly and reaches `ingested` here, so it needs
+    # a reindex dispatch instead — the page it touched isn't returned by
+    # `resolve_review_item`, so it's read back off `ingestion_log` the same way
+    # `ingestion._duplicate_evidence` reads other resolution detail.
+    merge_page_id: uuid.UUID | None = None
+    if item.kind is ReviewKind.duplicate and action == "merge" and state is PipelineState.ingested:
+        for entry in reversed(await pipeline.history(session, uuid.UUID(item.subject_ref))):
+            if entry.detail.get("resolution") == "merge" and "target_page_id" in entry.detail:
+                merge_page_id = uuid.UUID(entry.detail["target_page_id"])
+                break
+
+    # phase2-tasklist.md step 36: approving a Staleness Detector `reindex` item
+    # dispatches reindex for exactly the pages it found (05 §3) — read from the item's
+    # own `detail` (advisor.py), the same evidence the admin console would have shown.
+    reindex_page_ids: list[str] = []
+    if item.kind is ReviewKind.reindex and action == "reindex now":
+        reindex_page_ids = [p["page_id"] for p in (item.detail or {}).get("pages", [])]
+    # Step 38: an advisor-raised duplicate's `merge` writes a new version on the
+    # primary page directly (advisor.resolve_existing_duplicate) — the page id is
+    # already in `detail`, no ingestion_log archaeology needed for this one.
+    elif (
+        item.kind is ReviewKind.duplicate
+        and (item.detail or {}).get("raised_by") == "advisor"
+        and action == "merge"
+    ):
+        reindex_page_ids = [item.detail["primary_page_id"]]
+
+    body = {
+        "review_id": str(item.review_id),
+        "status": item.status.value,
+        "resolved_action": item.resolved_action,
+        "pipeline_state": state.value if state is not None else None,
+    }
+    await session.commit()
+    if state in (PipelineState.classified, PipelineState.ingesting):
+        tasks.curate_source.delay(item.subject_ref)
+    elif merge_page_id is not None:
+        tasks.reindex.delay(str(merge_page_id))
+    for page_id in reindex_page_ids:
+        tasks.reindex.delay(page_id)
+    return body
 
 
 def _parse_enum(enum_cls, value: str, field: str):
