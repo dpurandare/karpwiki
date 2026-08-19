@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–53 done, tracks 2a, 2b, 2c, and 2d all complete and closed out;
+**Status (2026-08-19): steps 22–54 done, tracks 2a, 2b, 2c, and 2d all complete and closed out;
 track 2e (Connector Framework) in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
@@ -546,7 +546,32 @@ is a real Authenticator implementation using that pick, not a library search.
     `worker-classification` container then classified via real `gpt-5-nano`. See
     [09](09-implementation-notes.md) §56.
 54. First concrete connector type — a Git repo poller, the simplest state model (commit-SHA
-    diffing) — [03](03-ingestion-and-review-workflows.md) §2.
+    diffing) — [03](03-ingestion-and-review-workflows.md) §2. **Done** — `connectors_git.py`
+    (new): `GitConnectorAdapter`, registering into `connector_polling.ADAPTERS["git"]` on
+    import. Scope confirmed via AskUserQuestion first: shells out to the real `git` CLI
+    (explicit argument lists, no shell string) rather than a pure-Python library or one
+    hosting provider's REST API — works against any remote, matching "Git repo poller"
+    literally; needed `git` added to the worker Docker image, no new Python dependency.
+    `last_sync_cursor = {"commit_sha": "<sha>"}`; first poll discovers every file, a later
+    poll diffs old→new SHA (`--diff-filter=ACMR` — deletions are deliberately never
+    submitted, a flagged scope boundary nothing in 03/09 names); non-UTF8 files are skipped.
+    HTTPS-token credential only (already resolved, step 53), embedded into the clone URL.
+    **A real correctness fix caught by reasoning, not a test**: `GIT_TERMINAL_PROMPT=0` on
+    the subprocess environment, without which a real worker (no TTY) would hang on an auth
+    failure instead of failing fast and classifiably — live-verified it mattered (a real
+    failed clone against a real nonexistent/private GitHub URL failed in 0.43s with the
+    exact classified message). A stale/unreachable cursor SHA recovers as a full resync
+    rather than a failed run. Tested against a real local `git init`-ed repo (no mocking —
+    hermetic, no network) covering discovery/diffing/binary-skip/branch-override/stale-cursor
+    fallback; the one real-network-dependent case (an actual auth failure) is tested as
+    message-classification logic in isolation, matching this project's no-network-in-tests
+    convention. Live-verified against real infra: a real `worker-connector-polling`
+    container (rebuilt with `git`) polling a real public GitHub repo through the real broker
+    — first poll created a real `raw_source` a real `worker-classification` container then
+    classified via real `gpt-5-nano`; a second poll against the unchanged SHA correctly
+    found nothing new; a real auth-failure run confirmed the fast-fail fix. Cleaned up the
+    throwaway workspace/connectors/sources afterward. See [09](09-implementation-notes.md)
+    §57.
 55. `disabled_auth` state + Notification Service hook for connector auth failures
     ([09](09-implementation-notes.md) §13).
 56. **Verify**: configure a connector, run one poll cycle, confirm it creates `raw_source`s

@@ -2786,5 +2786,79 @@ workspace/connector/source afterward.
 full ("mirroring the pluggable `Authenticator` pattern" is the tasklist's own wording); nothing
 here needed a wording change.
 
+## 57. Git Connector Adapter (Phase 2 Step 54)
+
+`connectors_git.py` (new) — the first concrete `ConnectorAdapter`, registering itself into
+`connector_polling.ADAPTERS["git"]` on import (`tasks.py` imports it for exactly that side effect).
+"The simplest state model (commit-SHA diffing)" is the tasklist's own justification for picking
+Git first over Confluence/Notion/website connectors, which would need per-page revision tracking
+instead of one branch's single HEAD SHA.
+
+**Scope confirmed via AskUserQuestion before building**: shells out to the real `git` CLI
+(`asyncio.create_subprocess_exec`, explicit argument lists — no shell string, no injection
+surface) rather than a pure-Python git library (`dulwich`) or one hosting provider's REST API.
+Works against any remote (GitHub, GitLab, Bitbucket, self-hosted) since it speaks the actual git
+protocol, matching "Git repo poller" literally rather than "GitHub poller" — and needed no new
+Python dependency, just `git` added to the worker Docker image (`Dockerfile`, `apt-get install
+git`).
+
+**State model**: `Connector.last_sync_cursor = {"commit_sha": "<sha>"}`, exactly one string. First
+poll (no cursor) treats every file in the tree as new (`git ls-tree -r --name-only HEAD`); a later
+poll diffs the stored SHA against the branch's current HEAD (`git diff --name-only
+--diff-filter=ACMR old..new`) — only Added/Copied/Modified/Renamed files become items.
+
+**Deletions are not submitted as anything — a real, flagged scope boundary, not an oversight.**
+Neither 09 §4 nor 03 §2 names removing/deprecating wiki content when a source disappears; no
+tasklist step anywhere builds that (connector-driven or otherwise). `--diff-filter=ACMR`
+deliberately excludes `D`.
+
+**A file that fails to decode as UTF-8 is skipped, not submitted.** This connector targets
+narrative content, and every downstream pipeline stage (classification, curation) expects text —
+submitting a binary blob would just fail later, less legibly.
+
+**Credential: HTTPS token only, embedded into the clone URL** (`https://<token>@host/...`) via
+`_with_credential`; SSH remotes pass through untouched (`git@host:...` URLs don't take an embedded
+HTTPS token this way) — "the simplest state model" extends to auth too, no known_hosts/key-format
+handling. `credential` here is already the *resolved* secret (step 53), never held past the one
+`poll()` call.
+
+**A real correctness fix caught by reasoning about the deployment shape, not by a test**: without
+`GIT_TERMINAL_PROMPT=0` set on the subprocess environment, a real worker process (no TTY) would
+hang indefinitely on an auth failure waiting for a username/password prompt, instead of failing
+fast with a message `_clone` can classify — `_CLONE_TIMEOUT_SECONDS` would eventually kill it, but
+that's the wrong outcome (a slow, unclassified generic error) rather than the intended one (a fast,
+correctly-classified `disabled_auth`). Fixed before it was ever exercised, then live-verified it
+actually mattered: a real clone against a real, deliberately nonexistent/private-looking GitHub URL
+with no credential failed in 0.43s with `fatal: could not read Username for 'https://github.com':
+terminal prompts disabled` — exactly the fast, classified failure the fix was for.
+
+**A stale `commit_sha` (force-push, rebase, or a genuinely wrong cursor) recovers as a full
+resync**, not a failed run — `git diff` against an unreachable SHA fails, caught specifically
+(`_GitDiffUnavailable`) and retried as `git ls-tree` (treat everything as new) rather than
+propagating as a generic error.
+
+**Tested against a real local git repository, not mocked** — `tests/test_connectors_git.py`'s
+`origin` fixture is a real `git init`-ed repo in a pytest `tmp_path`, cloned via a real `file://`
+URL. Git operations against a local repo are fast and fully hermetic (no network), so there was no
+reason to fake any of it: first-poll discovery, added/modified/deleted-file diffing, unchanged-SHA
+no-op, binary-file skipping, branch override, and the stale-cursor fallback are all exercised
+against the real CLI. The one thing that couldn't be hermetic — a real auth failure, which needs a
+real remote enforcing auth — is tested as `_clone`'s message-classification logic in isolation
+(`_run` mocked to raise a crafted message) rather than committing a test that depends on network
+access to a real host, matching this project's no-network-in-committed-tests convention; the real
+network-dependent case is the live check below instead.
+
+**Live-verified against real infra**: a real `worker-connector-polling` container (rebuilt with
+`git` installed) with real outbound network access, polling a real public GitHub repository
+(`octocat/Hello-World`) through the real broker — first poll discovered its one file and created a
+real `raw_source` that a real `worker-classification` container then processed via real
+`gpt-5-nano`; a second poll against the unchanged SHA correctly discovered zero items, no duplicate
+`raw_source`. Separately, a real auth-failure run (above) confirmed the fast-fail fix for real.
+Cleaned up the throwaway workspace/connectors/sources afterward.
+
+**Spec touch-point** (applied): none required — 03 §2 already named Git repositories as a
+connector example and 09 §4 already specified the execution model this fills in; nothing here
+needed a wording change to either.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

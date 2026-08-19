@@ -1,6 +1,7 @@
 """Connector polling — fetch/diff/create-raw_source orchestration (09 §4, phase2-
-tasklist.md step 52). `ADAPTERS` is empty in production until step 54; these tests
-register a throwaway stub adapter directly rather than exercising a real connector type.
+tasklist.md step 52). These tests register a throwaway stub adapter directly rather than
+exercising a real connector type — see test_connectors_git.py (step 54) for the real "git"
+adapter's own tests.
 """
 
 import pytest

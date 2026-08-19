@@ -5,6 +5,10 @@
 # Python version the dev venv is tested on (README).
 FROM python:3.14-slim
 
+# git (phase2-tasklist.md step 54) — the Git connector adapter shells out to the real CLI
+# rather than a hosting provider's REST API, so it works against any remote.
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY pyproject.toml ./

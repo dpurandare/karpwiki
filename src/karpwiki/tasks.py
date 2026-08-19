@@ -21,6 +21,7 @@ from celery import Celery
 from sqlalchemy import select
 
 from . import advisor, connector_polling, ingestion, pipeline, search
+from . import connectors_git  # noqa: F401 — registers "git" into connector_polling.ADAPTERS (step 54)
 from .config import (
     CELERY_BROKER_URL,
     CONNECTOR_DISPATCH_INTERVAL_MINUTES,

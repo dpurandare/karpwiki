@@ -177,6 +177,18 @@ choice trades and the three signals that should trigger raising the curator's ti
 the environment themselves, so the Platform never holds or logs it. Locally it comes from `.env`;
 in a deployment the secrets manager injects it at container start.
 
+**Connectors** (`06 §1`, `09 §4`/§13, phase2-tasklist.md steps 51-54): admin-configured
+scheduled crawlers that submit content the same way a user upload does. `POST /connectors`
+creates one (`type`, `config`, `credential_ref`, `schedule: {"interval_minutes": N}`,
+`ingestion_policy`); `celery-beat` dispatches due, enabled connectors onto their own
+`connector_polling` queue. `credential_ref` is a pointer into your own secrets manager, never a
+raw secret — the default resolver (`secrets_manager.EnvSecretResolver`) treats it as an
+environment variable name, so `credential_ref: "GIT_MAIN_TOKEN"` resolves against
+`GIT_MAIN_TOKEN` in the worker's own environment at poll time, never persisted. The one concrete
+connector type so far is `"git"` (`config: {"repo_url": ..., "branch": "main"}`) — real `git`
+clone/diff against any remote, `last_sync_cursor` tracking one commit SHA; an auth failure
+disables the connector (`disabled_auth`) rather than retrying.
+
 ## Scaling
 
 [06 §4](spec/06-api-mcp-and-scaling.md) describes the scaling model in the abstract, per layer.

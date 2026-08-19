@@ -1,7 +1,7 @@
 """Connector polling — fetch, diff, create a `raw_source` (02 §3, 09 §4, phase2-tasklist.md
 step 52). The generic run orchestration only: fetch/diff logic is entirely
-connector-type-specific (09 §4) and no concrete type is implemented until step 54 (a Git
-repo poller) — `ADAPTERS` is deliberately empty here.
+connector-type-specific (09 §4) and lives in a separate module per type — `connectors_git.py`
+(step 54) is the first, registering itself into `ADAPTERS` below when imported.
 
 09 §4's three steps, per scheduled run: fetch the connector's current state listing, diff
 against `Connector.last_sync_cursor`, and for each new/changed item create a `raw_source`
@@ -66,9 +66,12 @@ class ConnectorAdapter(Protocol):
         ...
 
 
-# Empty until step 54 registers the first concrete type ("git"). A connector whose `type`
-# has no registered adapter is not an error state — `type` is deliberately open-ended
-# (step 51) and nothing stops an admin from configuring one ahead of its adapter landing.
+# Populated by each concrete adapter module importing itself for the side effect
+# (`connectors_git.py`'s bottom line, step 54) — nothing here imports them eagerly, so a
+# process that never imports `connectors_git` (e.g. a test not exercising it) sees no "git"
+# entry. A connector whose `type` has no registered adapter is not an error state — `type`
+# is deliberately open-ended (step 51) and nothing stops an admin from configuring one ahead
+# of its adapter landing.
 ADAPTERS: dict[str, ConnectorAdapter] = {}
 
 
