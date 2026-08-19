@@ -1,6 +1,6 @@
 """Phase 2 step 43 — completing the REST surface: `pages` get/list (06 §1, never built
-until now), the admin Raw Source Browser (`GET /sources`, 05 §7), and stubbed `connectors`
-list/configure (real implementation lands with track 2e's `Connector` model, step 51).
+until now), and the admin Raw Source Browser (`GET /sources`, 05 §7). `connectors`
+list/create/update has its own real coverage now — see test_connectors_api.py (step 51).
 """
 
 import hashlib
@@ -284,34 +284,3 @@ async def test_list_sources_filters_by_status(client, session, workspace):
     )
     assert r.status_code == 200
     assert [i["filename"] for i in r.json()["items"]] == ["superseded.md"]
-
-
-# --- GET/POST /connectors (stub, 06 §1, real implementation is track 2e) ------------------
-
-
-async def test_list_connectors_requires_admin(client, session, workspace):
-    r = await client.get("/connectors", headers=READER, params={"workspace_id": workspace.workspace_id})
-    assert r.status_code == 403
-
-
-async def test_list_connectors_returns_empty_for_admin(client, session, workspace):
-    session.add(AccessPolicy(workspace_id=workspace.workspace_id, principal="avery", role=Role.admin))
-    await session.commit()
-
-    r = await client.get("/connectors", headers=ADMIN, params={"workspace_id": workspace.workspace_id})
-    assert r.status_code == 200
-    assert r.json() == {"items": []}
-
-
-async def test_configure_connector_rejects_non_admin(client, session, workspace):
-    r = await client.post("/connectors", headers=READER)
-    assert r.status_code == 403
-
-
-async def test_configure_connector_not_implemented_for_admin(client, session, workspace):
-    session.add(AccessPolicy(workspace_id=workspace.workspace_id, principal="avery", role=Role.admin))
-    await session.commit()
-
-    r = await client.post("/connectors", headers=ADMIN)
-    assert r.status_code == 501
-    assert r.json()["error"]["type"] == "not_implemented"
