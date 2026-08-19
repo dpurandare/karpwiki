@@ -11,8 +11,9 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–55 done, tracks 2a, 2b, 2c, and 2d all complete and closed out;
-track 2e (Connector Framework) in progress.** Phase 1 (steps 1–21,
+**Status (2026-08-19): steps 22–56 done — all five tracks (2a-2e) complete and closed out.
+Phase 2 is fully complete**, matching every row in the Exit Criteria table below. Phase 1 (steps
+1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -591,7 +592,22 @@ is a real Authenticator implementation using that pick, not a library search.
     [09](09-implementation-notes.md) §58.
 56. **Verify**: configure a connector, run one poll cycle, confirm it creates `raw_source`s
     indistinguishable from a manual upload and that they flow through the normal pipeline
-    (classification, dedup, curation) unchanged.
+    (classification, dedup, curation) unchanged. **Done** — `tests/test_end_to_end_2e.py`
+    (new, committed): configures a real connector, runs one poll cycle through the real task
+    wrapper against the real `"git"` adapter and a real local repo (hermetic, no network),
+    confirms `submitted_by=connector:<id>`, a normal `submission` review item, then drains
+    the real dispatch chain (mocked LLM/no broker) through to `ingested` and searchable, and
+    resolves through the same `POST /review-items/{id}/resolve` a manual submission uses.
+    Live-verified entirely through the real REST API (via the load-balanced gateway): `POST
+    /connectors` against a real public GitHub repo, a real dispatched poll, real
+    classification (landed at `pending_review` — a genuine, non-bug low-confidence outcome
+    resolved via the same admin path a manual submission takes), real curation/indexing, and
+    `GET /sources`/`GET /search` correctly showing the result — the complete pipeline
+    confirmed through the REST surface an operator would actually use, closing the loop this
+    track's earlier live checks had proven piecewise. Cleaned up the throwaway
+    workspace/connector/source/pages afterward. See [09](09-implementation-notes.md) §59.
+
+**Track 2e (Connector Framework) is now fully complete and closed out.**
 
 ## Exit Criteria
 

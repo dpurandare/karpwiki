@@ -177,7 +177,7 @@ choice trades and the three signals that should trigger raising the curator's ti
 the environment themselves, so the Platform never holds or logs it. Locally it comes from `.env`;
 in a deployment the secrets manager injects it at container start.
 
-**Connectors** (`06 §1`, `09 §4`/§13, phase2-tasklist.md steps 51-55): admin-configured
+**Connectors** (`06 §1`, `09 §4`/§13, phase2-tasklist.md steps 51-56): admin-configured
 scheduled crawlers that submit content the same way a user upload does. `POST /connectors`
 creates one (`type`, `config`, `credential_ref`, `schedule: {"interval_minutes": N}`,
 `ingestion_policy`); `celery-beat` dispatches due, enabled connectors onto their own

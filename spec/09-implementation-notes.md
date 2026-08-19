@@ -2904,5 +2904,42 @@ throwaway workspace/connector afterward.
 **Spec touch-point** (applied): none required — `09` §13 already named both halves of this step
 ("surfaces via... the Notification Service") in full; nothing here needed a wording change.
 
+## 59. 2e Closing Verify (Phase 2 Step 56)
+
+Closes out track 2e (steps 51-55: `Connector` model + API, the polling worker pool, credential
+resolution, the Git adapter, the auth-failure notification hook). The literal claim: configure a
+connector, run one poll cycle, confirm it creates `raw_source`s indistinguishable from a manual
+upload flowing through the normal pipeline unchanged.
+
+**Committed**: `tests/test_end_to_end_2e.py` (new) — configures a real connector
+(`connectors.create`), runs one poll cycle through `tasks._poll_connector` (the real task wrapper,
+not `connector_polling.poll_connector` directly, so the real "dispatch only after commit" step 32
+discipline is exercised too, not just the lower-level orchestration) against the real `"git"`
+adapter and a real local `git init`-ed repository (hermetic, no network — same convention as
+`test_connectors_git.py`). Confirms `submitted_by=connector:<id>`, a normal `submission` review
+item visible through the real REST admin surface, then drains the real dispatch chain (mocked
+LLM/no broker, matching `test_end_to_end_2b.py`/`2d.py`'s convention) through to `ingested` and
+searchable, and resolves the submission item through `POST /review-items/{id}/resolve` — the same
+endpoint, same action, no connector-specific branch anywhere in that path.
+
+**Live-verified entirely through the real REST API** (via the load-balanced `gateway`/`nginx`
+infra step 49 built), tying the whole track together in one continuous flow rather than
+DB-script-verified pieces: `POST /connectors` configured a real connector against a real public
+GitHub repo; a real dispatched `poll_connector` run against the real broker/worker discovered one
+file. **A genuine, non-bug outcome surfaced here worth noting**: this run's real classification
+landed at `pending_review` (a legitimate low-confidence/cross-check outcome, `03` §3, not a bug —
+the same class of outcome seen repeatedly across this session's live checks) rather than
+auto-classifying — resolved via `POST /review-items/{id}/resolve` with the target `document_type`,
+exactly the admin-intervention path a manual submission would also take, which this run happened
+to exercise for real rather than only the auto-classify path steps 52-55's own live checks had
+already covered. From there: real curation, real indexing, `GET /sources` and `GET /search`
+correctly showed the ingested, searchable content, and the submission review item resolved
+through `POST /review-items/{id}/resolve` — the complete pipeline, entirely through the REST
+surface a real admin/operator would use, no direct DB reads standing in for the "confirm it worked"
+step this time. Cleaned up the throwaway workspace/connector/source/pages afterward.
+
+**Spec touch-point** (applied): none required — this step's own text in phase2-tasklist.md already
+specified exactly what to verify; nothing here needed a wording change.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)
