@@ -589,9 +589,11 @@ async def resolve_review_item(
         return None
 
     if item.kind in (ReviewKind.reindex, ReviewKind.prune):
-        # `subject_ref` is a workspace_id here, not a source_id (phase2-tasklist.md steps
-        # 36-37) — resolved entirely in `advisor.py`, before the RawSource lookup below,
-        # which doesn't apply to either kind.
+        # `subject_ref` is never a source_id here — a workspace_id for the batched
+        # reasons (phase2-tasklist.md steps 36-37, 39), a page_id for the pair-specific
+        # `contradicted_by` reason (step 40, same shape as duplicate's page_id below) —
+        # resolved entirely in `advisor.py`, before the RawSource lookup below, which
+        # doesn't apply to either kind regardless.
         resolver = advisor.resolve_reindex if item.kind is ReviewKind.reindex else advisor.resolve_prune
         try:
             await resolver(session, item=item, action=action, actor=actor)

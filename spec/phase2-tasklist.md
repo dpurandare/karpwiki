@@ -11,7 +11,8 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-18): steps 22–39 done, tracks 2a and 2b complete, track 2c in progress.** Phase 1 (steps 1–21,
+**Status (2026-08-19): steps 22–40 done, tracks 2a and 2b complete, track 2c in progress (all five
+detectors built; step 41 scheduling next).** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -33,8 +34,8 @@ implementation-readiness notes with no Phase-1 code to attach to yet. **Don't re
 **Still open — resolve when the step is reached**, not before: the `document_type` table's exact
 migration path off `Workspace.document_types`' array column (step 22); dedicated-per-workspace-
 index selection criteria beyond [06](06-api-mcp-and-scaling.md) §6's illustrative page-count range
-(step 26); and the Contradiction Detector's Curator lint-pass design (net new — nothing in `09`
-covers a lint pass yet, step 40). The auth *library* is not open —
+(step 26). The Contradiction Detector's Curator lint-pass design (step 40) is resolved —
+[09](09-implementation-notes.md) §43. The auth *library* is not open —
 [08](08-implementation-stack.md) §2 already picks Authlib (OIDC/SAML) + PyJWT (API keys); step 47
 is a real Authenticator implementation using that pick, not a library search.
 
@@ -254,7 +255,21 @@ is a real Authenticator implementation using that pick, not a library search.
     [09](09-implementation-notes.md) §42.
 40. Contradiction Detector (Curator lint pass) → `reindex`/`prune` — net new LLM capability, no
     prior design to build from (flagged open in §0 above); resolve its design when this step
-    starts, the same way Phase 1 resolved forks at the step they blocked.
+    starts, the same way Phase 1 resolved forks at the step they blocked. **Done** —
+    `advisor.find_contradiction_candidates`/`run_contradiction_detector`: a cheap lexical
+    prefilter (`search.find_similar`, same mechanism step 38 uses) narrows candidates to a
+    `[0.35, 0.60)` similarity band (upper bound reuses `dedup.DEFAULT_NEAR_DUPLICATE_SCORE` so
+    step 38's near-duplicate pool and this one never overlap), then a real Pydantic AI call
+    (`call_contradiction_check`) judges each candidate — the first detector that spends an LLM
+    call during *detection*, not just resolution, capped at 5 checks/run. Confirmed pairs raise
+    a `prune` item (reason=`contradicted_by`, pair-specific like step 38's duplicates, not
+    batched); `resolve_prune` gained a third reason branch (`archive page`/`dismiss`), the branch
+    step 39's own docstring already predicted. `lint_log` deliberately stays unbuilt (design
+    question resolved via AskUserQuestion) — steps 36-39 never wrote to any log stream either,
+    relying entirely on `ReviewItem.detail`. Live-verified against real dev Postgres and a real
+    `gpt-5-nano` call, both directions: a real conflicting-claim pair correctly confirmed and
+    resolved, a real same-band-but-non-conflicting pair correctly raised nothing. See
+    [09](09-implementation-notes.md) §43.
 41. Scheduling: popularity-tiered refresh via Celery beat
     ([05](05-admin-backend-and-maintenance.md) §2's scheduling philosophy).
 42. **Verify**: seed stale, orphaned, superseded, and duplicate content; run the advisor; confirm

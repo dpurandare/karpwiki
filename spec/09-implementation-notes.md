@@ -1843,5 +1843,71 @@ page` over the real gateway.
 **Spec touch-point**: none — `05` §2/§4 already describe this; this section records the
 `_open_prune_item` fix and the content-page-type scoping.
 
+## 43. Contradiction Detector — The First Detector That Spends an LLM Call on Detection Itself (Phase 2 Step 40)
+
+Track 2c's fifth and final detector (05 §2's table row), and the one the tasklist itself flagged
+as "net new LLM capability, no prior design to build from." Two forks resolved via
+AskUserQuestion before writing any code, since nothing in `09` §6's `SCHEMA.md` template or
+anywhere else in `spec/` names a threshold for this:
+
+- **Candidate similarity band: `[0.35, 0.60)`.** Lexical containment (`search.find_similar`,
+  same mechanism step 38 uses) can't answer "do these two pages *agree* or *conflict*" — that's a
+  semantic judgment nothing but the LLM can make — so the band is purely a cost prefilter: pairs
+  below 0.35 don't share enough vocabulary to plausibly be making a claim about the same subject;
+  pairs at or above `dedup.DEFAULT_NEAR_DUPLICATE_SCORE` (0.60) are step 38's near-duplicate
+  territory already (a near-duplicate is a merge candidate, not a contradiction candidate) — the
+  upper bound reuses that existing constant rather than inventing a second number, so the two
+  detectors' candidate pools never overlap by construction.
+- **Per-run cap: 5 LLM checks**, tighter than step 38's `DEFAULT_MAX_DUPLICATE_ITEMS_PER_RUN`
+  (10) on purpose — that cap bounds *items raised*, cheap since step 38 never calls the LLM during
+  detection at all (only at `merge` resolution). This cap bounds LLM calls made during *detection
+  itself*: every candidate the band surfaces costs a real call whether or not the Curator confirms
+  a contradiction, so it has to be the tighter number.
+
+**This is the first detector where lexical similarity alone genuinely cannot do the job.**
+Steps 36-39 all worked from data already in Postgres (timestamps, `page_link` rows, `query_log`
+rows) or from a bounded lexical score (step 38's near-duplicate containment). "Do two pages make a
+conflicting factual claim" has no such proxy — two pages can score anywhere in the similarity band
+while agreeing completely (e.g. two systems' parallel incident-response runbooks), or while
+genuinely conflicting. So `find_contradiction_candidates` stays a cheap, DB-only prefilter exactly
+like step 38's scan, but `run_contradiction_detector` spends a real Pydantic AI call
+(`call_contradiction_check`, output type `ContradictionJudgment`) per surviving candidate, asking
+the Curator model to decide `contradicts: bool` and, if so, which page (`outdated_page: "a" | "b"`)
+should be retired.
+
+**Findings reuse `ReviewKind.prune`, reason `contradicted_by`** — already reserved for exactly this
+by `05` §4's reason table and by step 39's own forward-pointing docstring
+(`InvalidResolutionError` naming it as "what's still missing"). Pair-specific, not batched, same
+shape as step 38's `duplicate` items (an admin resolves each contradiction independently); a new
+`_open_prune_item_for_pair` (pair-scoped, unlike the workspace-scoped `_open_prune_item` steps
+37/39 use) prevents a naive re-run from re-flagging a pair an admin hasn't resolved yet.
+`resolve_prune` gained a third reason branch (`archive page` | `dismiss`, same two actions as the
+other prune reasons) — no new resolver function, following the pattern its own docstring predicted.
+
+**`lint_log` stays unbuilt, deliberately** — flagged as a real scope question and resolved via
+AskUserQuestion rather than assumed. `02` §5 names `lint_log` as one of `log.md`'s four source
+streams, and `09` §23's note ("`lint_log` excepted — no lint pass exists in Phase 1") reads as a
+forward pointer to exactly this step. Decided to skip it anyway: steps 36-39 never wrote to any log
+stream either, relying entirely on `ReviewItem.detail` as the evidence store (`09` §22's
+established pattern) — building `lint_log` now would be the first detector to break that
+consistency, for a stream nothing currently reads. `lint_log` remains a named-but-unbuilt stream,
+same as before this step, not a regression.
+
+**Live-verified against real dev Postgres and a real `gpt-5-nano` call (not committed), both
+directions.** A true-positive case (two pages making a real conflicting claim about Friday
+deploys — one allows them, one bans them, tuned via a throwaway scoring script to land at 0.53
+similarity) was correctly confirmed as a contradiction in 10.5s, with a coherent explanation
+naming which page's claim was stale; resolved via `archive page` over the real code path, and the
+flagged page's status flipped while the other stayed published. A true-negative case (two
+same-band, topically-related but non-conflicting procedures — a database incident runbook and an
+unrelated cache-warmup procedure, tuned to 0.42 similarity) correctly raised zero review items —
+worth checking explicitly rather than assuming the model wouldn't over-flag, since this is the
+first LLM call in the codebase making a bare `bool` judgment on real content with no verification
+step of its own.
+
+**Spec touch-point**: none required — `05` §2/§4 already named `contradicted_by` as a reason and
+`prune`/`reindex` as the possible outcomes; this section records the candidate-band/cap decision
+and the `lint_log` scope call.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

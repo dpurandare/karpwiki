@@ -11,7 +11,9 @@ a naive re-run must not spam duplicates.
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
+from pydantic import BaseModel, Field
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -388,9 +390,9 @@ async def run_orphan_detector(
 
 async def resolve_prune(session: AsyncSession, *, item: ReviewItem, action: str, actor: str) -> ReviewItem:
     """Admin resolution of a `prune` review item (05 §4). `superseded_source_retention`
-    (step 37) and `orphaned` (step 39) are built — `contradicted_by` (step 40) extends this
-    once its detector exists, the same way `resolve_duplicate` grew one action at a time
-    rather than all four arriving at once.
+    (step 37), `orphaned` (step 39), and `contradicted_by` (step 40) are built — each added
+    its own reason branch rather than all four arriving at once, the same way
+    `resolve_duplicate` grew one action at a time.
 
     "delete superseded source" only ever flips `RawSource.status` to `archived` — 05 §4's
     "follows the object-store lifecycle tiering" already assigns physical erasure to an
@@ -424,6 +426,16 @@ async def resolve_prune(session: AsyncSession, *, item: ReviewItem, action: str,
                 page = await session.get(WikiPage, uuid.UUID(entry["page_id"]))
                 if page is not None and page.status is PageStatus.published:
                     page.status = PageStatus.archived
+    elif reason == "contradicted_by":
+        if action not in ("archive page", "dismiss"):
+            raise InvalidResolutionError(
+                f"{action!r} is not a supported prune resolution for a contradiction "
+                "(archive page | dismiss)"
+            )
+        if action == "archive page":
+            page = await session.get(WikiPage, uuid.UUID((item.detail or {})["page_id"]))
+            if page is not None and page.status is PageStatus.published:
+                page.status = PageStatus.archived
     else:
         raise InvalidResolutionError(f"prune resolution for reason {reason!r} is not implemented")
 
@@ -702,3 +714,257 @@ async def resolve_existing_duplicate(
     # reject/keep_both: no page changes — see docstring.
 
     await review.resolve(session, item=item, action=action, actor=actor)
+
+
+# --- Contradiction Detector (05 §2, "Curator's periodic lint pass") — step 40 ------------
+#
+# Unlike every earlier detector, lexical similarity alone can't answer the actual
+# question here — "do these two pages agree or conflict" is a semantic judgment, not a
+# containment score — so this is the first detector that spends an LLM call during
+# *detection* itself, not just at resolution. `find_contradiction_candidates` stays a
+# cheap DB-only prefilter (reusing `search.find_similar`, same mechanism step 38 uses);
+# the LLM call only runs against pairs that prefilter surfaces, capped per run.
+#
+# Findings raise a `prune` item (reason=`contradicted_by`, resolved by `resolve_prune`
+# above) for the page the Curator judges outdated — pair-specific, not batched, same
+# reasoning as step 38's duplicate items.
+
+
+@dataclass(frozen=True)
+class ContradictionCandidate:
+    page_a_id: uuid.UUID
+    page_a_path: str
+    page_b_id: uuid.UUID
+    page_b_path: str
+    score: float
+
+
+# Lower bound: pairs below this share too little vocabulary to plausibly be making a
+# claim about the same subject — not worth an LLM call. Upper bound:
+# `dedup.DEFAULT_NEAR_DUPLICATE_SCORE` — pairs at or above that are step 38's
+# near-duplicate territory already (a near-duplicate is a merge candidate, not a
+# contradiction candidate), so the two detectors' candidate pools never overlap.
+DEFAULT_CONTRADICTION_MIN_SIMILARITY = 0.35
+DEFAULT_CONTRADICTION_MAX_SIMILARITY = dedup.DEFAULT_NEAR_DUPLICATE_SCORE
+
+# Caps how many candidate pairs one run spends an LLM call checking. Unlike step 38's
+# per-run item cap, this bounds LLM calls made during *detection*, not just items raised
+# — every candidate costs a real call regardless of whether the Curator confirms a
+# contradiction, so this must be tighter than a cap on findings alone.
+DEFAULT_MAX_CONTRADICTION_CHECKS_PER_RUN = 5
+
+
+async def find_contradiction_candidates(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    min_similarity: float = DEFAULT_CONTRADICTION_MIN_SIMILARITY,
+    max_similarity: float = DEFAULT_CONTRADICTION_MAX_SIMILARITY,
+) -> list[ContradictionCandidate]:
+    """DB-only prefilter: every published page's body scanned against `search.find_similar`
+    for other pages in the [`min_similarity`, `max_similarity`) band, deduped so a pair
+    surfaces once regardless of which page's own scan found it."""
+    pages = (
+        await session.execute(
+            select(WikiPage.page_id, WikiPage.path, WikiPage.current_version_id)
+            .where(WikiPage.workspace_id == workspace_id, WikiPage.status == PageStatus.published)
+        )
+    ).all()
+    if len(pages) < 2:
+        return []
+
+    version_ids = [v for _, _, v in pages if v is not None]
+    versions = {
+        row.version_id: row
+        for row in (
+            await session.execute(select(PageVersion).where(PageVersion.version_id.in_(version_ids)))
+        ).scalars()
+    }
+
+    seen_pairs: set[frozenset[uuid.UUID]] = set()
+    candidates: list[ContradictionCandidate] = []
+    for page_id, path, version_id in pages:
+        version = versions.get(version_id)
+        if version is None:
+            continue
+        _, body = split_frontmatter(version.content)
+        hits = await search.find_similar(session, text_body=body, workspace_id=workspace_id)
+        for hit in hits:
+            if hit.page_id == page_id or not (min_similarity <= hit.score < max_similarity):
+                continue
+            pair_key = frozenset({page_id, hit.page_id})
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            candidates.append(
+                ContradictionCandidate(
+                    page_a_id=page_id,
+                    page_a_path=path,
+                    page_b_id=hit.page_id,
+                    page_b_path=hit.path,
+                    score=hit.score,
+                )
+            )
+    return candidates
+
+
+class ContradictionJudgment(BaseModel):
+    """The Curator's lint-pass verdict for one candidate pair."""
+
+    contradicts: bool
+    outdated_page: Literal["a", "b"] = Field(
+        description=(
+            "Which page makes the claim that should be retired, when contradicts is "
+            "true. Ignored when contradicts is false, but still required — pick either "
+            "value in that case."
+        )
+    )
+    explanation: str = Field(min_length=1, description="One or two sentences on the conflicting claims.")
+
+
+class ContradictionCheckCall:
+    """Isolated the same way `PageMergeCall` is, for tests to inject a fake and skip the
+    network."""
+
+    async def __call__(
+        self, *, model: str, page_a_body: str, page_a_path: str, page_b_body: str, page_b_path: str
+    ) -> ContradictionJudgment: ...
+
+
+async def call_contradiction_check(
+    *, model: str, page_a_body: str, page_a_path: str, page_b_body: str, page_b_path: str
+) -> ContradictionJudgment:
+    """Real lint-pass call via Pydantic AI (05 §2). A lint judgment, not a curation output
+    — lives here rather than in `curate.py`, same reasoning as `call_page_merge_model`.
+    Transient failures retried with backoff (`llm.retry_transient`), same as every other
+    real LLM call."""
+    from pydantic_ai import Agent
+
+    agent = Agent(
+        model,
+        output_type=ContradictionJudgment,
+        system_prompt=(
+            "You are auditing an enterprise wiki for contradictions, as part of a "
+            "periodic lint pass. You will be shown two pages that a similarity scan "
+            "flagged as covering related subject matter. Decide whether they make a "
+            "genuinely conflicting factual claim about the same thing — not just "
+            "overlapping topics, and not one page being a more detailed or more recent "
+            "version of the other's same claim, which is an update rather than a "
+            "contradiction. If they do conflict, name which page (a or b) makes the "
+            "claim that is more likely outdated or wrong and should be retired."
+        ),
+    )
+    result = await llm.retry_transient(
+        lambda: agent.run(
+            f"Page a ({page_a_path}):\n\n{page_a_body}\n\n---\n\n"
+            f"Page b ({page_b_path}):\n\n{page_b_body}"
+        )
+    )
+    return result.output
+
+
+async def _open_prune_item_for_pair(
+    session: AsyncSession, *, workspace_id: str, reason: str, page_a_id: uuid.UUID, page_b_id: uuid.UUID
+) -> ReviewItem | None:
+    """Pair-scoped, unlike `_open_prune_item` above — `contradicted_by` items are
+    per-pair like step 38's duplicates, not one-per-workspace like the batched reasons, so
+    an open item for one pair must not block a genuinely different pair from ever being
+    raised."""
+    candidates = (
+        await session.execute(
+            select(ReviewItem).where(
+                ReviewItem.workspace_id == workspace_id,
+                ReviewItem.kind == ReviewKind.prune,
+                ReviewItem.status == ReviewStatus.open,
+            )
+        )
+    ).scalars().all()
+    pair_key = frozenset({str(page_a_id), str(page_b_id)})
+    for item in candidates:
+        detail = item.detail or {}
+        if detail.get("reason") != reason:
+            continue
+        if frozenset({detail.get("page_id"), detail.get("contradicting_page_id")}) == pair_key:
+            return item
+    return None
+
+
+async def run_contradiction_detector(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    min_similarity: float = DEFAULT_CONTRADICTION_MIN_SIMILARITY,
+    max_similarity: float = DEFAULT_CONTRADICTION_MAX_SIMILARITY,
+    max_checks: int = DEFAULT_MAX_CONTRADICTION_CHECKS_PER_RUN,
+    call: ContradictionCheckCall | None = None,
+) -> list[ReviewItem]:
+    """05 §2: one `prune` review item (reason=`contradicted_by`) per confirmed
+    contradicting pair. Spends at most `max_checks` LLM calls per run regardless of how
+    many candidates the similarity band surfaces."""
+    candidates = await find_contradiction_candidates(
+        session, workspace_id=workspace_id, min_similarity=min_similarity, max_similarity=max_similarity
+    )
+    items: list[ReviewItem] = []
+    checked = 0
+    for candidate in candidates:
+        if checked >= max_checks:
+            break
+        if (
+            await _open_prune_item_for_pair(
+                session,
+                workspace_id=workspace_id,
+                reason="contradicted_by",
+                page_a_id=candidate.page_a_id,
+                page_b_id=candidate.page_b_id,
+            )
+            is not None
+        ):
+            continue
+
+        page_a = await session.get(WikiPage, candidate.page_a_id)
+        page_b = await session.get(WikiPage, candidate.page_b_id)
+        if page_a is None or page_b is None:
+            continue
+        version_a = await session.get(PageVersion, page_a.current_version_id)
+        version_b = await session.get(PageVersion, page_b.current_version_id)
+        _, body_a = split_frontmatter(version_a.content)
+        _, body_b = split_frontmatter(version_b.content)
+
+        checked += 1
+        judgment = await (call or call_contradiction_check)(
+            model=llm.resolve_model("curator"),
+            page_a_body=body_a,
+            page_a_path=candidate.page_a_path,
+            page_b_body=body_b,
+            page_b_path=candidate.page_b_path,
+        )
+        if not judgment.contradicts:
+            continue
+
+        if judgment.outdated_page == "a":
+            flagged_id, flagged_path = candidate.page_a_id, candidate.page_a_path
+            other_id, other_path = candidate.page_b_id, candidate.page_b_path
+        else:
+            flagged_id, flagged_path = candidate.page_b_id, candidate.page_b_path
+            other_id, other_path = candidate.page_a_id, candidate.page_a_path
+
+        item = await review.create(
+            session,
+            kind=ReviewKind.prune,
+            subject_ref=str(flagged_id),
+            workspace_id=workspace_id,
+            severity="medium",
+            proposed_action="archive page",
+            detail={
+                "raised_by": "advisor",
+                "reason": "contradicted_by",
+                "page_id": str(flagged_id),
+                "path": flagged_path,
+                "contradicting_page_id": str(other_id),
+                "contradicting_path": other_path,
+                "explanation": judgment.explanation,
+                "score": round(candidate.score, 4),
+            },
+        )
+        items.append(item)
+    return items

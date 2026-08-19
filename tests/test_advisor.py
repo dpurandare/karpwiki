@@ -1,4 +1,4 @@
-"""Maintenance Advisor detectors (05 §2-5) — phase2-tasklist.md steps 36-39."""
+"""Maintenance Advisor detectors (05 §2-5) — phase2-tasklist.md steps 36-40."""
 
 import hashlib
 import uuid
@@ -403,13 +403,14 @@ async def test_resolve_prune_rejects_the_wrong_kind(session, workspace):
 
 
 async def test_resolve_prune_rejects_an_unbuilt_reason(session, workspace):
-    """`contradicted_by` (step 40) doesn't exist yet."""
+    """Every reason `05` §4 names is built as of step 40 — this checks the fallback
+    `else` branch itself still rejects whatever isn't one of them."""
     item = await review.create(
         session,
         kind=ReviewKind.prune,
         subject_ref=workspace.workspace_id,
         workspace_id=workspace.workspace_id,
-        detail={"reason": "contradicted_by"},
+        detail={"reason": "some_future_reason"},
     )
     with pytest.raises(advisor.InvalidResolutionError):
         await advisor.resolve_prune(session, item=item, action="archive page", actor="user:admin")
@@ -728,3 +729,182 @@ async def test_resolve_prune_orphaned_rejects_delete_superseded_source_action(se
         await advisor.resolve_prune(
             session, item=item, action="delete superseded source", actor="user:admin"
         )
+
+
+# --- Contradiction Detector (05 §2, "Curator's periodic lint pass") — step 40 ------------
+
+# Scores 0.5 each direction against `search.find_similar` — squarely inside the default
+# [0.35, 0.60) candidate band, symmetric so either page's own scan finds the pair.
+CONTRADICTION_BODY_A = (
+    "Restart the payments worker daily using the automated recovery script during "
+    "scheduled maintenance windows to clear the queue backlog."
+)
+CONTRADICTION_BODY_B = (
+    "Restart the payments worker weekly using a manual failover checklist during "
+    "unplanned incident response to clear the queue backlog."
+)
+
+
+def _fake_judgment(*, contradicts, outdated_page="a", explanation="Conflicting claim."):
+    async def _call(**_kwargs):
+        return advisor.ContradictionJudgment(
+            contradicts=contradicts, outdated_page=outdated_page, explanation=explanation
+        )
+
+    return _call
+
+
+async def test_find_contradiction_candidates_finds_a_same_topic_pair(session, workspace):
+    a = await _indexed_page(session, workspace, title="Daily Restart", body=CONTRADICTION_BODY_A)
+    b = await _indexed_page(session, workspace, title="Weekly Restart", body=CONTRADICTION_BODY_B)
+
+    candidates = await advisor.find_contradiction_candidates(session, workspace_id=workspace.workspace_id)
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert {candidate.page_a_id, candidate.page_b_id} == {a.page_id, b.page_id}
+    assert candidate.score == 0.5
+
+
+async def test_find_contradiction_candidates_excludes_near_duplicates(session, workspace):
+    """Score >= max_similarity (dedup's near-duplicate threshold) is step 38's territory,
+    not this detector's."""
+    await _indexed_page(session, workspace, title="Restarting Payments")
+    await _indexed_page(session, workspace, title="Payments Restart Runbook")
+
+    candidates = await advisor.find_contradiction_candidates(session, workspace_id=workspace.workspace_id)
+    assert candidates == []
+
+
+async def test_find_contradiction_candidates_excludes_unrelated_pages(session, workspace):
+    await _indexed_page(session, workspace, title="Restarting Payments")
+    await _indexed_page(session, workspace, title="Holiday Policy", body="Staff accrue leave.")
+
+    candidates = await advisor.find_contradiction_candidates(session, workspace_id=workspace.workspace_id)
+    assert candidates == []
+
+
+async def test_run_contradiction_detector_creates_a_prune_item(session, workspace):
+    a = await _indexed_page(session, workspace, title="Daily Restart", body=CONTRADICTION_BODY_A)
+    b = await _indexed_page(session, workspace, title="Weekly Restart", body=CONTRADICTION_BODY_B)
+
+    items = await advisor.run_contradiction_detector(
+        session,
+        workspace_id=workspace.workspace_id,
+        call=_fake_judgment(contradicts=True, outdated_page="a"),
+    )
+    await session.commit()
+
+    assert len(items) == 1
+    item = items[0]
+    assert item.kind is ReviewKind.prune
+    assert item.subject_ref == str(a.page_id)
+    assert item.detail["raised_by"] == "advisor"
+    assert item.detail["reason"] == "contradicted_by"
+    assert item.detail["page_id"] == str(a.page_id)
+    assert item.detail["contradicting_page_id"] == str(b.page_id)
+    assert item.detail["explanation"] == "Conflicting claim."
+
+
+async def test_run_contradiction_detector_flags_the_other_page_when_outdated_is_b(session, workspace):
+    a = await _indexed_page(session, workspace, title="Daily Restart", body=CONTRADICTION_BODY_A)
+    b = await _indexed_page(session, workspace, title="Weekly Restart", body=CONTRADICTION_BODY_B)
+
+    [item] = await advisor.run_contradiction_detector(
+        session,
+        workspace_id=workspace.workspace_id,
+        call=_fake_judgment(contradicts=True, outdated_page="b"),
+    )
+
+    assert item.detail["page_id"] == str(b.page_id)
+    assert item.detail["contradicting_page_id"] == str(a.page_id)
+
+
+async def test_run_contradiction_detector_no_findings_when_not_contradicting(session, workspace):
+    await _indexed_page(session, workspace, title="Daily Restart", body=CONTRADICTION_BODY_A)
+    await _indexed_page(session, workspace, title="Weekly Restart", body=CONTRADICTION_BODY_B)
+
+    items = await advisor.run_contradiction_detector(
+        session, workspace_id=workspace.workspace_id, call=_fake_judgment(contradicts=False)
+    )
+    assert items == []
+
+
+async def test_run_contradiction_detector_skips_an_open_pair(session, workspace):
+    await _indexed_page(session, workspace, title="Daily Restart", body=CONTRADICTION_BODY_A)
+    await _indexed_page(session, workspace, title="Weekly Restart", body=CONTRADICTION_BODY_B)
+
+    first = await advisor.run_contradiction_detector(
+        session, workspace_id=workspace.workspace_id, call=_fake_judgment(contradicts=True)
+    )
+    await session.commit()
+    assert len(first) == 1
+
+    second = await advisor.run_contradiction_detector(
+        session, workspace_id=workspace.workspace_id, call=_fake_judgment(contradicts=True)
+    )
+    assert second == []
+
+
+async def test_run_contradiction_detector_respects_max_checks(session, workspace):
+    """Three pages -> two candidate pairs in the contradiction band (the two same-body
+    pages score 1.0 against each other, excluded); capped to one LLM check."""
+    calls = []
+
+    async def _counting_call(**_kwargs):
+        calls.append(1)
+        return advisor.ContradictionJudgment(contradicts=True, outdated_page="a", explanation="x")
+
+    await _indexed_page(session, workspace, title="Daily Restart A", body=CONTRADICTION_BODY_A)
+    await _indexed_page(session, workspace, title="Weekly Restart A", body=CONTRADICTION_BODY_B)
+    await _indexed_page(session, workspace, title="Daily Restart B", body=CONTRADICTION_BODY_A)
+
+    await advisor.run_contradiction_detector(
+        session, workspace_id=workspace.workspace_id, max_checks=1, call=_counting_call
+    )
+    assert len(calls) == 1
+
+
+async def test_resolve_prune_contradicted_by_archives_the_flagged_page(session, workspace):
+    a = await _indexed_page(session, workspace, title="Daily Restart", body=CONTRADICTION_BODY_A)
+    b = await _indexed_page(session, workspace, title="Weekly Restart", body=CONTRADICTION_BODY_B)
+    [item] = await advisor.run_contradiction_detector(
+        session,
+        workspace_id=workspace.workspace_id,
+        call=_fake_judgment(contradicts=True, outdated_page="a"),
+    )
+    await session.commit()
+
+    await advisor.resolve_prune(session, item=item, action="archive page", actor="user:admin")
+
+    flagged = await session.get(type(a), a.page_id)
+    other = await session.get(type(b), b.page_id)
+    assert flagged.status is PageStatus.archived
+    assert other.status is PageStatus.published
+
+
+async def test_resolve_prune_contradicted_by_dismiss_leaves_pages_untouched(session, workspace):
+    a = await _indexed_page(session, workspace, title="Daily Restart", body=CONTRADICTION_BODY_A)
+    b = await _indexed_page(session, workspace, title="Weekly Restart", body=CONTRADICTION_BODY_B)
+    [item] = await advisor.run_contradiction_detector(
+        session, workspace_id=workspace.workspace_id, call=_fake_judgment(contradicts=True)
+    )
+    await session.commit()
+
+    await advisor.resolve_prune(session, item=item, action="dismiss", actor="user:admin")
+
+    for page in (a, b):
+        p = await session.get(type(page), page.page_id)
+        assert p.status is PageStatus.published
+
+
+async def test_resolve_prune_contradicted_by_rejects_an_unsupported_action(session, workspace):
+    await _indexed_page(session, workspace, title="Daily Restart", body=CONTRADICTION_BODY_A)
+    await _indexed_page(session, workspace, title="Weekly Restart", body=CONTRADICTION_BODY_B)
+    [item] = await advisor.run_contradiction_detector(
+        session, workspace_id=workspace.workspace_id, call=_fake_judgment(contradicts=True)
+    )
+    await session.commit()
+
+    with pytest.raises(advisor.InvalidResolutionError):
+        await advisor.resolve_prune(session, item=item, action="bogus", actor="user:admin")
