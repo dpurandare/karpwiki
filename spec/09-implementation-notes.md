@@ -3000,5 +3000,74 @@ already covers "deployment-wide operational tuning belongs in config," and no sp
 any of these seven values as anything other than an implementation-internal timeout/batch-size
 constant.
 
+## 61. Real Wiki Markdown Export to the Object Store (Phase 3 Step 57)
+
+`01` §1's own architecture diagram names "wiki markdown export" as one of exactly three things the
+Object Store holds, and `02` §2 specifies it precisely — a read-only, regenerated mirror at
+`/{workspace_id}/wiki/...` (`overview.md`, `index.md`, `log.md`, `concepts/*.md`, `entities/*.md`,
+`sources/*.md`, `comparisons/*.md`, `SCHEMA.md`), written whenever `wiki_page.current_version_id`
+changes. Never built through Phase 1/2 — every DB-backed wiki page lived only in the Metadata DB.
+
+**`wiki_export.py`** (new): `export_path(workspace_id, path)` builds `/{workspace_id}/wiki/{path}`
+— `wiki_page.path` already matches the export layout exactly (`concepts/{slug}.md`,
+`sources/{source_id}.md`, etc. — the same paths `curate.PAGE_DIRECTORY` and `_write_source_page`
+already produce), so no separate mapping was needed. `write`/`delete` are thin
+`objectstore.write_text`/`delete` wrappers. Called synchronously from `versioning.create_page`/
+`write_version`, right after `page.current_version_id` is set — the same "compute-on-write,
+non-transactional with the Metadata DB" pattern `_write_diff` already uses for page-version diffs
+(§7 above), which `02` §2 explicitly permits ("not required to be transactional... which remains
+the system of record"). `rollback` gets this for free since it calls `write_version` internally.
+
+**Two design forks, both confirmed via AskUserQuestion before building:**
+
+1. **`SCHEMA.md` is a placeholder, not real content.** `workspace.schema_ref` is still a bare
+   pointer string (§26 above; phase3-tasklist.md step 59 is the real parse/store/version work),
+   and it isn't a `wiki_page` at all — no `current_version_id` to hook a write off of. Chose to
+   write a placeholder now (`write_schema_placeholder`, called from `workspaces.create`/`update`
+   whenever `schema_ref` changes) rather than skip it entirely, so the file exists at the spec'd
+   path even before step 59 gives it real content; the placeholder names the pointer it's standing
+   in for and says explicitly what step will replace it.
+2. **A rebuild-from-DB-truth backfill, not forward-only.** `02` §3 calls the export "a regenerated
+   projection" — the same guarantee `search.reindex_pending` already gives the Full-Text Index —
+   and the write-through hook above only fires on a page's *next* write, so every page created
+   during Phase 1/2 would otherwise have zero exported file until next edited. `export_workspace`
+   (new) re-derives every current page's mirror plus the `SCHEMA.md` placeholder from DB truth in
+   one pass; safe to call again any time, same "rebuild, don't trust the projection" property
+   `reindex_pending` already has. Not wired to any API endpoint or scheduled task — same as
+   `reindex_pending`/`retry_errored`, which also have no caller anywhere in this codebase; an
+   operational tool, not a request-path feature.
+
+**`bulk_move.py` also cleans up the stale mirror.** A page move sets `page.workspace_id` before
+calling `write_version` (already the existing pattern, for `_write_diff`'s own path), so the new
+mirror lands correctly under the target workspace automatically — but the *old* workspace's copy
+would otherwise be left behind, referencing a page that no longer lives there. Added an explicit
+`wiki_export.delete(workspace_id=source_workspace_id, path=page.path)` right after the version
+write, mirroring the identical reasoning `execute_batch` already applies to the dedicated
+OpenSearch document cleanup two lines below it.
+
+**Deliberately out of scope**: `index.md` gets no special handling — nothing creates a real
+`index`-type page yet (step 60); once one does, it flows through the same write-through hook as
+any other page, no changes needed here. `comparison` pages are the same story — `curate.
+PAGE_DIRECTORY` has no entry for them because nothing creates one yet either.
+
+**Verification**: `tests/test_wiki_export.py` (new, 9 tests) covers `export_path`, write-on-create,
+overwrite-on-edit, `delete`, both `SCHEMA.md` placeholder branches (set/unset `schema_ref`, at both
+`workspaces.create` and `.update`), the `export_workspace` backfill, and the `bulk_move` stale-mirror
+cleanup — full suite (538 tests) green. Live-verified against real dev Postgres and the real
+MinIO-backed S3 object store: created a real workspace/page, confirmed the mirror landed at the
+real S3 path, edited it and confirmed the overwrite, deleted the mirror and confirmed
+`export_workspace` restored it, then bulk-moved the page and confirmed the old workspace's copy was
+gone and the new workspace's copy existed with the right content — independently re-checked via a
+raw `fsspec.find()` against the real bucket, bypassing this codebase's own `objectstore.py` wrapper
+entirely, rather than trusting only the Python-level assertions. Cleaned up the throwaway
+`live57-src-*`/`live57-tgt-*` workspaces from dev Postgres afterward (left their now-orphaned
+object-store files in place, matching this project's existing precedent of not cleaning up
+object-store debris from prior live checks).
+
+**Spec touch-point** (applied): none required — `02` §2's own text already permits everything built
+here (non-transactional write, "regenerated projection" framing); the two AskUserQuestion forks
+above are implementation decisions filling in what the spec deliberately left open, not deviations
+from it.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

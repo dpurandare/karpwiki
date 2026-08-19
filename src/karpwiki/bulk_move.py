@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import config, versioning
+from . import config, versioning, wiki_export
 from .dedicated_index import delete_page as delete_dedicated_page
 from .frontmatter import split_frontmatter
 from .ingestion import relocate
@@ -141,6 +141,11 @@ async def execute_batch(
             change_summary=f"Bulk move from {source_workspace_id} to {target_workspace_id}",
             frontmatter_updates={"workspace_id": target_workspace_id},
         )
+        # write_version already wrote the new mirror under the new workspace_id (it reads
+        # page.workspace_id, already reassigned above) — the old prefix's copy is now stale
+        # and points at a page that no longer lives there, same reasoning as the dedicated
+        # OpenSearch cleanup below.
+        wiki_export.delete(workspace_id=source_workspace_id, path=page.path)
         if was_dedicated:
             # write_version already marked the index stale (02 §7); the next reindex
             # sweep will pick the page up under its new workspace_id. But a page leaving

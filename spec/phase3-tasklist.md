@@ -24,11 +24,10 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-19): not started.** Phase 1 (steps 1–21) and Phase 2 (steps 22–56) are both
-complete — see [`phase1-tasklist.md`](phase1-tasklist.md) and
-[`phase2-tasklist.md`](phase2-tasklist.md). This file is a plan, not yet implementation; nothing
-below has a "Done" marker yet. See [`implementation-audit.md`](implementation-audit.md) for the
-full write-up of the two audit passes that shaped track 3a, including redundancy/dead-code
+**Status (2026-08-19): step 57 done, steps 58-78 not started.** Phase 1 (steps 1–21) and Phase 2
+(steps 22–56) are both complete — see [`phase1-tasklist.md`](phase1-tasklist.md) and
+[`phase2-tasklist.md`](phase2-tasklist.md). See [`implementation-audit.md`](implementation-audit.md)
+for the full write-up of the two audit passes that shaped track 3a, including redundancy/dead-code
 findings that don't need a roadmap step (tracked there instead).
 
 ## 3a — Carried-Forward Foundational Gaps (Phase 1/2 debt)
@@ -48,6 +47,23 @@ findings that don't need a roadmap step (tracked there instead).
     ("Karpathy Wiki for Agentic AI": an agent reading `index.md` off a real filesystem) and was
     simply never built, DB-backed wiki pages standing in for it throughout Phase 1 and 2. This
     step is the write-through (or short-delay async) exporter itself; step 58 depends on it.
+
+    **Done** — [`wiki_export.py`](../src/karpwiki/wiki_export.py) (new): `write`/`delete` mirror
+    one page's `/{workspace_id}/wiki/{path}` object using `wiki_page.path` directly (it already
+    matches the export layout — no separate mapping needed), called synchronously from
+    [`versioning.py`](../src/karpwiki/versioning.py)'s `create_page`/`write_version` (the same
+    "compute-on-write, non-transactional" pattern `_write_diff` already uses, `09` §7).
+    [`bulk_move.py`](../src/karpwiki/bulk_move.py) also deletes the stale mirror at the old
+    workspace prefix after a page move. `SCHEMA.md` is a **placeholder** (confirmed via
+    AskUserQuestion) — `schema_ref` is still a bare pointer, not real content, until step 59 — and
+    `export_workspace` is a **rebuild-from-DB-truth backfill** (also confirmed via
+    AskUserQuestion) for every page written before this step existed, mirroring
+    `search.reindex_pending`'s own precedent for the Full-Text Index. `index.md` is deliberately
+    not specially handled — nothing creates one yet (step 60); it will export automatically once
+    something does. Live-verified against real dev Postgres and the real MinIO-backed S3 object
+    store (independently confirmed via a raw `fsspec.find()`, bypassing this codebase's own
+    `objectstore.py` wrapper): create/edit/backfill/bulk-move all landed the exact expected files
+    at the exact expected paths. See [09](09-implementation-notes.md) §61 for the full writeup.
 
 58. **FUSE-mount access** ([09](09-implementation-notes.md) §12, [08](08-implementation-stack.md)
     §3). Read-only, opt-in per workspace via `access_policy`, mounting only the wiki export

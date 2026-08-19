@@ -15,7 +15,7 @@ import yaml
 from sqlalchemy import ARRAY, String, bindparam, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import objectstore, page_links
+from . import objectstore, page_links, wiki_export
 from .frontmatter import DEFAULT_REQUIRED_TAGS_MIN, validate_frontmatter
 from .models import (
     AdminActionLog,
@@ -101,6 +101,7 @@ async def create_page(
     page.current_version_id = version.version_id
     session.add(IndexStatus(page_id=page.page_id, index_type=IndexType.fts, state=IndexState.pending))
     await page_links.sync(session, page=page, body=body)
+    wiki_export.write(workspace_id=workspace_id, path=path, content=version.content)
     await session.flush()
     return page
 
@@ -157,6 +158,7 @@ async def write_version(
     page.current_version_id = version.version_id
     await _mark_stale(session, page.page_id)
     await page_links.sync(session, page=page, body=body)
+    wiki_export.write(workspace_id=page.workspace_id, path=page.path, content=content)
     await session.flush()
     return version
 

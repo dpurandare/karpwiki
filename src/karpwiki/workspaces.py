@@ -16,6 +16,7 @@ carried forward rather than built as a side effect of workspace CRUD.
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import wiki_export
 from .models import AccessPolicy, Role, Workspace, WorkspaceStatus
 
 
@@ -44,6 +45,7 @@ async def create(
     )
     session.add(workspace)
     await session.flush()
+    wiki_export.write_schema_placeholder(workspace_id=workspace_id, schema_ref=schema_ref)
     return workspace
 
 
@@ -63,6 +65,7 @@ async def update(
         workspace.description = description
     if schema_ref is not None:
         workspace.schema_ref = schema_ref
+        wiki_export.write_schema_placeholder(workspace_id=workspace.workspace_id, schema_ref=schema_ref)
     if storage_bindings is not None:
         workspace.storage_bindings = storage_bindings
     if dedicated_index is not None:
