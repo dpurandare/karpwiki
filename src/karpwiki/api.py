@@ -13,13 +13,15 @@ versions` list/get/diff and `pages/{id}/rollback`), and phase2-tasklist.md steps
 `query_log` writes are gateway concerns per 01 §2, so they live here around a call into
 `search.py` rather than in that module), and 27 (`workspaces/{id}/bulk-move` preview and
 execute — 05 §7, 09 §11 — the batch-loop/commit-per-batch boundary belongs here, not in
-`bulk_move.py`, matching every other module's "caller commits" convention).
+`bulk_move.py`, matching every other module's "caller commits" convention), and phase2-
+tasklist.md step 43 (`pages` get/list — 06 §1's other row, previously unbuilt since
+version history/rollback only ever took a `page_id` path param, never a listing call to
+discover one; `sources` list — 05 §7's admin Raw Source Browser; `connectors` list/
+configure, stubbed until track 2e's real `Connector` model lands, step 51).
 
 Not implemented here, deliberately: the rate limiter is 07 §3, a later phase (phase2-
-tasklist.md step 48). `pages` get/list (06 §1's other row) isn't built either — out of this
-file's steps' citations so far, and version history/rollback only ever take a `page_id`
-path param, never a page-listing call to discover one. Dedicated-index score normalization
-(04 §4) is step 26 — this endpoint only ever queries the one shared index.
+tasklist.md step 48). Dedicated-index score normalization (04 §4) is step 26 — this
+endpoint only ever queries the one shared index.
 """
 
 import hashlib
@@ -60,6 +62,7 @@ from .models import (
     AccessPolicy,
     DocumentType,
     IdempotencyRecord,
+    PageStatus,
     PageVersion,
     PipelineState,
     RawSource,
@@ -188,6 +191,53 @@ def _page_version_body(version: PageVersion, *, include_content: bool = False) -
     return body
 
 
+def _page_summary_body(row: versioning.PageSummary) -> dict[str, Any]:
+    return {
+        "page_id": str(row.page_id),
+        "workspace_id": row.workspace_id,
+        "path": row.path,
+        "page_type": row.page_type,
+        "status": row.status,
+        "title": row.title,
+        "description": row.description,
+        "tags": row.tags,
+        "date": row.date,
+    }
+
+
+def _page_body(page: WikiPage, version: PageVersion | None) -> dict[str, Any]:
+    body = {
+        "page_id": str(page.page_id),
+        "workspace_id": page.workspace_id,
+        "path": page.path,
+        "page_type": page.page_type.value,
+        "status": page.status.value,
+        "current_version_id": str(page.current_version_id) if page.current_version_id else None,
+    }
+    if version is not None:
+        body["title"] = version.frontmatter.get("title")
+        body["description"] = version.frontmatter.get("description")
+        body["tags"] = version.frontmatter.get("tags")
+        body["date"] = version.frontmatter.get("date")
+        body["content"] = version.content
+    return body
+
+
+async def _reader_page(session: AsyncSession, principal: Principal, page_id: uuid.UUID) -> WikiPage:
+    """`GET /pages/{id}` (06 §1) — reader-visible, unlike `_admin_page` above. A `draft`
+    page needs `contributor` instead: the same "elevated scope" `/search`'s
+    `include_drafts` already established for this exact content model (04 §6) — an
+    unreviewed page shouldn't leak to a mere reader just because this is a plainer
+    lookup than search."""
+    page = await session.get(WikiPage, page_id)
+    if page is None:
+        raise ApiError(404, "not_found", f"No page {page_id}.")
+    required = Role.contributor if page.status is PageStatus.draft else Role.reader
+    if not await has_role(session, principal=principal, workspace_id=page.workspace_id, required=required):
+        raise ApiError(403, "forbidden", f"Viewing this page requires the {required.value} role.")
+    return page
+
+
 async def _admin_page(session: AsyncSession, principal: Principal, page_id: uuid.UUID) -> WikiPage:
     """05 §6's Version Browser is admin-only (06 §1's `pages/{id}/versions` caller column)."""
     page = await session.get(WikiPage, page_id)
@@ -215,6 +265,21 @@ class UpdateDocumentTypeRequest(BaseModel):
     new_type_code: str | None = None
     workspace_id: str | None = None
     description: str | None = None
+
+
+def _source_body(source: RawSource) -> dict[str, Any]:
+    return {
+        "source_id": str(source.source_id),
+        "workspace_id": source.workspace_id,
+        "filename": source.filename,
+        "status": source.status.value,
+        "pipeline_state": source.pipeline_state.value,
+        "submitted_by": source.submitted_by,
+        "supersedes": str(source.supersedes) if source.supersedes else None,
+        "superseded_at": source.superseded_at.isoformat() if source.superseded_at else None,
+        "ingested_at": source.ingested_at.isoformat() if source.ingested_at else None,
+        "created_at": source.created_at.isoformat(),
+    }
 
 
 def _document_type_body(doc_type: DocumentType) -> dict[str, Any]:
@@ -411,6 +476,32 @@ def _register_routes(app: FastAPI) -> None:
             "label": pipeline.placeholder_label(source.pipeline_state),
         }
 
+    @app.get("/sources")
+    async def list_sources_endpoint(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        workspace_id: str,
+        status: str | None = None,
+        limit: int = ingestion.DEFAULT_LIST_LIMIT,
+        cursor: str | None = None,
+    ):
+        """05 §7's admin Raw Source Browser (06 §1's `connectors` row's sibling; `sources`
+        itself has no dedicated 06 §1 row beyond `submit`/`get status`, so this follows
+        `document-types`' own admin-list shape). Each item carries its raw `supersedes`
+        pointer — a client walks a full chain by following it through this same list."""
+        if not await has_role(
+            session, principal=principal, workspace_id=workspace_id, required=Role.admin
+        ):
+            raise ApiError(403, "forbidden", "Listing sources requires the admin role.")
+
+        sources, next_cursor = await ingestion.list_sources(
+            session, workspace_id=workspace_id, status=status, limit=limit, cursor=cursor
+        )
+        return {
+            "items": [_source_body(s) for s in sources],
+            "next_cursor": next_cursor,
+        }
+
     @app.get("/review-items")
     async def list_review_items(
         principal: Annotated[Principal, Depends(_principal)],
@@ -568,6 +659,56 @@ def _register_routes(app: FastAPI) -> None:
         for page_id in reindex_page_ids:
             tasks.reindex.delay(page_id)
         return body
+
+    @app.get("/pages")
+    async def list_pages_endpoint(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        workspace_id: str,
+        page_type: Annotated[list[str] | None, Query()] = None,
+        tags: Annotated[list[str] | None, Query()] = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        status: str | None = None,
+        limit: int = versioning.DEFAULT_LIST_LIMIT,
+        cursor: str | None = None,
+    ):
+        """06 §1's `pages` list — workspace-scoped like every resource but `/search` (06
+        §1's own framing), so `workspace_id` is required rather than resolved across every
+        accessible workspace. `status=draft` needs `contributor` (elevated scope, same
+        reasoning as `_reader_page` above); the default (no `status` filter) and an
+        explicit `published`/`archived` stay reader-visible."""
+        required = Role.contributor if status == PageStatus.draft.value else Role.reader
+        if not await has_role(session, principal=principal, workspace_id=workspace_id, required=required):
+            raise ApiError(403, "forbidden", f"Listing pages here requires the {required.value} role.")
+
+        statuses = [status] if status else [PageStatus.published.value]
+        pages, next_cursor = await versioning.list_pages(
+            session,
+            workspace_id=workspace_id,
+            page_types=page_type,
+            tags=tags,
+            date_from=date_from,
+            date_to=date_to,
+            statuses=statuses,
+            limit=limit,
+            cursor=cursor,
+        )
+        return {"items": [_page_summary_body(p) for p in pages], "next_cursor": next_cursor}
+
+    @app.get("/pages/{page_id}")
+    async def get_page_endpoint(
+        page_id: uuid.UUID,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+    ):
+        page = await _reader_page(session, principal, page_id)
+        version = (
+            await session.get(PageVersion, page.current_version_id)
+            if page.current_version_id
+            else None
+        )
+        return _page_body(page, version)
 
     @app.get("/pages/{page_id}/versions/diff")
     async def diff_page_versions(
@@ -772,6 +913,50 @@ def _register_routes(app: FastAPI) -> None:
         doc_type = await _admin_document_type(session, principal, type_code)
         await document_types.delete(session, doc_type=doc_type)
         await session.commit()
+
+    @app.get("/connectors")
+    async def list_connectors(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        workspace_id: str | None = None,
+    ):
+        """06 §1's `connectors` list — stubbed until track 2e's real `Connector` model and
+        polling worker pool land (phase2-tasklist.md step 51; execution model already
+        designed, 09 §4). Real admin auth (same shape as `document-types`' list) so this
+        endpoint's access behavior is meaningful now rather than deferred along with the
+        data; always returns empty, since nothing is stored yet — a deliberate stub, not a
+        silently-incomplete real implementation."""
+        if workspace_id is not None:
+            if not await has_role(
+                session, principal=principal, workspace_id=workspace_id, required=Role.admin
+            ):
+                raise ApiError(
+                    403, "forbidden", "Listing connectors for this workspace requires the admin role."
+                )
+        else:
+            if not await any_workspace_with_role(session, principal=principal, required=Role.admin):
+                raise ApiError(
+                    403, "forbidden", "Listing connectors requires the admin role somewhere."
+                )
+        return {"items": []}
+
+    @app.post("/connectors")
+    async def configure_connector(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+    ):
+        """Deliberately refuses rather than silently accepting and discarding a payload —
+        no `Connector` storage exists until track 2e (step 51). Still admin-gated first
+        (no request body/workspace_id defined yet, so "admin somewhere," the same
+        bootstrap check `POST /workspaces` uses) — a non-admin shouldn't get a different
+        response shape than what 06 §1's `connectors` caller column already promises."""
+        if not await any_workspace_with_role(session, principal=principal, required=Role.admin):
+            raise ApiError(403, "forbidden", "Configuring connectors requires the admin role somewhere.")
+        raise ApiError(
+            501,
+            "not_implemented",
+            "Connector configuration is not yet implemented (phase2-tasklist.md track 2e).",
+        )
 
     @app.get("/workspaces")
     async def list_workspaces(

@@ -16,7 +16,7 @@ import uuid
 from datetime import UTC, date, datetime
 from typing import Protocol
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import (
@@ -46,6 +46,7 @@ from .models import (
     WikiPage,
     Workspace,
 )
+from .pagination import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, decode_cursor, encode_cursor
 
 logger = logging.getLogger(__name__)
 
@@ -1020,3 +1021,39 @@ def relocate(source: RawSource, workspace_id: str) -> None:
     objectstore.write_bytes(final, objectstore.read_bytes(staged))
     source.object_key = final
     objectstore.delete(staged)
+
+
+async def list_sources(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    status: str | None = None,
+    limit: int = DEFAULT_LIST_LIMIT,
+    cursor: str | None = None,
+) -> tuple[list[RawSource], str | None]:
+    """05 §7's Raw Source Browser: every source in a workspace, newest-first, cursor-
+    paginated per 09 §14's shared convention (`RawSource.created_at`, added
+    phase2-tasklist.md step 43 specifically for this).
+
+    Each row carries its own `supersedes` pointer; a client reconstructs a full chain by
+    following that pointer through this same list rather than this function resolving and
+    returning a pre-walked chain per row — no recursive query needed for what's explicitly
+    scoped as a browse *view*, not a chain-resolution endpoint."""
+    limit = min(limit, MAX_LIST_LIMIT)
+    stmt = select(RawSource).where(RawSource.workspace_id == workspace_id)
+    if status is not None:
+        stmt = stmt.where(RawSource.status == RawSourceStatus(status))
+    if cursor is not None:
+        created_at, source_id = decode_cursor(cursor)
+        stmt = stmt.where(
+            tuple_(RawSource.created_at, RawSource.source_id) < tuple_(created_at, source_id)
+        )
+    stmt = stmt.order_by(RawSource.created_at.desc(), RawSource.source_id.desc()).limit(limit + 1)
+    sources = list((await session.execute(stmt)).scalars())
+
+    next_cursor = None
+    if len(sources) > limit:
+        sources = sources[:limit]
+        last = sources[-1]
+        next_cursor = encode_cursor(last.created_at, last.source_id)
+    return sources, next_cursor

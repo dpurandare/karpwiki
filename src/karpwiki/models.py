@@ -201,6 +201,12 @@ class RawSource(Base):
         PIPELINE_STATE_ENUM, default=PipelineState.submitted
     )
     ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Added phase2-tasklist.md step 43: the admin Raw Source Browser (05 §7) needs a
+    # chronological, cursor-paginable order (09 §14's shared (created_at, id) convention),
+    # and nothing else on this row records "when was this source submitted."
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.clock_timestamp()
+    )
 
 
 class WikiPage(Base):

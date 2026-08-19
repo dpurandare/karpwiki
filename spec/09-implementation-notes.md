@@ -2053,5 +2053,73 @@ isn't part of `docker-compose.yml`'s persistent dev stack.
 **Spec touch-point**: none required — `05` §1's consolidated queue and resolution model were
 already fully specified; this section records the closing-verify test and its one real live gap.
 
+## 46. Completing the REST Surface — `pages`, the Raw Source Browser, and a Stubbed `connectors` (Phase 2 Step 43)
+
+Track 2d's first step, and the first Phase 2 work outside track 2c. Three real gaps in `06` §1's
+resource table, closed together since all three are genuinely small once identified: `pages`
+get/list (never built — version history/rollback only ever took a `page_id` param, never a listing
+call to discover one), the admin Raw Source Browser (`05` §7), and `connectors` list/configure,
+deliberately stubbed until track 2e's real `Connector` model (step 51).
+
+**A real, if small, schema gap found while designing pagination, flagged and resolved via
+AskUserQuestion before writing code**: `RawSource` has no timestamp column at all — only
+`superseded_at`/`ingested_at`/`source_modified_at`, all nullable and set later in the pipeline, and
+nothing records "when was this submitted." Every other list endpoint in this codebase follows one
+shared `(created_at, id)` cursor convention (`09` §14), so the Raw Source Browser had nothing to
+key a cursor on. Resolved by adding `RawSource.created_at` (migration `e2bd2860a135`,
+`server_default=clock_timestamp()`, same pattern `ingestion_log`/`page_version` already use) rather
+than the alternative (skip cursor pagination for this one endpoint, sort by the UUID primary key) —
+keeps the endpoint consistent with the rest of the API and gives a genuinely useful "most recent
+first" browse order. Verified against both a real upgrade/downgrade/upgrade round-trip and a
+genuinely empty database, per this project's standing migration discipline.
+
+**`pages` list reuses `search.search()`'s exact tag/date filter semantics without reusing its
+code.** `versioning.list_pages` (new) mirrors `search()`'s raw-SQL filter-building style
+(`pv.frontmatter -> 'tags' ?| :tags`, `(pv.frontmatter ->> 'date')::date >= :date_from`) against the
+identical `page_version.frontmatter` data, so a tag or date filter means the same thing in both
+places — but drops the `page_index`/tsvector join and ranking entirely, since this is a plain
+catalog browse (`page_type`/`tags`/`date`/`status` filters, no query string), not a search. Sorted
+newest-first by the current version's `created_at` (matching `list_versions`' own order), since
+`wiki_page` itself has no timestamp of its own.
+
+**Draft visibility reuses `/search`'s already-decided "elevated scope" reasoning (`04` §6), applied
+by analogy rather than re-litigated.** `06` §1 gives `pages` blanket "any authenticated caller"
+access with no explicit carve-out, but an unreviewed `draft` page is the same content-sensitivity
+concern `/search`'s `include_drafts` flag already resolved: `GET /pages`/`GET /pages/{id}` require
+`contributor` (not just `reader`) to see or list `status=draft` content; `published`/`archived`
+stay reader-visible, since neither carries the same "not yet reviewed" risk. Applied consistently
+across both the list and get endpoints (`_reader_page`, mirroring `_admin_page`'s existing shape
+one rank down).
+
+**Raw Source Browser stays a "view," per the tasklist's own scoping.** `05` §7's full table row
+also names "manually trigger re-ingestion" and "adjust retention" as Repository Management
+functions, but phase2-tasklist.md step 43's own text narrows scope to "an admin raw-source browser
+**view** of `supersedes` chains" — those two actions aren't built here, flagged explicitly rather
+than silently only covering part of `05` §7's row. `GET /sources` returns each source's own
+`supersedes` pointer rather than a pre-resolved chain per row: since the endpoint already returns
+every source in the workspace, a client reconstructs a full chain by following that pointer through
+the same response — no recursive query needed for what's scoped as a browse, not a
+chain-resolution endpoint.
+
+**`connectors` is a deliberate stub, not a partial implementation.** `GET /connectors` performs
+real admin authorization (mirroring `document-types`' list shape: workspace-scoped when
+`workspace_id` is given, "admin somewhere" otherwise) but always returns `{"items": []}`, since no
+`Connector` table exists yet. `POST /connectors` checks the same "admin somewhere" bootstrap gate,
+then unconditionally raises a `501 not_implemented` — refusing rather than silently accepting and
+discarding a payload, so a caller can't mistake this for a working configure endpoint that just
+happens to do nothing. Both close out once track 2e's step 51 builds the real `Connector` model.
+
+**Live-verified against real dev Postgres and a real running gateway** (not committed, no LLM
+involved — this step is pure CRUD/listing): two pages with different tags/dates, and two sources in
+a real `supersedes` relationship. `GET /pages`'s tag and date filters correctly narrowed results
+against real JSONB data (not just the test DB's fixtures); `GET /pages/{id}` returned real content;
+`GET /sources` correctly 403'd a reader and, as admin, showed the real `supersedes` pointer and
+real `clock_timestamp()`-derived `created_at` ordering; `GET /connectors` returned an empty list
+and `POST /connectors` correctly 501'd. Cleaned up the throwaway workspace and stopped the
+standalone `uvicorn` process afterward, same as step 42's precedent.
+
+**Spec touch-point**: none required — `06` §1 and `05` §7 already fully describe these resources;
+this section records the `RawSource.created_at` decision and the draft-visibility/stub-scope calls.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

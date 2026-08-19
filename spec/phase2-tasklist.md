@@ -11,8 +11,8 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–42 done, tracks 2a, 2b, and 2c all complete and closed out.**
-Track 2d (Full API + MCP + Horizontal Scaling, steps 43+) is next. Phase 1 (steps 1–21,
+**Status (2026-08-19): steps 22–43 done, tracks 2a, 2b, and 2c all complete and closed out; track
+2d in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -317,7 +317,19 @@ is a real Authenticator implementation using that pick, not a library search.
 43. Complete the REST surface: `pages` get/list (never built) including an admin raw-source
     browser view of `supersedes` chains
     ([05](05-admin-backend-and-maintenance.md) §7), `connectors` list/configure (stubbed until
-    2e lands).
+    2e lands). **Done** — `GET /pages`/`GET /pages/{id}` (`versioning.list_pages`, new): reuses
+    `search.search()`'s exact tag/date filter semantics against the same frontmatter, no
+    tsvector/ranking; draft content requires `contributor` (mirrors `/search`'s
+    `include_drafts` elevated-scope reasoning, 04 §6). `GET /sources` (new, admin-only): the
+    Raw Source Browser, scoped to a "view" per the tasklist's own wording (re-ingestion/
+    retention actions from 05 §7's full row not built); each item's own `supersedes` pointer
+    lets a client walk a chain through the same list. Added `RawSource.created_at` (migration
+    `e2bd2860a135`) — nothing recorded a source's timestamp before, and every other list
+    endpoint shares one `(created_at, id)` cursor convention (09 §14); resolved via
+    AskUserQuestion before implementing. `GET /connectors` does real admin auth but always
+    returns empty; `POST /connectors` real-auths then 501s — a deliberate stub, not a partial
+    implementation, closed out by track 2e's step 51. Live-verified against real dev Postgres
+    and a real running gateway (no LLM involved). See [09](09-implementation-notes.md) §46.
 44. Performance Monitoring dashboards — index health, ingestion pipeline, search performance,
     storage utilization, review queue health
     ([05](05-admin-backend-and-maintenance.md) §8) — the "performance-focused" half of

@@ -8,9 +8,11 @@ and moves `wiki_page.current_version_id`. Rollback is non-destructive — it cre
 import difflib
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date
 
 import yaml
-from sqlalchemy import select, tuple_
+from sqlalchemy import ARRAY, String, bindparam, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import objectstore, page_links
@@ -243,6 +245,103 @@ async def list_versions(
         last = versions[-1]
         next_cursor = encode_cursor(last.created_at, last.version_id)
     return versions, next_cursor
+
+
+@dataclass(frozen=True)
+class PageSummary:
+    """One `GET /pages` row (06 §1, phase2-tasklist.md step 43) — the current version's
+    frontmatter fields a catalog browse actually wants, without its full `content`."""
+
+    page_id: uuid.UUID
+    workspace_id: str
+    path: str
+    page_type: str
+    status: str
+    title: str
+    description: str
+    tags: list[str]
+    date: str | None
+
+
+async def list_pages(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    page_types: list[str] | None = None,
+    tags: list[str] | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    statuses: list[str] | None = None,
+    limit: int = DEFAULT_LIST_LIMIT,
+    cursor: str | None = None,
+) -> tuple[list[PageSummary], str | None]:
+    """06 §1's pages list. `tags`/`date_from`/`date_to` mirror `search.search()`'s exact
+    filter semantics against the same `page_version.frontmatter` (04 §6) — same JSONB `?|`
+    containment, same date cast — but with no tsvector/ranking: this is a plain catalog
+    browse, not a query, so no `page_index` join is needed. Newest-first by the current
+    version's `created_at` (09 §14's shared cursor shape, the same order `list_versions`
+    above already uses), since `wiki_page` itself has no timestamp of its own."""
+    limit = min(limit, MAX_LIST_LIMIT)
+    statuses = statuses or [PageStatus.published.value]
+
+    filters = ["p.workspace_id = :workspace_id", "p.status IN :statuses"]
+    params: dict = {"workspace_id": workspace_id, "statuses": statuses, "limit": limit + 1}
+    binds = [bindparam("statuses", expanding=True)]
+
+    if page_types:
+        filters.append("p.page_type IN :page_types")
+        params["page_types"] = page_types
+        binds.append(bindparam("page_types", expanding=True))
+    if tags:
+        filters.append("pv.frontmatter -> 'tags' ?| :tags")
+        params["tags"] = tags
+        binds.append(bindparam("tags", type_=ARRAY(String)))
+    if date_from is not None:
+        filters.append("(pv.frontmatter ->> 'date')::date >= :date_from")
+        params["date_from"] = date_from
+    if date_to is not None:
+        filters.append("(pv.frontmatter ->> 'date')::date <= :date_to")
+        params["date_to"] = date_to
+    if cursor is not None:
+        cursor_created_at, cursor_page_id = decode_cursor(cursor)
+        filters.append("(pv.created_at, p.page_id) < (:cursor_created_at, :cursor_page_id)")
+        params["cursor_created_at"] = cursor_created_at
+        params["cursor_page_id"] = cursor_page_id
+
+    stmt = text(
+        "SELECT p.page_id, p.workspace_id, p.path, p.page_type, p.status, pv.created_at, "
+        "       COALESCE(pv.frontmatter ->> 'title', '') AS title, "
+        "       COALESCE(pv.frontmatter ->> 'description', '') AS description, "
+        "       pv.frontmatter -> 'tags' AS tags, "
+        "       pv.frontmatter ->> 'date' AS date "
+        "FROM wiki_page p "
+        "JOIN page_version pv ON pv.version_id = p.current_version_id "
+        f"WHERE {' AND '.join(filters)} "
+        "ORDER BY pv.created_at DESC, p.page_id DESC "
+        "LIMIT :limit"
+    ).bindparams(*binds)
+
+    rows = list((await session.execute(stmt, params)).all())
+    next_cursor = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        last = rows[-1]
+        next_cursor = encode_cursor(last.created_at, last.page_id)
+
+    return [
+        PageSummary(
+            page_id=r.page_id,
+            workspace_id=r.workspace_id,
+            path=r.path,
+            page_type=r.page_type,
+            status=r.status,
+            title=r.title,
+            description=r.description,
+            tags=list(r.tags or []),
+            date=r.date,
+        )
+        for r in rows
+    ], next_cursor
 
 
 async def diff(
