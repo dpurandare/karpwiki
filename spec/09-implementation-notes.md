@@ -2403,5 +2403,70 @@ implementation-readiness appendix for exactly this kind of gap; `06` §3 needed 
 auth model already anticipated a real OIDC provider without specifying the library-level details
 this section fills in.
 
+## 51. Rate Limiting (Phase 2 Step 48)
+
+The `RateLimit-*`/`Retry-After` header contract §14 above already specified, with a real limiter
+behind it at last: a Redis-backed fixed-window counter (`INCR` + `EXPIRE` on first hit), scoped to
+the REST gateway only — MCP's own protocol has no HTTP header concept, and `stdio` transport has
+no headers at all, so neither `06` §2's tool table nor this tasklist step named rate limiting for
+MCP.
+
+**Scope confirmed via AskUserQuestion before building, not assumed.** `07` §3 asks for "per-
+principal and per-workspace" limits, but `workspace_id` isn't a uniform request parameter — it's
+absent from taxonomy-pre-filter submissions and not-yet-classified sources. Chose "principal +
+category limits always-on; workspace limit opportunistic" over deferring workspace limiting
+entirely: per-principal throttling (keyed off a coarse, unverified identity — the raw
+`Authorization`/`X-Karpwiki-User` header value, SHA-256 hashed before it ever becomes a Redis key
+name, matching this project's never-print-a-secret discipline applied to a new surface) covers the
+abuse case unconditionally; the per-workspace check only runs when `workspace_id` is already a
+plain query/path parameter on the request, rather than duplicating real business logic
+(taxonomy/classification) in middleware just to resolve "which workspace" for every endpoint
+shape.
+
+**Deliberately does not call the real `Authenticator`.** Re-running `default_authenticator()` —
+possibly a real OIDC JWKS network fetch, §50 above — just to bucket a rate-limit counter would be
+both wasteful and wrong: an unauthenticated or invalid-token caller still needs throttling, which
+the coarse, unverified key provides without needing to *validate* anything. AuthN/AuthZ and rate
+limiting stay logically separate checks even though `01` §2 frames them as one Common Gateway
+layer.
+
+**Three mutually exclusive categories**, matching `07` §3's own three ("submissions, search
+calls, and API requests") by path/method — "API requests" reads as the general catch-all every
+other endpoint falls into, not a fourth layer stacked on top of the other two.
+
+**Middleware ordering, verified empirically rather than assumed.** `enforce_rate_limit` is
+registered *before* `attach_request_id` in `create_app()` — Starlette wraps `@app.middleware`
+registrations in reverse order (last-registered ends up outermost), confirmed with a standalone
+test script before relying on it, so `enforce_rate_limit` ends up the *inner* middleware and
+always sees a real `request.state.request_id` already set, giving a 429 response body the same
+`request_id` a caller would see on any other error.
+
+**A real test-isolation gap, found by running the full suite, not anticipated in advance.** Unlike
+the Postgres test DB (dropped/recreated per test by the `session` fixture), the rate limiter's
+Redis counters live in the same real, shared Redis instance across an entire pytest run with no
+reset between tests — and dozens of test files submit/search/etc. as the same `deepak` principal.
+First pass: 4 failing tests (`KeyError: 'source_id'` after `POST /sources` in the 2a/2b end-to-end
+tests, plus two 1c tests), because the accumulated per-principal counter from earlier tests in the
+same run tripped the real default limits partway through. Two-part fix: (1) moved the
+category→limit lookup dict from module-import time into `create_app()` itself, so it re-reads
+`config.RATE_LIMIT_*` fresh per app instance instead of freezing values at import — needed because
+`tests/conftest.py`'s `client` fixture calls `create_app()` fresh per test, and a frozen
+module-level dict would never see a test's monkeypatched config; (2) added an autouse
+`generous_rate_limits` fixture (mirroring step 32's `dispatched` fixture's own reasoning) that
+monkeypatches every `RATE_LIMIT_*` constant up to 1,000,000 for the duration of each test — keeping
+the real, unmocked code path exercised rather than mocking `ratelimit.check` away, while making
+the suite's real request volume a non-issue. `tests/test_ratelimit.py` overrides the limit back
+down for its own dedicated enforcement test, and deliberately uses a per-test-unique principal
+header rather than the suite's shared `deepak`, since the "general" category's real Redis counter
+for `deepak` is itself still being incremented by unrelated tests within the same 60s window.
+
+**Live-verified against a real local server, not just the test suite.** A real `uvicorn
+karpwiki.api:app` subprocess, started with `KARPWIKI_RATE_LIMIT_GENERAL_PER_PRINCIPAL=5` and
+`KARPWIKI_RATE_LIMIT_WINDOW_SECONDS=30`, correctly returned `200` with descending
+`RateLimit-Remaining` for the first 5 requests from one principal, then real `429`s with the
+standard error envelope (`{"error": {"type": "rate_limited", ...}}`) and a `Retry-After` header for
+every request after; waiting out the window produced a fresh `200` with the counter reset,
+confirming the fixed-window `EXPIRE` behavior end to end against real Redis.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

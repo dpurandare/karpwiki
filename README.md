@@ -131,6 +131,16 @@ against the configured IdP's JWKS, via Authlib/`joserfc` — swaps in automatica
 and MCP, with no handler changes. **SAML is not supported**: Authlib (`08 §2`'s pick) has no SAML
 module at all, so only the OIDC half of `06 §3`'s "Enterprise SSO (OIDC/SAML)" is implemented.
 
+**Rate limiting** ([07 §3](spec/07-additional-features-and-roadmap.md), phase2-tasklist.md step
+48): REST only — MCP has no HTTP header concept, especially on `stdio`. A Redis-backed
+fixed-window counter enforces `07 §3`'s "submissions, search calls, and API requests" categories,
+each with a per-principal limit (always checked, keyed off a hashed, unverified identity so an
+unauthenticated or invalid-token caller still gets throttled) and a per-workspace limit (checked
+opportunistically, only when `workspace_id` is already a plain query/path parameter). A breached
+limit returns `429` with the standard error envelope; every response — breached or not — carries
+the `RateLimit-Limit`/`RateLimit-Remaining`/`RateLimit-Reset` headers `09 §14` already specified,
+plus `Retry-After` on the `429` itself.
+
 Configuration is environment variables, listed with their defaults in
 [`.env.example`](.env.example). `.env` is gitignored and loaded automatically; real environment
 variables always win over it, so a deployment passes its own and needs no file.

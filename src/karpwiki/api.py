@@ -30,6 +30,7 @@ import uuid
 from datetime import date
 from typing import Annotated, Any
 
+import redis.asyncio as redis
 from fastapi import Depends, FastAPI, Form, Header, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -39,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from . import (
     bulk_move,
     classify,
+    config,
     dedicated_index,
     document_types,
     ingestion,
@@ -46,6 +48,7 @@ from . import (
     objectstore,
     pipeline,
     query_log,
+    ratelimit,
     review,
     search,
     tasks,
@@ -105,9 +108,99 @@ def _envelope(request: Request, exc: ApiError) -> JSONResponse:
     return JSONResponse(status_code=exc.status, content=body)
 
 
+def _rate_limit_category(request: Request) -> str:
+    if request.method == "POST" and request.url.path == "/sources":
+        return "submit"
+    if request.method == "GET" and request.url.path == "/search":
+        return "search"
+    return "general"
+
+
+def _rate_limit_workspace_id(request: Request) -> str | None:
+    """Opportunistic only (`ratelimit.py`'s module docstring) — a plain query or path
+    param, never resolved via taxonomy pre-filter or classification."""
+    return request.path_params.get("workspace_id") or request.query_params.get("workspace_id")
+
+
 def create_app(authenticator: Authenticator | None = None) -> FastAPI:
     app = FastAPI(title="karpwiki gateway")
     app.state.authenticator = authenticator or default_authenticator()
+    # Lazy connection pool — constructing this never blocks or binds to an event loop by
+    # itself (unlike a client that connects eagerly), so it's safe to create here at
+    # `create_app()` time rather than per-request; each real request's own event loop is
+    # whichever one is running when a command is actually issued.
+    app.state.redis = redis.from_url(config.CELERY_BROKER_URL)
+
+    # Read once per app instance, not at module-import time — a test's `client` fixture
+    # calls `create_app()` fresh per test, so monkeypatching `config.RATE_LIMIT_*` before
+    # that call (conftest.py's `generous_rate_limits`) actually takes effect. 07 §3's own
+    # three categories ("submissions, search calls, and API requests") — mutually
+    # exclusive, by path/method; "API requests" is the general catch-all, not a fourth
+    # layer on top of the other two. `(per_principal_limit, per_workspace_limit)`.
+    rate_limit_categories: dict[str, tuple[int, int]] = {
+        "submit": (config.RATE_LIMIT_SUBMIT_PER_PRINCIPAL, config.RATE_LIMIT_SUBMIT_PER_WORKSPACE),
+        "search": (config.RATE_LIMIT_SEARCH_PER_PRINCIPAL, config.RATE_LIMIT_SEARCH_PER_WORKSPACE),
+        "general": (config.RATE_LIMIT_GENERAL_PER_PRINCIPAL, config.RATE_LIMIT_GENERAL_PER_WORKSPACE),
+    }
+
+    @app.middleware("http")
+    async def enforce_rate_limit(request: Request, call_next):
+        """09 §14's `RateLimit-*`/`Retry-After` header contract, phase2-tasklist.md step
+        48 — registered *before* `attach_request_id` below so it ends up the inner
+        middleware (Starlette wraps in reverse registration order) and always sees a
+        real `request.state.request_id` already set, for a consistent 429 body."""
+        category = _rate_limit_category(request)
+        principal_limit, workspace_limit = rate_limit_categories[category]
+        window = config.RATE_LIMIT_WINDOW_SECONDS
+
+        principal_result = await ratelimit.check(
+            request.app.state.redis,
+            key=f"ratelimit:{category}:principal:{ratelimit.principal_key(dict(request.headers))}",
+            limit=principal_limit,
+            window_seconds=window,
+        )
+        workspace_result = None
+        workspace_id = _rate_limit_workspace_id(request)
+        if workspace_id:
+            workspace_result = await ratelimit.check(
+                request.app.state.redis,
+                key=f"ratelimit:{category}:workspace:{workspace_id}",
+                limit=workspace_limit,
+                window_seconds=window,
+            )
+
+        breached = not principal_result.allowed or (workspace_result is not None and not workspace_result.allowed)
+        # Report whichever bound is actually binding: the one that failed, or (if both
+        # passed) the one with less headroom left — the caller's next request is
+        # constrained by that one regardless of which counter reports it.
+        if not principal_result.allowed:
+            reported = principal_result
+        elif workspace_result is not None and not workspace_result.allowed:
+            reported = workspace_result
+        elif workspace_result is not None and workspace_result.remaining < principal_result.remaining:
+            reported = workspace_result
+        else:
+            reported = principal_result
+
+        if breached:
+            response = JSONResponse(
+                status_code=429,
+                content={
+                    "error": {
+                        "type": "rate_limited",
+                        "message": "Rate limit exceeded.",
+                        "request_id": request.state.request_id,
+                    }
+                },
+            )
+            response.headers["Retry-After"] = str(reported.reset_seconds)
+        else:
+            response = await call_next(request)
+
+        response.headers["RateLimit-Limit"] = str(reported.limit)
+        response.headers["RateLimit-Remaining"] = str(reported.remaining)
+        response.headers["RateLimit-Reset"] = str(reported.reset_seconds)
+        return response
 
     @app.middleware("http")
     async def attach_request_id(request: Request, call_next):

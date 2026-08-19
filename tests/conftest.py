@@ -6,7 +6,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from karpwiki import tasks
+from karpwiki import config, tasks
 from karpwiki.models import AccessPolicy, Base, DocumentType, Role, Workspace, WorkspaceStatus
 
 TEST_DATABASE_URL = os.environ.get(
@@ -55,6 +55,25 @@ def dispatched(monkeypatch):
             getattr(tasks, name), "delay", lambda arg, name=name: calls[name].append(arg)
         )
     return calls
+
+
+@pytest.fixture(autouse=True)
+def generous_rate_limits(monkeypatch):
+    """Rate limiting (phase2-tasklist.md step 48) uses a real, shared Redis instance whose
+    fixed-window counters — unlike the Postgres `session` fixture — are never reset between
+    tests, and dozens of tests submit/search/etc. as the same `deepak` principal within the
+    same 60s window. Raising the configured limits (not mocking `ratelimit.check` itself)
+    keeps the real code path exercised while making the default limits a non-issue at test
+    volume; `test_ratelimit.py` overrides these back down to exercise real enforcement."""
+    for name in (
+        "RATE_LIMIT_SUBMIT_PER_PRINCIPAL",
+        "RATE_LIMIT_SUBMIT_PER_WORKSPACE",
+        "RATE_LIMIT_SEARCH_PER_PRINCIPAL",
+        "RATE_LIMIT_SEARCH_PER_WORKSPACE",
+        "RATE_LIMIT_GENERAL_PER_PRINCIPAL",
+        "RATE_LIMIT_GENERAL_PER_WORKSPACE",
+    ):
+        monkeypatch.setattr(config, name, 1_000_000)
 
 
 # No OpenSearch reset fixture (phase2-tasklist.md step 26): every `workspace`/

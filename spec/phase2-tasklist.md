@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–47 done, tracks 2a, 2b, and 2c all complete and closed out; track
+**Status (2026-08-19): steps 22–48 done, tracks 2a, 2b, and 2c all complete and closed out; track
 2d in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
@@ -412,7 +412,27 @@ is a real Authenticator implementation using that pick, not a library search.
     via a real stdio subprocess. See [09](09-implementation-notes.md) §50.
 48. Rate limiting ([07](07-additional-features-and-roadmap.md) §3) — the `RateLimit-*` headers
     were already specified in [09](09-implementation-notes.md) §14 but never implemented, since no
-    limiter existed to emit them.
+    limiter existed to emit them. **Done** — `ratelimit.py` (new): a Redis-backed fixed-window
+    counter behind the existing header contract, wired into `api.py` as an `enforce_rate_limit`
+    middleware, REST only (MCP has no HTTP header concept, especially on `stdio`). Per-principal
+    is always checked (a coarse, unverified hashed identity key, so an unauthenticated caller is
+    still throttled without running a real `Authenticator`); per-workspace is opportunistic —
+    checked only when `workspace_id` is already a plain request parameter — confirmed via
+    AskUserQuestion before building. Three categories mirror `07` §3's own three (submissions,
+    search calls, general API requests), each independently configurable via new
+    `KARPWIKI_RATE_LIMIT_*` env vars. Middleware ordering verified empirically (Starlette wraps
+    `@app.middleware` registrations in reverse order) so a breached request's 429 body still
+    carries a real `request_id`. Running the full suite surfaced a real test-isolation gap: the
+    shared dev Redis instance carries rate-limit counters across the whole pytest run, unlike the
+    per-test Postgres DB, so 4 unrelated tests started failing once accumulated counters from
+    earlier tests tripped the real default limits. Fixed by moving the category→limit lookup into
+    `create_app()` (read fresh per app instance, not frozen at import) plus a new autouse
+    `generous_rate_limits` fixture (mirroring step 32's `dispatched` fixture) that raises the
+    limits for the suite by default; `test_ratelimit.py` (new) exercises real enforcement directly
+    with a per-test-unique principal. Live-verified against a real `uvicorn` subprocess: real 429s
+    with the standard error envelope and `Retry-After`/`RateLimit-*` headers once a real, tightly
+    configured limit was exhausted, and a real reset once the window elapsed. See
+    [09](09-implementation-notes.md) §51.
 49. Horizontal scaling: multiple gateway instances behind a load balancer, worker pools scaling
     independently now that 2b makes them real
     ([06](06-api-mcp-and-scaling.md) §5 deployment topology).

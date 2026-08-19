@@ -96,3 +96,17 @@ OIDC_JWKS_URI = os.environ.get("KARPWIKI_OIDC_JWKS_URI", "")
 # vs `email`/`preferred_username`; `groups` is common but not standardized).
 OIDC_PRINCIPAL_CLAIM = os.environ.get("KARPWIKI_OIDC_PRINCIPAL_CLAIM", "sub")
 OIDC_GROUPS_CLAIM = os.environ.get("KARPWIKI_OIDC_GROUPS_CLAIM", "groups")
+
+# Rate limiting (01 §1-2, 07 §3, 09 §14; phase2-tasklist.md step 48) — deployment-wide
+# operational tuning, the same category cadence/staleness-tiering env vars above already
+# occupy, not a per-workspace content threshold. One shared window; three categories
+# (07 §3's own "submissions, search calls, and API requests") each get a per-principal
+# limit (always checked) and a per-workspace limit (checked only when workspace_id is
+# already a plain request parameter — see ratelimit.py's module docstring).
+RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("KARPWIKI_RATE_LIMIT_WINDOW_SECONDS", "60"))
+RATE_LIMIT_SUBMIT_PER_PRINCIPAL = int(os.environ.get("KARPWIKI_RATE_LIMIT_SUBMIT_PER_PRINCIPAL", "20"))
+RATE_LIMIT_SUBMIT_PER_WORKSPACE = int(os.environ.get("KARPWIKI_RATE_LIMIT_SUBMIT_PER_WORKSPACE", "200"))
+RATE_LIMIT_SEARCH_PER_PRINCIPAL = int(os.environ.get("KARPWIKI_RATE_LIMIT_SEARCH_PER_PRINCIPAL", "60"))
+RATE_LIMIT_SEARCH_PER_WORKSPACE = int(os.environ.get("KARPWIKI_RATE_LIMIT_SEARCH_PER_WORKSPACE", "600"))
+RATE_LIMIT_GENERAL_PER_PRINCIPAL = int(os.environ.get("KARPWIKI_RATE_LIMIT_GENERAL_PER_PRINCIPAL", "300"))
+RATE_LIMIT_GENERAL_PER_WORKSPACE = int(os.environ.get("KARPWIKI_RATE_LIMIT_GENERAL_PER_WORKSPACE", "3000"))
