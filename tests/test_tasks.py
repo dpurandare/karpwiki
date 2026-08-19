@@ -490,3 +490,97 @@ async def test_dispatch_contradiction_detector_enqueues_per_active_workspace(
     await tasks._dispatch_contradiction_detector()
 
     assert set(dispatched["detect_contradictions"]) == {workspace.workspace_id, other_workspace.workspace_id}
+
+
+# --- connector polling (phase2-tasklist.md step 52) -----------------------------------------
+
+
+def test_connector_is_due_when_never_run():
+    from datetime import UTC, datetime
+
+    from karpwiki.models import Connector
+
+    connector = Connector(schedule={"interval_minutes": 10}, last_run_at=None)
+    assert tasks._connector_is_due(connector, now=datetime.now(UTC))
+
+
+def test_connector_is_due_respects_interval():
+    from datetime import UTC, datetime, timedelta
+
+    from karpwiki.models import Connector
+
+    now = datetime.now(UTC)
+    connector = Connector(schedule={"interval_minutes": 10}, last_run_at=now - timedelta(minutes=5))
+    assert not tasks._connector_is_due(connector, now=now)
+
+    connector.last_run_at = now - timedelta(minutes=15)
+    assert tasks._connector_is_due(connector, now=now)
+
+
+def test_connector_is_due_false_with_no_interval_configured():
+    from datetime import UTC, datetime
+
+    from karpwiki.models import Connector
+
+    connector = Connector(schedule={}, last_run_at=None)
+    assert not tasks._connector_is_due(connector, now=datetime.now(UTC))
+
+
+async def test_poll_connector_task_dispatches_classification_for_created_sources(
+    session, workspace, task_db, dispatched, monkeypatch
+):
+    from karpwiki import connector_polling, connectors
+    from karpwiki.connector_polling import DiscoveredItem
+
+    class _StubAdapter:
+        async def poll(self, connector, credential_ref):
+            return [DiscoveredItem(filename="a.md", content=b"A")], {"sha": "abc"}
+
+    monkeypatch.setitem(connector_polling.ADAPTERS, "stub", _StubAdapter())
+    connector = await connectors.create(session, workspace_id=workspace.workspace_id, type="stub")
+    await session.commit()
+
+    await tasks._poll_connector(connector.connector_id)
+
+    assert len(dispatched["classify_source"]) == 1
+
+
+async def test_dispatch_connector_polls_enqueues_due_connectors_only(
+    session, workspace, other_workspace, task_db, dispatched
+):
+    from datetime import UTC, datetime, timedelta
+
+    from karpwiki import connectors
+
+    due = await connectors.create(
+        session, workspace_id=workspace.workspace_id, type="stub", schedule={"interval_minutes": 10}
+    )
+    not_due = await connectors.create(
+        session, workspace_id=other_workspace.workspace_id, type="stub", schedule={"interval_minutes": 10}
+    )
+    not_due.last_run_at = datetime.now(UTC) - timedelta(minutes=1)
+    unconfigured = await connectors.create(
+        session, workspace_id=workspace.workspace_id, type="stub"
+    )  # no interval_minutes at all
+    await session.commit()
+
+    await tasks._dispatch_connector_polls()
+
+    assert dispatched["poll_connector"] == [str(due.connector_id)]
+    assert str(not_due.connector_id) not in dispatched["poll_connector"]
+    assert str(unconfigured.connector_id) not in dispatched["poll_connector"]
+
+
+async def test_dispatch_connector_polls_skips_disabled_connectors(session, workspace, task_db, dispatched):
+    from karpwiki import connectors
+    from karpwiki.models import ConnectorState
+
+    connector = await connectors.create(
+        session, workspace_id=workspace.workspace_id, type="stub", schedule={"interval_minutes": 10}
+    )
+    connector.state = ConnectorState.disabled
+    await session.commit()
+
+    await tasks._dispatch_connector_polls()
+
+    assert dispatched["poll_connector"] == []

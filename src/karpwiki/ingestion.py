@@ -11,6 +11,7 @@ kept separate to avoid a circular import (`review.py` cannot depend back on this
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from datetime import UTC, date, datetime
@@ -58,6 +59,60 @@ class InvalidResolutionError(ValueError):
     """A review-item resolution request doesn't fit: wrong kind, wrong pipeline state, an
     action outside the kind's vocabulary, or missing evidence (e.g. `merge` with no
     matched page recorded)."""
+
+
+async def store(
+    session: AsyncSession,
+    payload: bytes,
+    filename: str,
+    *,
+    submitted_by: str,
+    extra_detail: dict | None = None,
+) -> RawSource:
+    """Write the object, create the raw_source row, and open its ingestion_log history —
+    the one entry point every submission source goes through (03 §2): REST `POST
+    /sources`, the MCP `wiki_submit` tool, and the connector poller (phase2-tasklist.md
+    step 52) all call this directly rather than each writing their own copy. Moved here
+    from `api.py` in step 52 — `connector_polling.py` needs it too, and importing `api`
+    from there would cycle back (`api` -> `tasks` -> `connector_polling` -> `api`).
+
+    `extra_detail` merges into that first log entry's `detail` — currently only the MCP
+    `wiki_submit` tool's on-behalf-of path (09 §5, phase2-tasklist.md step 46) uses it, to
+    record the calling agent's own identity for audit without a new core field ("no new
+    core field required" is 09 §5's own wording)."""
+    source_id = uuid.uuid4()
+    # Staged outside any workspace prefix: 02 §2's /{workspace_id}/sources/... scheme
+    # cannot apply yet because 03 §2 accepts the source before the workspace is known.
+    # See readiness item 0.6 — classification has to settle where it ends up.
+    object_key = f"/_inbox/{source_id}/{filename}"
+    objectstore.write_bytes(object_key, payload)
+
+    source = RawSource(
+        source_id=source_id,
+        object_key=object_key,
+        filename=filename,
+        content_hash=hashlib.sha256(payload).hexdigest(),
+        submitted_by=submitted_by,
+        pipeline_state=PipelineState.submitted,
+    )
+    session.add(source)
+    await session.flush()
+
+    session.add(
+        pipeline.IngestionLog(
+            source_id=source.source_id,
+            from_state=None,
+            to_state=PipelineState.submitted,
+            actor=submitted_by,
+            detail={"object_key": object_key, **(extra_detail or {})},
+        )
+    )
+    # 03 §5: every submission gets an always-on informational review item, unconditionally
+    # and regardless of what happens downstream. No workspace yet — none is resolved until
+    # classification succeeds.
+    await review.create(session, kind=ReviewKind.submission, subject_ref=str(source.source_id))
+    await session.flush()
+    return source
 
 
 class ClassifierCall(Protocol):

@@ -1,4 +1,4 @@
-# Shared by all four worker services below — container-network hostnames rather than the
+# Shared by the gateway and every worker service below — container-network hostnames rather than the
 # `localhost` ones `.env`/`.env.example` use for a host-run app talking to these same
 # containers via published ports (02 §2's note: every process group must agree on one
 # object-store path/URL, which inside the compose network means `minio:9000`, not
@@ -23,6 +23,9 @@ x-worker-env: &worker-env
   KARPWIKI_MAINTENANCE_CONTRADICTION_INTERVAL_HOURS: ${KARPWIKI_MAINTENANCE_CONTRADICTION_INTERVAL_HOURS:-168}
   KARPWIKI_STALENESS_HIGH_TRAFFIC_DAYS: ${KARPWIKI_STALENESS_HIGH_TRAFFIC_DAYS:-90}
   KARPWIKI_STALENESS_LOW_TRAFFIC_DAYS: ${KARPWIKI_STALENESS_LOW_TRAFFIC_DAYS:-365}
+  # Connector-poll dispatch cadence (phase2-tasklist.md step 52) — read by `celery-beat`
+  # only; harmless everywhere else, same reasoning as the maintenance vars above.
+  KARPWIKI_CONNECTOR_DISPATCH_INTERVAL_MINUTES: ${KARPWIKI_CONNECTOR_DISPATCH_INTERVAL_MINUTES:-5}
 
 services:
   postgres:
@@ -195,6 +198,23 @@ services:
   worker-maintenance:
     image: karpwiki-worker:local
     command: celery -A karpwiki.tasks worker -Q maintenance --loglevel=info -n maintenance@%h
+    environment: *worker-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  # Connector polling worker pool (09 §4, phase2-tasklist.md step 52) — its own queue, per
+  # 09 §4's "own lightweight, IO-bound worker pool," separate from the four job-type pools
+  # above (fetching from a source system is IO-bound, unlike any of them). `celery-beat`
+  # below dispatches `poll_connector` per enabled, due connector via its own
+  # `dispatch_connector_polls` schedule entry.
+  worker-connector-polling:
+    image: karpwiki-worker:local
+    command: celery -A karpwiki.tasks worker -Q connector_polling --loglevel=info -n connector-polling@%h
     environment: *worker-env
     depends_on:
       postgres:

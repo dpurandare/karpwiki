@@ -494,3 +494,12 @@ class Connector(Base):
     )
     last_sync_cursor: Mapped[dict] = mapped_column(JSONB, default=dict)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Added phase2-tasklist.md step 52: a poll run's outcome (auth ok/failed, items
+    # discovered, error message) — 09 §13 frames this as an `ingestion_log` entry, but that
+    # table's `source_id`/`to_state` are NOT NULL and shaped for one raw_source's pipeline
+    # transitions, which a zero-item or pre-fetch-failure run has neither of. Kept on the
+    # connector row instead, alongside `last_run_at`, rather than stretching `ingestion_log`
+    # to also mean "connector run diagnostics" — confirmed via AskUserQuestion. Per-item
+    # audit is unaffected: a raw_source a connector run *does* create still gets a normal
+    # `ingestion_log` entry through the same `_store()` path any submission uses.
+    last_run_detail: Mapped[dict] = mapped_column(JSONB, default=dict)

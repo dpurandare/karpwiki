@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–51 done, tracks 2a, 2b, 2c, and 2d all complete and closed out;
+**Status (2026-08-19): steps 22–52 done, tracks 2a, 2b, 2c, and 2d all complete and closed out;
 track 2e (Connector Framework) in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
@@ -498,7 +498,30 @@ is a real Authenticator implementation using that pick, not a library search.
     unauthorized 403, and the real `access_policy` grant confirmed by querying Postgres
     directly. See [09](09-implementation-notes.md) §54.
 52. Connector polling worker pool — fetch, diff against a per-connector cursor, create a
-    `raw_source` — fully designed already ([09](09-implementation-notes.md) §4).
+    `raw_source` — fully designed already ([09](09-implementation-notes.md) §4). **Done** —
+    `connector_polling.py` (new): a `ConnectorAdapter` Protocol + empty `ADAPTERS` registry
+    (mirrors `auth.py`'s pluggable `Authenticator` shape; no concrete type exists until step 54),
+    `poll_connector` orchestrates fetch → adapter-owned cursor diff → create-`raw_source` exactly
+    as any submission (`ingestion.store`, extracted from `api.py` to break a real circular
+    import: `api -> tasks -> connector_polling -> api`). Its own `connector_polling` queue
+    (`tasks.py`, new `worker-connector-polling` docker-compose service) + a `celery-beat`
+    dispatcher (`_dispatch_connector_polls`, new `KARPWIKI_CONNECTOR_DISPATCH_INTERVAL_MINUTES`
+    env var, default 5m) enumerating enabled, due connectors — "due" reads
+    `schedule.interval_minutes` against `last_run_at`, mirroring step 41's exact
+    enumerate-at-fire-time shape. A run's outcome (`ok`/`unsupported_type`/`auth_failed`/`error`)
+    is recorded on a new `Connector.last_run_detail` column, confirmed via AskUserQuestion before
+    building — `ingestion_log`'s `source_id`/`to_state` are NOT NULL and shaped for one
+    raw_source's pipeline transitions, which a zero-item or pre-fetch-failure run has neither of.
+    Only `ConnectorAuthError` flips a connector to `disabled_auth` (09 §13); a generic fetch
+    error just retries on the next scheduled run. Live-verified against real infra in two parts
+    (no real adapter exists yet to exercise the whole path at once): real dispatch mechanics
+    through a real rebuilt `worker-connector-polling` container and restarted `celery-beat`
+    correctly recorded a real `unsupported_type` outcome for a connector with an unregistered
+    type; a throwaway in-process stub adapter drove `poll_connector` against real dev
+    Postgres/object store, creating a real `raw_source` that a real `worker-classification`
+    container then classified via real `gpt-5-nano` — confirming a connector-created source is
+    genuinely indistinguishable from a normal submission past step 3. Cleaned up the throwaway
+    workspace/connector/source afterward. See [09](09-implementation-notes.md) §55.
 53. Credential resolution via the secrets-manager interface
     ([09](09-implementation-notes.md) §13), mirroring the pluggable `Authenticator` pattern
     already in [`auth.py`](../src/karpwiki/auth.py).

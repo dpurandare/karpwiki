@@ -73,6 +73,16 @@ MAINTENANCE_CONTRADICTION_INTERVAL_HOURS = float(
     os.environ.get("KARPWIKI_MAINTENANCE_CONTRADICTION_INTERVAL_HOURS", "168")
 )
 
+# Connector-poll dispatch tick (09 §4, phase2-tasklist.md step 52) — same category as the
+# maintenance cadence above, a deployment-wide operational knob, not a per-connector
+# setting (that's each `Connector.schedule`'s own `interval_minutes`, step 51). This is how
+# often the dispatcher itself wakes up to check which *enabled* connectors are due; it must
+# be at least as frequent as the shortest configured per-connector interval to matter, so
+# it defaults short (unlike the maintenance advisor's daily/weekly cadence).
+CONNECTOR_DISPATCH_INTERVAL_MINUTES = float(
+    os.environ.get("KARPWIKI_CONNECTOR_DISPATCH_INTERVAL_MINUTES", "5")
+)
+
 # Staleness popularity tiering (05 §2, `09` §6's SCHEMA.md `high_traffic_days`/
 # `low_traffic_days` illustrative defaults) — env-overridable like the cadence settings
 # above, even though every other detector threshold in `advisor.py` stays a plain Python

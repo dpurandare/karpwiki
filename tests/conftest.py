@@ -48,6 +48,7 @@ def dispatched(monkeypatch):
         "detect_orphans",
         "detect_contradictions",
         "detect_staleness_tiered",
+        "poll_connector",
     )
     calls = {name: [] for name in task_names}
     for name in task_names:

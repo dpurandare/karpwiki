@@ -44,7 +44,7 @@ from datetime import date
 
 from mcp.server.mcpserver import Context, MCPServer
 
-from . import api, review, versioning, workspaces
+from . import api, ingestion, review, versioning, workspaces
 from .auth import Authenticator, Principal, any_workspace_with_role, default_authenticator, has_role
 from .db import session_scope
 from .models import RawSource, ReviewKind, ReviewStatus, Role
@@ -250,7 +250,7 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
                 submitted_by = acting_as
                 extra_detail = {"acting_agent": f"user:{principal.id}"}
 
-            source = await api._store(
+            source = await ingestion.store(
                 session,
                 text.encode(),
                 "pasted.txt",

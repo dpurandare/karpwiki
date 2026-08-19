@@ -15,22 +15,24 @@ dispatch themselves, once their own transaction has committed.
 import asyncio
 import logging
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from celery import Celery
 from sqlalchemy import select
 
-from . import advisor, ingestion, pipeline, search
+from . import advisor, connector_polling, ingestion, pipeline, search
 from .config import (
     CELERY_BROKER_URL,
+    CONNECTOR_DISPATCH_INTERVAL_MINUTES,
     MAINTENANCE_CONTRADICTION_INTERVAL_HOURS,
     MAINTENANCE_INTERVAL_HOURS,
 )
 from .db import engine, session_scope
-from .models import PipelineState, RawSource, Workspace, WorkspaceStatus
+from .models import Connector, ConnectorState, PipelineState, RawSource, Workspace, WorkspaceStatus
 
 logger = logging.getLogger(__name__)
 
-QUEUES = ("classification", "curation", "indexing", "maintenance")
+QUEUES = ("classification", "curation", "indexing", "maintenance", "connector_polling")
 
 app = Celery("karpwiki", broker=CELERY_BROKER_URL)
 app.conf.task_default_queue = "curation"
@@ -39,6 +41,7 @@ app.conf.task_routes = {
     "karpwiki.curation.*": {"queue": "curation"},
     "karpwiki.indexing.*": {"queue": "indexing"},
     "karpwiki.maintenance.*": {"queue": "maintenance"},
+    "karpwiki.connector_polling.*": {"queue": "connector_polling"},
 }
 # Step 33's other half of "retried inside the worker" (03 §1): a worker process that dies
 # mid-task (OOM, SIGKILL, container restart) must not silently lose the job — acks_late
@@ -75,6 +78,13 @@ app.conf.beat_schedule = {
     "maintenance-contradiction-detector": {
         "task": "karpwiki.maintenance.dispatch_contradiction_detector",
         "schedule": MAINTENANCE_CONTRADICTION_INTERVAL_HOURS * 3600,
+    },
+    # Phase 2 step 52 (09 §4) — same "enumerate at fire time" shape as the two detector
+    # dispatchers above, just checking each *enabled* connector's own `schedule.
+    # interval_minutes` against `last_run_at` rather than a single deployment-wide cadence.
+    "connector-polling-dispatch": {
+        "task": "karpwiki.connector_polling.dispatch_connector_polls",
+        "schedule": CONNECTOR_DISPATCH_INTERVAL_MINUTES * 60,
     },
 }
 
@@ -253,6 +263,55 @@ async def _dispatch_contradiction_detector() -> None:
         detect_contradictions.delay(workspace_id)
 
 
+async def _poll_connector(connector_id: uuid.UUID) -> None:
+    """Phase 2 step 52 (09 §4). Dispatches classification for whatever `raw_source`s this
+    run created, after the transaction that created them has committed — same "dispatch
+    only after commit" discipline as `_classify`/`_curate` above."""
+    async with session_scope() as session:
+        connector = await session.get(Connector, connector_id)
+        if connector is None:
+            logger.warning("poll_connector task: no connector %s", connector_id)
+            return
+        source_ids = await connector_polling.poll_connector(session, connector=connector)
+    for source_id in source_ids:
+        classify_source.delay(str(source_id))
+
+
+def _connector_is_due(connector: Connector, *, now: datetime) -> bool:
+    """A connector with no `interval_minutes` in its `schedule` is webhook-only or simply
+    unconfigured (09 §4: polling is the default, webhook is additive) — never dispatched
+    automatically. `last_run_at is None` means "never run," always due."""
+    interval_minutes = connector.schedule.get("interval_minutes")
+    if not isinstance(interval_minutes, (int, float)) or interval_minutes <= 0:
+        return False
+    if connector.last_run_at is None:
+        return True
+    return now - connector.last_run_at >= timedelta(minutes=interval_minutes)
+
+
+async def _dispatch_connector_polls() -> None:
+    """Fired by `KARPWIKI_CONNECTOR_DISPATCH_INTERVAL_MINUTES` (default 5m, `config.py`).
+    Enumerates *enabled* connectors at fire time (same reasoning as the two detector
+    dispatchers above — a connector created after beat started must still get picked up)
+    and re-enqueues `poll_connector` for whichever are due per their own `schedule`.
+    `disabled`/`disabled_auth` connectors are never dispatched — an admin re-enabling one
+    (09 §13) is what puts it back in this set."""
+    now = datetime.now(UTC)
+    async with session_scope() as session:
+        connectors = (
+            (
+                await session.execute(
+                    select(Connector).where(Connector.state == ConnectorState.enabled)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    for connector in connectors:
+        if _connector_is_due(connector, now=now):
+            poll_connector.delay(str(connector.connector_id))
+
+
 async def _run_and_release(coro) -> None:
     """`db.engine`'s connection pool is a process-level singleton, but each `@app.task`
     below gets its own `asyncio.run()` — a fresh event loop per call — and an asyncpg
@@ -321,3 +380,13 @@ def dispatch_daily_detectors() -> None:
 @app.task(name="karpwiki.maintenance.dispatch_contradiction_detector")
 def dispatch_contradiction_detector() -> None:
     asyncio.run(_run_and_release(_dispatch_contradiction_detector()))
+
+
+@app.task(name="karpwiki.connector_polling.poll_connector")
+def poll_connector(connector_id: str) -> None:
+    asyncio.run(_run_and_release(_poll_connector(uuid.UUID(connector_id))))
+
+
+@app.task(name="karpwiki.connector_polling.dispatch_connector_polls")
+def dispatch_connector_polls() -> None:
+    asyncio.run(_run_and_release(_dispatch_connector_polls()))

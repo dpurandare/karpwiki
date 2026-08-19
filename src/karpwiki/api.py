@@ -24,7 +24,6 @@ Not implemented here, deliberately: dedicated-index score normalization (04 §4)
 26 — this endpoint only ever queries the one shared index.
 """
 
-import hashlib
 import time
 import uuid
 from datetime import date
@@ -46,7 +45,6 @@ from . import (
     document_types,
     ingestion,
     monitoring,
-    objectstore,
     pipeline,
     query_log,
     ratelimit,
@@ -458,6 +456,7 @@ def _connector_body(connector: Connector) -> dict[str, Any]:
         "state": connector.state.value,
         "last_sync_cursor": connector.last_sync_cursor,
         "last_run_at": connector.last_run_at.isoformat() if connector.last_run_at else None,
+        "last_run_detail": connector.last_run_detail,
     }
 
 
@@ -608,7 +607,7 @@ def _register_routes(app: FastAPI) -> None:
         else:
             payload, filename = url.encode(), "submitted-url.txt"
 
-        source = await _store(session, payload, filename, submitted_by=f"user:{principal.id}")
+        source = await ingestion.store(session, payload, filename, submitted_by=f"user:{principal.id}")
         body = {
             "source_id": str(source.source_id),
             "pipeline_state": source.pipeline_state.value,
@@ -1690,57 +1689,6 @@ async def _replay(
 ) -> dict | None:
     record = await session.get(IdempotencyRecord, (key, principal.id, endpoint))
     return record.response_body if record else None
-
-
-async def _store(
-    session: AsyncSession,
-    payload: bytes,
-    filename: str,
-    *,
-    submitted_by: str,
-    extra_detail: dict | None = None,
-) -> RawSource:
-    """Write the object, create the raw_source row, and open its ingestion_log history.
-
-    `extra_detail` merges into that first log entry's `detail` — currently only the MCP
-    `wiki_submit` tool's on-behalf-of path (09 §5, phase2-tasklist.md step 46) uses it, to
-    record the calling agent's own identity for audit without a new core field ("no new
-    core field required" is 09 §5's own wording)."""
-    source_id = uuid.uuid4()
-    # Staged outside any workspace prefix: 02 §2's /{workspace_id}/sources/... scheme
-    # cannot apply yet because 03 §2 accepts the source before the workspace is known.
-    # See readiness item 0.6 — classification has to settle where it ends up.
-    object_key = f"/_inbox/{source_id}/{filename}"
-    objectstore.write_bytes(object_key, payload)
-
-    source = RawSource(
-        source_id=source_id,
-        object_key=object_key,
-        filename=filename,
-        content_hash=hashlib.sha256(payload).hexdigest(),
-        submitted_by=submitted_by,
-        pipeline_state=PipelineState.submitted,
-    )
-    session.add(source)
-    await session.flush()
-
-    session.add(
-        pipeline.IngestionLog(
-            source_id=source.source_id,
-            from_state=None,
-            to_state=PipelineState.submitted,
-            actor=submitted_by,
-            detail={"object_key": object_key, **(extra_detail or {})},
-        )
-    )
-    # 03 §5: every submission gets an always-on informational review item, unconditionally
-    # and regardless of what happens downstream. No workspace yet — none is resolved until
-    # classification succeeds.
-    await review.create(
-        session, kind=ReviewKind.submission, subject_ref=str(source.source_id)
-    )
-    await session.flush()
-    return source
 
 
 async def find_by_hash(session: AsyncSession, content_hash: str) -> list[RawSource]:

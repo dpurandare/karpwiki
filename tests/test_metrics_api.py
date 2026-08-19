@@ -65,7 +65,13 @@ async def test_ingestion_pipeline_endpoint_includes_queue_depths(client, session
     assert r.status_code == 200
     body = r.json()
     assert "queue_depths" in body
-    assert set(body["queue_depths"].keys()) == {"classification", "curation", "indexing", "maintenance"}
+    assert set(body["queue_depths"].keys()) == {
+        "classification",
+        "curation",
+        "indexing",
+        "maintenance",
+        "connector_polling",
+    }
 
 
 async def test_search_performance_endpoint_reports_accepted_cache_gap(client, session, workspace):

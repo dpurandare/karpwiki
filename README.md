@@ -185,7 +185,8 @@ plainly what's demonstrated in this repo today versus what §4 describes as the 
 
 **Worker pools, per job type — real, load-tested here.** `docker-compose.yml` runs one container
 per queue (`karpwiki/tasks.py`'s `QUEUES`: `classification`, `curation`, `indexing`,
-`maintenance`), and each queue scales independently:
+`maintenance`, `connector_polling` — phase2-tasklist.md step 52), and each queue scales
+independently:
 
 ```bash
 docker compose up -d --scale worker-classification=3 worker-classification
@@ -199,10 +200,11 @@ and curation workers (LLM-bound) scale separately from indexing and maintenance-
 (compute-bound)" made concrete — scale the LLM-bound queues under submission load without touching
 the compute-bound ones, or vice versa.
 
-**`celery-beat` — exactly one, by design, never scaled.** It only enqueues the two maintenance
-dispatch tasks on a schedule (step 41); running a second instance would double-fire every scheduled
-entry (Celery's own constraint, not a limitation of this codebase). `worker-maintenance`, which
-does the real per-workspace work those dispatches enqueue, scales like every other queue above.
+**`celery-beat` — exactly one, by design, never scaled.** It only enqueues dispatch tasks on a
+schedule — the two maintenance detector sweeps (step 41) and connector polling (step 52); running
+a second instance would double-fire every scheduled entry (Celery's own constraint, not a
+limitation of this codebase). `worker-maintenance`/`worker-connector-polling`, which do the real
+per-workspace/per-connector work those dispatches enqueue, scale like every other queue above.
 
 **The Gateway — real, load-tested here (phase2-tasklist.md step 49).** `docker-compose.yml` runs
 the Common Gateway as its own `gateway` service — the same image the four worker services above

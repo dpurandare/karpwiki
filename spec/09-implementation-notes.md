@@ -2655,5 +2655,81 @@ connector afterward.
 **Spec touch-point**: none required — `02` §3 and `06` §1 already fully specified the table and
 API this step builds; nothing here needed a wording change to either.
 
+## 55. Connector Polling Worker Pool (Phase 2 Step 52)
+
+09 §4's execution model made real: its own queue (mirroring 06 §4's per-job-type pools), a
+`celery-beat` dispatcher, and the generic fetch/diff/create-`raw_source` orchestration — with no
+concrete connector type to actually fetch anything yet (step 54 is the first one, a Git poller).
+
+**The adapter registry is deliberately empty.** `connector_polling.py`'s `ConnectorAdapter`
+Protocol + `ADAPTERS: dict[str, ConnectorAdapter]` mirrors `auth.py`'s pluggable `Authenticator`
+shape (09 §13 already names that precedent for step 53's credential work; the same shape fits
+step 52's "no concrete type yet" problem too). A connector whose `type` has no registered adapter
+is not an error — `type` is deliberately open-ended (step 51) and nothing stops an admin from
+configuring one ahead of its adapter landing — so `poll_connector` records a clean
+`"unsupported_type"` outcome and leaves the connector `enabled`, not `disabled_auth` (that state
+is reserved specifically for auth failures, 09 §13).
+
+**Diffing against the cursor is the adapter's job, not the generic orchestrator's.** 09 §4 calls
+the cursor "connector-type-specific" — a git SHA and a page-id/timestamp set have nothing in
+common to diff generically, so `ConnectorAdapter.poll(connector, credential_ref)` receives the
+whole `connector` row (including its current `last_sync_cursor`) and returns
+`(new_or_changed_items, new_cursor)` itself. The generic orchestrator's job is steps 1-3's
+sequencing and the create-`raw_source` call, nothing about *how* to diff.
+
+**A real circular-import forced extracting `_store` out of `api.py`, into `ingestion.store`.**
+`connector_polling.py` needs the same "create a raw_source exactly as if a user uploaded it" call
+`api.py`'s `POST /sources` and the MCP `wiki_submit` tool already use — but `api.py` imports
+`tasks`, and `tasks.py` needs to import `connector_polling` to dispatch `poll_connector`, so
+`connector_polling` importing `api` would cycle (`api -> tasks -> connector_polling -> api`).
+Moved `_store` to `ingestion.py` as `ingestion.store` (unchanged behavior) — `ingestion.py`
+imports neither `api` nor `tasks`, so all three callers (`api.py`, `mcp_server.py`,
+`connector_polling.py`) can import it safely. This is the same kind of extraction step 45 did for
+`api.run_search`/`api.run_resolve_review_item` (REST+MCP sharing one implementation), just forced
+by the async layer rather than by a second protocol adapter.
+
+**Credential handling stays exactly as scoped in step 51**: `connector.credential_ref` — the
+caller-supplied secrets-manager pointer, never a raw secret — passes straight through to the
+adapter unresolved. No real secrets-manager fetch exists until step 53; an adapter built today
+would receive the opaque pointer string, not a resolved credential.
+
+**Run-outcome recording uses the new `Connector.last_run_detail` column decided via
+AskUserQuestion before building** (not `ingestion_log`, which is shaped for one raw_source's
+pipeline-state transitions and can't represent a zero-item or pre-fetch-failure run — see
+`models.Connector`'s own docstring for the full reasoning). Every run updates `last_run_at`/
+`last_run_detail` regardless of outcome (`"ok"`/`"unsupported_type"`/`"auth_failed"`/`"error"`) —
+a poll that finds nothing new is still a completed run an operator can see happened, not a silent
+no-op. A generic fetch error (network blip, source-system 500) leaves the connector `enabled` and
+simply retries on its next scheduled run; only `ConnectorAuthError` flips it to `disabled_auth`
+(09 §13's specific "auth failure disables rather than retries" rule) — these are deliberately
+different outcomes, not the same catch-all.
+
+**Dispatch mirrors step 41's exact shape**: `_dispatch_connector_polls` enumerates *enabled*
+connectors at fire time (a connector created after `celery-beat` started must still get picked
+up, same reasoning as the two detector dispatchers) and re-enqueues `poll_connector` for whichever
+are due. "Due" reads `connector.schedule.get("interval_minutes")` against `last_run_at` — a
+connector with no `interval_minutes` configured is never auto-dispatched (09 §4: polling is the
+default, but a connector could be webhook-only or simply not yet scheduled). The dispatcher's own
+tick cadence is a new env var, `KARPWIKI_CONNECTOR_DISPATCH_INTERVAL_MINUTES` (default 5m) —
+deployment-wide operational tuning, same category as the maintenance cadence vars, not a
+per-connector setting.
+
+**Live-verified against real infra in two parts**, since no real adapter exists yet to exercise
+the full path in one shot: (1) the real dispatch mechanics — a real `worker-connector-polling`
+container (new, rebuilt image), real `celery-beat` (restarted with the new schedule entry), and a
+real connector configured with an unregistered `type` — dispatched for real through the real
+broker and correctly recorded `{"outcome": "unsupported_type", ...}` in real dev Postgres, state
+staying `enabled`. (2) the create-`raw_source` success path — a throwaway stub adapter registered
+in-process (not through the container, since `ADAPTERS` is an in-process dict step 54 will
+populate for real) drove `poll_connector` against the same real dev Postgres/object store: a real
+`raw_source` was created (`submitted_by=connector:<id>`), the cursor persisted, and dispatching
+`classify_source` afterward through the real broker was picked up by the real
+`worker-classification` container and classified via real `gpt-5-nano` — confirming a
+connector-created source really is indistinguishable from a normal submission once past step 3, as
+09 §4 claims. Cleaned up the throwaway workspace/connector/source afterward.
+
+**Spec touch-point** (applied): none required — `09` §4 already specified this step's execution
+model in full; nothing here needed a wording change.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)
