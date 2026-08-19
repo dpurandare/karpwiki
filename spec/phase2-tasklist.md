@@ -11,8 +11,8 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–49 done, tracks 2a, 2b, and 2c all complete and closed out; track
-2d in progress.** Phase 1 (steps 1–21,
+**Status (2026-08-19): steps 22–50 done, tracks 2a, 2b, 2c, and 2d all complete and closed out;
+track 2e (Connector Framework) not yet started.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -457,7 +457,22 @@ is a real Authenticator implementation using that pick, not a library search.
     it with a real paid LLM call). See [09](09-implementation-notes.md) §52.
 50. **Verify**: an MCP client can search, submit, and (as admin) resolve a review item end-to-end
     through the protocol adapter, not only through the REST surface; a second gateway instance
-    behind a load balancer serves traffic with no session-affinity requirement.
+    behind a load balancer serves traffic with no session-affinity requirement. **Done** —
+    `tests/test_end_to_end_2d.py` (new, committed): the same flow entirely through
+    `mcp.client.client.Client` in-process, mocked LLM/no broker, draining the real dispatch chain
+    (matching `test_end_to_end_2b.py`'s convention) so `wiki_search` finds a genuinely
+    curated-and-indexed page. Live-verified against real infra: a real stdio MCP subprocess per
+    identity ran submit → poll → search → admin-resolve end to end (real Postgres, real
+    Redis-dispatched workers, real `gpt-5-nano`) — two non-bug surprises caught along the way
+    (a real below-threshold classification needing admin resolution, and a real near-duplicate
+    flag on a same-wording retry), both legitimate review paths `03`/`05` already design for, not
+    failures. Separately, reusing step 49's real `gateway`/`nginx` infra scaled to 2 replicas: one
+    persistent client connection ran a submit → poll → search sequence through nginx, and
+    container logs confirmed the individual requests within that *one* logical session landed on
+    different replicas (submit on `gateway-2`, polls interleaved across both, search on
+    `gateway-1`) — the literal "no session-affinity requirement" claim, not just multiple
+    containers coincidentally running. Cleaned up both live checks' throwaway workspaces and
+    scaled back to 1 replica afterward. See [09](09-implementation-notes.md) §53.
 
 ## 2e — Connector Framework
 

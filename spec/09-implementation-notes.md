@@ -2525,5 +2525,56 @@ already anticipated exactly this shape ("the spec doesn't mandate a specific orc
 fit this shape"); `nginx` here is one concrete instance of "standard orchestration," not a new
 requirement.
 
+## 53. 2d Closing Verify (Phase 2 Step 50)
+
+Closes out track 2d (steps 43-49: complete REST surface, monitoring dashboards, MCP server,
+on-behalf-of delegation, real OIDC, rate limiting, horizontal gateway scaling). Two independent
+claims, verified separately since one is a wiring guarantee a committed test can capture and the
+other is an infra claim that genuinely needs real containers.
+
+**Committed**: `tests/test_end_to_end_2d.py` (new) — search, submit, and (as admin) resolve a
+review item, entirely through the MCP protocol adapter (`mcp.client.client.Client`, same in-process
+pattern `test_mcp_server.py` already uses), not the REST surface. Drains the real dispatch chain a
+real `wiki_submit` call produces (mocked LLM/no broker, same convention as `test_end_to_end_2b.py`)
+so `wiki_search` finds a genuinely curated-and-indexed page rather than a stub — the fast,
+deterministic counterpart to the live check below, matching every prior closing-verify file's
+split.
+
+**Live-verified, MCP client against real infra (real dev Postgres, real Redis-dispatched workers,
+real `gpt-5-nano`)**: a real `python -m karpwiki.mcp_server` stdio subprocess per identity (mirroring
+steps 45-47's own live-check convention) ran submit → poll → search → admin-resolve as one real
+flow. **A genuine, non-bug surprise caught mid-check**: the first two attempts landed at
+`pending_review` instead of `ingested` — not a bug, but two different legitimate real outcomes this
+step's own script hadn't accounted for: the first was the classifier's real confidence landing
+below the auto-accept threshold (`03` §3/§5's designed review path); the second, after retrying
+with near-identical wording, was the dedup detector correctly flagging the resubmission as a
+near-duplicate of the first attempt's own already-classified source. Both are exactly the review
+paths `03`/`05` design for, not failures — fixed by having the script resolve the classification
+review item as admin (`action=<document_type>`) when that path is hit, and by using clearly
+distinct content on the clean rerun rather than fighting the dedup detector. The clean run
+completed for real: submit → real classify → real curate (multiple pages: a `source` page, a
+`concept` page, and the workspace `overview.md` update) → real index → real search finding it →
+real admin resolution of the submission's own review item.
+
+**Live-verified, no session-affinity requirement**: reusing step 49's real `gateway`/`nginx`
+docker-compose infra, scaled to 2 replicas. One `httpx.AsyncClient` (one persistent connection —
+the same shape a real browser session uses) ran a REST submit → poll → search sequence against
+`nginx`'s published port. Container logs confirmed the *individual requests within that one logical
+session* landed on different replicas — `POST /sources` hit `gateway-2`; the subsequent
+`GET /sources/{id}` polls for that same source interleaved across both `gateway-1` and `gateway-2`;
+the final `GET /search` hit `gateway-1` — and every request succeeded regardless of which replica
+served it, since all real state lives in shared Postgres/Redis, never in-process. This is the literal
+claim step 50 asks for, not just "multiple containers happen to be running" (step 49's own check):
+a single caller's multi-request flow is provably not pinned to one instance.
+
+**Cleanup**: both live checks' throwaway workspaces (`live50-mcp-check` and, mid-check, some debris
+from the two non-bug retry attempts above) were fully deleted from the real dev DB before finishing
+— `celery-beat` is live in this stack, so anything left behind would eventually cost a real paid
+LLM call, the same reasoning behind steps 42 and 49's own cleanups. Gateway scaled back to 1
+replica afterward.
+
+**Spec touch-point** (applied): none — `06` §2 and §5 already fully specified both claims this step
+verifies; nothing here required a wording change to either.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)
