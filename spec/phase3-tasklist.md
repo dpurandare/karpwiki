@@ -5,15 +5,19 @@ feedback loop, content quality scoring, fine-grained access control, analytics, 
 import/export), sequenced by dependency. Numbering continues from Phase 2 (starts at 57) so a
 step number is unambiguous across all three files.
 
-**Also folds in real gaps carried forward from Phase 1 and Phase 2** — track 3a below, found by a
-fresh, complete re-read of both prior tasklists and every "flagged," "accepted gap," "deferred,"
-and "carried forward" note in `09-implementation-notes.md` (not just the ones each step's own
-closing summary already restated). Every one was flagged explicitly at the time as a deliberate,
-accepted simplification or scope boundary — never silently dropped — but several were never
-revisited once their own step closed, including three genuinely foundational ones a first pass at
-this file missed entirely (the real wiki markdown export, FUSE-mount access, and real `SCHEMA.md`
-storage — see 3a below). Track 3a is sequenced first, and roughly by dependency within itself,
-since several later items build cleaner on top of these being real than on top of the workarounds.
+**Also folds in real gaps carried forward from Phase 1 and Phase 2** — track 3a below, found
+across two audit passes (2026-08-19): the first a fresh, complete re-read of both prior tasklists
+and every "flagged," "accepted gap," "deferred," and "carried forward" note in
+`09-implementation-notes.md`; the second a direct implementation-vs-spec review (source code
+against `01`-`09`, not just each step's own closing summary against itself) plus a dead-code/
+redundancy sweep of `src/karpwiki/`. Every item was flagged explicitly at the time (or found
+freshly by the second pass) as a real, accepted simplification, scope boundary, or contract gap —
+never silently dropped, but several were never revisited once their own step closed, including
+three genuinely foundational ones the first audit pass missed entirely (the real wiki markdown
+export, FUSE-mount access, and real `SCHEMA.md` storage — see 3a below) and one contract-shape gap
+the second pass found (step 66's pagination gap). Track 3a is sequenced first, and roughly by
+dependency within itself, since several later items build cleaner on top of these being real than
+on top of the workarounds.
 
 Explicitly **excluded** from this phase (per the roadmap, they're Phase 4 — "pursued based on
 actual organizational need, not a fixed timeline," [07](07-additional-features-and-roadmap.md)
@@ -23,7 +27,9 @@ topology, and multi-language support.
 **Status (2026-08-19): not started.** Phase 1 (steps 1–21) and Phase 2 (steps 22–56) are both
 complete — see [`phase1-tasklist.md`](phase1-tasklist.md) and
 [`phase2-tasklist.md`](phase2-tasklist.md). This file is a plan, not yet implementation; nothing
-below has a "Done" marker yet.
+below has a "Done" marker yet. See [`implementation-audit.md`](implementation-audit.md) for the
+full write-up of the two audit passes that shaped track 3a, including redundancy/dead-code
+findings that don't need a roadmap step (tracked there instead).
 
 ## 3a — Carried-Forward Foundational Gaps (Phase 1/2 debt)
 
@@ -117,13 +123,29 @@ below has a "Done" marker yet.
     represents it — every workspace-less admin check (submission/classification review items,
     `POST /workspaces`'s own bootstrap check) still uses the "admin in at least one workspace"
     workaround `09` §22 built deliberately rather than invent the primitive speculatively. Resolve
-    alongside step 69 (fine-grained access control) rather than before it, since that's the first
+    alongside step 70 (fine-grained access control) rather than before it, since that's the first
     feature that might actually need a real answer — but resolve it, one way or the other, rather
     than leaving the flag open a third phase running.
 
+66. **API pagination-contract gap** ([09](09-implementation-notes.md) §14). `09` §14 states
+    cursor pagination (`{"items": [...], "next_cursor": <string|null>}`, `limit`/`cursor` params)
+    as the contract for "list endpoints," and `GET /search`'s own lack of it is explicitly
+    flagged as a deliberate gap (`09` §28). Four other list endpoints have the identical gap —
+    `GET /document-types`, `GET /connectors`, `GET /workspaces`, `GET /workspaces/{id}/access-policy`
+    — but were never flagged anywhere; they simply return `{"items": [...]}` with no `next_cursor`
+    and no way to page past the first `limit`-worth of rows (there is no `limit` param at all).
+    Found by a direct code-vs-spec review, not previously known. Low real-world impact today
+    (these lists are naturally small — a deployment's own workspace/connector/grant counts — not
+    append-heavy like `page_version`/`raw_source`), but the written contract is silently narrower
+    than what's implemented. Resolve either by extending cursor pagination to all four (matching
+    every other list endpoint), or by explicitly documenting them as deliberately unpaginated
+    given their expected cardinality, the same way `/search`'s own gap is documented — either
+    closes the gap between the written contract and actual behavior; which one is a design call
+    for whoever picks up this step, not pre-decided here.
+
 ## 3b — Notification Service, Feedback Loop, Content Quality ([07](07-additional-features-and-roadmap.md) §3-4)
 
-66. **Real Notification Service delivery.** Step 55 (Phase 2) already built the pluggable
+67. **Real Notification Service delivery.** Step 55 (Phase 2) already built the pluggable
     `NotificationSink` interface and its one real hook (connector auth failure); this step adds a
     second, real implementation (email and/or chat-platform webhook) swapped in via
     `default_notification_sink()` with no change to any caller — the same swap-with-no-handler-
@@ -134,7 +156,7 @@ below has a "Done" marker yet.
     submitter notification when their own document is ingested, rejected, or merged as a
     duplicate.
 
-67. **Search result feedback loop** ([04](04-search-and-retrieval.md) §3-4,
+68. **Search result feedback loop** ([04](04-search-and-retrieval.md) §3-4,
     [09](09-implementation-notes.md) §10). Thumbs-up/down (or similar) per search result, recorded
     alongside `query_log` (`02` §5). `09` §10 already designates this as the platform's
     relevance-regression signal — the catalog-match boost's own magnitude (step 17, Phase 1) was
@@ -143,7 +165,7 @@ below has a "Done" marker yet.
     pages for a topic also feed the Maintenance Advisor's staleness/contradiction detectors
     (`05` §2) with a real "this isn't serving readers" signal neither currently has.
 
-68. **Content quality scoring.** Curator Agent lint-pass scoring (citation density,
+69. **Content quality scoring.** Curator Agent lint-pass scoring (citation density,
     cross-reference completeness, freshness) on ingest; surfaced as a sortable Admin Console
     column; used by the Maintenance Advisor to prioritize lint/reindex work ahead of the
     recency-only signal it uses today (step 36). **Closes another named-but-unbuilt gap as a
@@ -156,37 +178,37 @@ below has a "Done" marker yet.
 
 ## 3c — Fine-Grained Access Control ([07](07-additional-features-and-roadmap.md) §2)
 
-69. **Per-page-type / per-tag permissions within a workspace** ([06](06-api-mcp-and-scaling.md)
+70. **Per-page-type / per-tag permissions within a workspace** ([06](06-api-mcp-and-scaling.md)
     §3). Extends the baseline `reader`/`contributor`/`admin` roles to scope by `page_type` or tag
     (e.g. a "Legal" sub-area of a workspace visible only to a subset of readers). Resolve step 65's
     global-admin question as part of this design, not before it — this is the first feature where
     the answer might actually matter.
 
-70. **PII detection at ingestion.** Classifier (or a dedicated scanner) flags sources containing
+71. **PII detection at ingestion.** Classifier (or a dedicated scanner) flags sources containing
     PII; a new `pii_review` review-item kind blocks ingestion until an admin clears it, mirroring
     the existing `duplicate`/`classification` review-item shapes (`03` §3-4) rather than inventing
     a new resolution model.
 
 ## 3d — Platform Operations: Analytics, Bulk Import/Export, Templates ([07](07-additional-features-and-roadmap.md) §5)
 
-71. **Storage/usage trend data** ([05](05-admin-backend-and-maintenance.md) §8). A time-series
+72. **Storage/usage trend data** ([05](05-admin-backend-and-maintenance.md) §8). A time-series
     mechanism for the "with trend" half of the Storage Utilization dashboard `monitoring.py`
     already built (step 44) but left `None` for lack of one — "no time-series mechanism exists
     anywhere in this codebase," `09` §47's own accepted-gap note, documented rather than faked at
-    the time. The minimal real prerequisite for step 72 to have actual historical data to show,
+    the time. The minimal real prerequisite for step 73 to have actual historical data to show,
     not just a point-in-time snapshot re-labeled as a trend.
 
-72. **Analytics dashboards.** Usage trends over time (search volume, submission volume, active
-    workspaces) — building on step 71's trend data and the feedback signal from step 67.
+73. **Analytics dashboards.** Usage trends over time (search volume, submission volume, active
+    workspaces) — building on step 72's trend data and the feedback signal from step 68.
 
-73. **Bulk import/export.** Admin tooling to seed a new workspace from an existing document
+74. **Bulk import/export.** Admin tooling to seed a new workspace from an existing document
     repository (bulk submission, bypassing per-document review-item noise but still subject to
     real classification/dedup — not a side channel around them), and to export a workspace's wiki
     + sources for migration/backup. The export half should reuse step 57's real wiki markdown
     mirror rather than build a second, parallel export mechanism — `02` §2 already names
     "backup/migration/export" as that mirror's own first purpose.
 
-74. **Workspace templates.** Predefined `SCHEMA.md` templates for common document-type categories
+75. **Workspace templates.** Predefined `SCHEMA.md` templates for common document-type categories
     (e.g. "Policy workspace," "Engineering docs workspace") to bootstrap a new workspace with
     sensible taxonomy/thresholds instead of a blank one. Depends on step 59 — there is no real
     `SCHEMA.md` to template until then.
@@ -197,14 +219,14 @@ Lighter-weight than the tracks above, and explicitly optional per the spec's own
 items — included so they're planned rather than perpetually deferred, not because Phase 3 can't
 close without them.
 
-75. **Optional read-through cache layer** ([02](02-storage-and-indexing.md) §6). Page/search-result
+76. **Optional read-through cache layer** ([02](02-storage-and-indexing.md) §6). Page/search-result
     caching, keyed by `(workspace_id, page_id, version_id)` or `(workspace_id, query_hash)` so a
     new page version or reindex naturally invalidates stale entries with no explicit cache-busting
     logic. "Not required for correctness — purely a latency optimization," per `02` §6's own
     wording; closes the "cache hit rate: `None`, no cache layer exists" accepted gap `monitoring.py`
     (step 44) documented rather than faked.
 
-76. **Backup & disaster recovery procedures.** Periodic snapshots of the Metadata DB and object
+77. **Backup & disaster recovery procedures.** Periodic snapshots of the Metadata DB and object
     store, with a documented point-in-time restore; scoped per-workspace given the storage
     partitioning Phase 2 already made real (`06` §4, steps 30–35). For wiki *content* specifically,
     this can lean on step 57's real markdown export (already framed as a backup/migration
@@ -213,11 +235,11 @@ close without them.
     distinct from, Phase 4's full multi-region/DR topology — this is backup/restore procedure, not
     a second active region.
 
-77. **Verify**: Phase 3 exit criteria, matching `07` §6's own stated goal — "Admin staff can run
+78. **Verify**: Phase 3 exit criteria, matching `07` §6's own stated goal — "Admin staff can run
     the Platform without manual intervention outside the review queue." Demonstrate end to end: a
-    real threshold breach fires a real notification (step 66) with no admin polling a dashboard
-    for it; a real low-feedback page surfaces to the Maintenance Advisor (step 67) with no manual
-    sweep; a per-tag-scoped reader (step 69) is correctly restricted through both the real REST and
+    real threshold breach fires a real notification (step 67) with no admin polling a dashboard
+    for it; a real low-feedback page surfaces to the Maintenance Advisor (step 68) with no manual
+    sweep; a per-tag-scoped reader (step 70) is correctly restricted through both the real REST and
     MCP surfaces, not just one of them; a real FUSE mount (step 58) shows a real, current
     `index.md` (step 60) an agent can read directly, no gateway round trip — the platform's own
     Karpathy-pattern premise, demonstrated for real for the first time.
@@ -229,14 +251,14 @@ run the Platform without manual intervention outside the review queue."
 
 | Requirement | Closed by |
 |---|---|
-| Foundational gaps carried forward from Phase 1/2, closed rather than left as permanent surprises | Steps 57–65 |
-| Notification Service, real delivery | Step 66 |
-| Search feedback loop / relevance-regression signal | Step 67 |
-| Content quality scoring | Step 68 |
-| Fine-grained access control | Steps 69–70 |
-| Analytics dashboards | Steps 71–72 |
-| Bulk import/export, workspace templates | Steps 73–74 |
-| Operational hardening (cache, backup/DR) | Steps 75–76 |
+| Foundational gaps carried forward from Phase 1/2, closed rather than left as permanent surprises | Steps 57–66 |
+| Notification Service, real delivery | Step 67 |
+| Search feedback loop / relevance-regression signal | Step 68 |
+| Content quality scoring | Step 69 |
+| Fine-grained access control | Steps 70–71 |
+| Analytics dashboards | Steps 72–73 |
+| Bulk import/export, workspace templates | Steps 74–75 |
+| Operational hardening (cache, backup/DR) | Steps 76–77 |
 
 ---
 Previous: [phase2-tasklist.md](phase2-tasklist.md) · Back to: [00-overview.md](00-overview.md)
