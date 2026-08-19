@@ -15,6 +15,10 @@ Credential handling (phase2-tasklist.md step 53): `connector.credential_ref` is 
 into the real secret via `secrets_manager.SecretResolver` at the start of each run (09 §13)
 — the adapter never sees the ref, only the resolved value, held in memory for this one call
 only and never persisted or logged.
+
+Auth failure (phase2-tasklist.md step 55): flips the connector to `disabled_auth` and calls
+`notifications.NotificationSink.notify_connector_auth_failure` — 09 §13's "surfaces via...
+the Notification Service," the pluggable hook `notifications.py` builds.
 """
 
 import logging
@@ -25,7 +29,7 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import ingestion, secrets_manager
+from . import ingestion, notifications, secrets_manager
 from .models import Connector, ConnectorState
 
 logger = logging.getLogger(__name__)
@@ -80,6 +84,7 @@ async def poll_connector(
     *,
     connector: Connector,
     secret_resolver: secrets_manager.SecretResolver = secrets_manager.default_secret_resolver(),
+    notification_sink: notifications.NotificationSink = notifications.default_notification_sink(),
 ) -> list[uuid.UUID]:
     """One connector's scheduled run (09 §4). Always updates `last_run_at`/
     `last_run_detail`, whatever the outcome — a poll that finds nothing new is still a
@@ -87,10 +92,10 @@ async def poll_connector(
     created this run (empty unless the outcome is `"ok"`), for the caller to dispatch
     classification against after commit.
 
-    `secret_resolver` is a real, callable default (mirrors `ingestion.py`'s
-    `call: ClassifierCall = call_model` pattern) — `EnvSecretResolver` holds no connection
-    or client, so constructing it once at import time is safe, unlike the OpenSearch/OIDC
-    lesson about module-scope async clients (09 §29)."""
+    `secret_resolver`/`notification_sink` are real, callable defaults (mirrors
+    `ingestion.py`'s `call: ClassifierCall = call_model` pattern) — neither holds a
+    connection or client, so constructing them once at import time is safe, unlike the
+    OpenSearch/OIDC lesson about module-scope async clients (09 §29)."""
     adapter = ADAPTERS.get(connector.type)
     if adapter is None:
         connector.last_run_at = datetime.now(UTC)
@@ -120,6 +125,9 @@ async def poll_connector(
         connector.last_run_at = datetime.now(UTC)
         connector.last_run_detail = {"outcome": "auth_failed", "items_discovered": 0, "message": str(exc)}
         await session.flush()
+        # 09 §13/step 55: surfaces via the Notification Service, alongside the Admin
+        # Console operational-health signal `last_run_detail` above already is.
+        await notification_sink.notify_connector_auth_failure(connector, str(exc))
         return []
     except Exception as exc:
         logger.warning("connector %s poll failed: %s", connector.connector_id, exc)

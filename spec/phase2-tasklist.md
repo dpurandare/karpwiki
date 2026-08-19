@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–54 done, tracks 2a, 2b, 2c, and 2d all complete and closed out;
+**Status (2026-08-19): steps 22–55 done, tracks 2a, 2b, 2c, and 2d all complete and closed out;
 track 2e (Connector Framework) in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
@@ -573,7 +573,22 @@ is a real Authenticator implementation using that pick, not a library search.
     throwaway workspace/connectors/sources afterward. See [09](09-implementation-notes.md)
     §57.
 55. `disabled_auth` state + Notification Service hook for connector auth failures
-    ([09](09-implementation-notes.md) §13).
+    ([09](09-implementation-notes.md) §13). **Done** — `disabled_auth` itself already existed
+    (steps 51-52); this step is the hook. Full delivery mechanics are explicitly Phase 3+
+    (this file's own header), so the open question — confirmed via AskUserQuestion — was how
+    real the hook should be: a pluggable `NotificationSink` interface
+    (`notifications.py`, new — `Protocol` + `default_notification_sink()` factory +
+    `LogNotificationSink`, a structured log line) over a bare unabstracted log call. The
+    third use of the same "protocol + factory + one real default" shape (`auth.py`,
+    `secrets_manager.py`), matching `01` §1's own diagram naming Notification as its own
+    Core Service. Scoped to one method, `notify_connector_auth_failure` — not a speculative
+    general event API for the other triggers `07` §6 names but no step asks for yet.
+    `connector_polling.poll_connector` calls it exactly where it sets `disabled_auth`.
+    Live-verified against real infra: a real `worker-connector-polling` container running a
+    real poll against a real private/nonexistent GitHub URL produced the exact structured
+    warning line (connector id, workspace id, type, message) in its own real logs, alongside
+    the real `disabled_auth` state change in real dev Postgres. See
+    [09](09-implementation-notes.md) §58.
 56. **Verify**: configure a connector, run one poll cycle, confirm it creates `raw_source`s
     indistinguishable from a manual upload and that they flow through the normal pipeline
     (classification, dedup, curation) unchanged.

@@ -2860,5 +2860,49 @@ Cleaned up the throwaway workspace/connectors/sources afterward.
 connector example and 09 §4 already specified the execution model this fills in; nothing here
 needed a wording change to either.
 
+## 58. Connector Auth-Failure Notification Hook (Phase 2 Step 55)
+
+`disabled_auth` itself already existed (step 51's enum, step 52's `poll_connector` setting it) —
+this step is the second half of its own tasklist line: a real "Notification Service hook."
+
+**The Notification Service's full delivery mechanics are explicitly Phase 3+** (phase2-
+tasklist.md's own header: "Explicitly excluded from this phase... the Notification Service's full
+delivery mechanics"; `07` §6's roadmap Gantt places it "after p2c," and its own "concretely it
+should" description names email/chat-webhook delivery this phase never builds). So this step can
+only be a call-out point, not real delivery — the open question was how real that hook should be.
+
+**Scope confirmed via AskUserQuestion before building**: a pluggable `NotificationSink` interface
+(`notifications.py`, new) — a `Protocol` + `default_notification_sink()` factory + one concrete
+`LogNotificationSink` (a structured `logger.warning`) — over a bare, unabstracted log line with no
+new module. This is the third time this exact "protocol + factory + one real default" shape has
+been used (`auth.py`'s `Authenticator`, `secrets_manager.py`'s `SecretResolver`), and matches `01`
+§1's own architecture diagram naming Notification as its own, separate Core Service rather than
+folding it into `connector_polling.py` as an inline logging concern — a deployment with a real
+notification backend implements `NotificationSink` and swaps it in, with no change to
+`connector_polling.py`, the same swap-with-no-handler-changes property the other two providers
+already proved out.
+
+**Scoped narrowly to this one trigger** (`notify_connector_auth_failure`), not a speculative
+general `notify(event_type, **kwargs)` API — `07` §6 names other triggers (aging review items, SLA
+breaches, submitter outcomes) no tasklist step asks this module to handle yet, and a general event
+API guessing at their shapes ahead of the step that actually needs them would be exactly the kind
+of premature generality this project avoids.
+
+**Fires exactly once per auth failure**, unconditionally (no de-duplication against a connector
+already sitting in `disabled_auth` from a prior run) — `poll_connector`'s own dispatch guard
+(`_dispatch_connector_polls` only ever dispatches *enabled* connectors) already keeps a disabled
+connector from being auto-polled again, so double-notification isn't a real risk in the normal
+schedule-driven path; a manual/test-driven re-poll notifying again is honest, not a bug to guard
+against.
+
+**Live-verified against real infra**: a real `worker-connector-polling` container running a real
+`poll_connector` task against a real (deliberately private/nonexistent) GitHub URL produced the
+exact structured warning line — connector id, workspace id, type, and message — in the container's
+own real logs, alongside the real `disabled_auth` state change in real dev Postgres. Cleaned up the
+throwaway workspace/connector afterward.
+
+**Spec touch-point** (applied): none required — `09` §13 already named both halves of this step
+("surfaces via... the Notification Service") in full; nothing here needed a wording change.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

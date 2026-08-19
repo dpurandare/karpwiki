@@ -157,6 +157,50 @@ async def test_poll_auth_failure_disables_the_connector(session, workspace, regi
     }
 
 
+class _SpyNotificationSink:
+    def __init__(self):
+        self.calls = []
+
+    async def notify_connector_auth_failure(self, connector, message):
+        self.calls.append((connector.connector_id, message))
+
+
+async def test_poll_auth_failure_notifies(session, workspace, registered_adapter):
+    """09 §13/step 55's hook: an auth failure fires the Notification Service call-out."""
+    registered_adapter(_StubAdapter(error=ConnectorAuthError("expired token")))
+    connector = await _connector(session, workspace)
+    await session.commit()
+    sink = _SpyNotificationSink()
+
+    await connector_polling.poll_connector(session, connector=connector, notification_sink=sink)
+
+    assert sink.calls == [(connector.connector_id, "expired token")]
+
+
+async def test_poll_success_does_not_notify(session, workspace, registered_adapter):
+    registered_adapter(_StubAdapter(items=[DiscoveredItem(filename="a.md", content=b"A")]))
+    connector = await _connector(session, workspace)
+    await session.commit()
+    sink = _SpyNotificationSink()
+
+    await connector_polling.poll_connector(session, connector=connector, notification_sink=sink)
+
+    assert sink.calls == []
+
+
+async def test_poll_generic_error_does_not_notify(session, workspace, registered_adapter):
+    """Only an auth failure is a Notification Service trigger (09 §13) — a transient fetch
+    error just retries next scheduled run, no different than before this step."""
+    registered_adapter(_StubAdapter(error=RuntimeError("source system timed out")))
+    connector = await _connector(session, workspace)
+    await session.commit()
+    sink = _SpyNotificationSink()
+
+    await connector_polling.poll_connector(session, connector=connector, notification_sink=sink)
+
+    assert sink.calls == []
+
+
 async def test_poll_generic_error_does_not_disable_the_connector(session, workspace, registered_adapter):
     """A transient fetch error (network blip, source-system 500) just retries on the
     connector's next scheduled run — only an auth failure disables (09 §13)."""

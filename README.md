@@ -177,7 +177,7 @@ choice trades and the three signals that should trigger raising the curator's ti
 the environment themselves, so the Platform never holds or logs it. Locally it comes from `.env`;
 in a deployment the secrets manager injects it at container start.
 
-**Connectors** (`06 §1`, `09 §4`/§13, phase2-tasklist.md steps 51-54): admin-configured
+**Connectors** (`06 §1`, `09 §4`/§13, phase2-tasklist.md steps 51-55): admin-configured
 scheduled crawlers that submit content the same way a user upload does. `POST /connectors`
 creates one (`type`, `config`, `credential_ref`, `schedule: {"interval_minutes": N}`,
 `ingestion_policy`); `celery-beat` dispatches due, enabled connectors onto their own
@@ -187,7 +187,11 @@ environment variable name, so `credential_ref: "GIT_MAIN_TOKEN"` resolves agains
 `GIT_MAIN_TOKEN` in the worker's own environment at poll time, never persisted. The one concrete
 connector type so far is `"git"` (`config: {"repo_url": ..., "branch": "main"}`) — real `git`
 clone/diff against any remote, `last_sync_cursor` tracking one commit SHA; an auth failure
-disables the connector (`disabled_auth`) rather than retrying.
+disables the connector (`disabled_auth`, no retry) and fires
+`notifications.NotificationSink.notify_connector_auth_failure` — the default
+`LogNotificationSink` writes a structured log line; a real Notification Service backend (Phase 3
+per the roadmap, `07 §6`) would implement the same interface with no change to
+`connector_polling.py`.
 
 ## Scaling
 
