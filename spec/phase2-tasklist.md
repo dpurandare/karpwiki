@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–48 done, tracks 2a, 2b, and 2c all complete and closed out; track
+**Status (2026-08-19): steps 22–49 done, tracks 2a, 2b, and 2c all complete and closed out; track
 2d in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
@@ -435,7 +435,26 @@ is a real Authenticator implementation using that pick, not a library search.
     [09](09-implementation-notes.md) §51.
 49. Horizontal scaling: multiple gateway instances behind a load balancer, worker pools scaling
     independently now that 2b makes them real
-    ([06](06-api-mcp-and-scaling.md) §5 deployment topology).
+    ([06](06-api-mcp-and-scaling.md) §5 deployment topology). **Done** — worker-pool independent
+    scaling was already live-verified in step 34; the Gateway itself had never been
+    containerized. Confirmed the build-it-for-real scope via AskUserQuestion first (over a
+    documentation-only alternative), since step 50's own verify needs real LB infra to run
+    against. New `gateway` docker-compose service reuses the existing worker image (same
+    `Dockerfile`, `command: uvicorn karpwiki.api:app` instead of a Celery worker) — `expose`,
+    not `ports`, since it's meant to be scaled. New `nginx` service + `nginx.conf` round-robin
+    across replicas, using the standard Docker Compose + nginx dynamic-DNS-resolution pattern
+    (`resolver 127.0.0.11` + a `set $upstream` variable) rather than a bare `proxy_pass`, which
+    would cache one container's IP for nginx's lifetime and never see new replicas. New `GET
+    /healthz` route for Docker's per-replica healthcheck, deliberately exempted from step 48's
+    rate limiter entirely — otherwise every replica's own healthcheck (no auth header) would
+    share the same "anon" Redis counter and could throttle each other's liveness probes at
+    enough replicas. Live-verified against real containers: built the image, scaled to 3
+    replicas (independently Docker-healthy), fired 15 requests at nginx and confirmed via each
+    container's own logs a real 7/5/3 split (not all on one instance); ran one full submit →
+    real `gpt-5-nano` classify/curate → index → search round trip through the load balancer,
+    not just a bare-GET smoke test. Scaled back to 1 replica and deleted the throwaway
+    workspace afterward (celery-beat is live in this stack and would otherwise eventually sweep
+    it with a real paid LLM call). See [09](09-implementation-notes.md) §52.
 50. **Verify**: an MCP client can search, submit, and (as admin) resolve a review item end-to-end
     through the protocol adapter, not only through the REST surface; a second gateway instance
     behind a load balancer serves traffic with no session-affinity requirement.

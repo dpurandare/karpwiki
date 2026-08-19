@@ -204,11 +204,26 @@ dispatch tasks on a schedule (step 41); running a second instance would double-f
 entry (Celery's own constraint, not a limitation of this codebase). `worker-maintenance`, which
 does the real per-workspace work those dispatches enqueue, scales like every other queue above.
 
-**The Gateway — real, not yet load-tested here.** `uvicorn karpwiki.api:app` holds no in-process
-state a second instance would need to share (`_session` opens a fresh DB session per request,
-`Principal` resolution is stateless per-request auth), so running several instances behind any load
-balancer is the same "add instances, no session affinity" story [06 §4](spec/06-api-mcp-and-scaling.md)
-describes — just not exercised with a real load balancer in this repo, unlike the worker pool above.
+**The Gateway — real, load-tested here (phase2-tasklist.md step 49).** `docker-compose.yml` runs
+the Common Gateway as its own `gateway` service — the same image the four worker services above
+share, just `command: uvicorn karpwiki.api:app` instead of a Celery worker — behind an `nginx`
+reverse proxy (`nginx.conf`) published at `localhost:8080`:
+
+```bash
+docker compose up -d --scale gateway=3 gateway
+curl http://localhost:8080/workspaces -H "X-Karpwiki-User: deepak"
+```
+
+No in-process state a second instance would need to share (`_session` opens a fresh DB session per
+request; rate-limit counters live in shared Redis, step 48; `Principal` resolution is stateless
+per-request auth), so nginx needs no session affinity — `proxy_pass` round-robins across however
+many `gateway` replicas Docker Compose's embedded DNS currently resolves. Verified live: 3 replicas
+up, 15 requests fired through `localhost:8080`, each container's own log showing a real, roughly
+even split (not all landing on one instance); a full submit → real `gpt-5-nano` classify/curate →
+index → search round trip completed correctly end to end through the load balancer, not just
+simple GETs. `GET /healthz` (new, unauthenticated, exempt from rate limiting) is what Docker's own
+per-replica healthcheck polls — a real API category would double-count a healthcheck's own traffic
+against that replica's rate-limit bucket otherwise.
 
 **Object Store — real by construction, not by anything built here.** MinIO in `docker-compose.yml`
 is a single-node dev convenience; pointing `KARPWIKI_OBJECT_STORE_URL` at real S3 (or an

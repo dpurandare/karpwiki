@@ -19,9 +19,8 @@ version history/rollback only ever took a `page_id` path param, never a listing 
 discover one; `sources` list — 05 §7's admin Raw Source Browser; `connectors` list/
 configure, stubbed until track 2e's real `Connector` model lands, step 51).
 
-Not implemented here, deliberately: the rate limiter is 07 §3, a later phase (phase2-
-tasklist.md step 48). Dedicated-index score normalization (04 §4) is step 26 — this
-endpoint only ever queries the one shared index.
+Not implemented here, deliberately: dedicated-index score normalization (04 §4) is step
+26 — this endpoint only ever queries the one shared index.
 """
 
 import hashlib
@@ -148,7 +147,17 @@ def create_app(authenticator: Authenticator | None = None) -> FastAPI:
         """09 §14's `RateLimit-*`/`Retry-After` header contract, phase2-tasklist.md step
         48 — registered *before* `attach_request_id` below so it ends up the inner
         middleware (Starlette wraps in reverse registration order) and always sees a
-        real `request.state.request_id` already set, for a consistent 429 body."""
+        real `request.state.request_id` already set, for a consistent 429 body.
+
+        `/healthz` (step 49) is exempt entirely, not folded into "general" — it's an
+        infra liveness probe hit by every gateway instance's own Docker healthcheck and
+        potentially the load balancer, not one of 07 §3's three real API categories; the
+        real risk otherwise is self-inflicted (many replicas' healthchecks all present no
+        auth header, so they'd all share the same "anon" Redis counter and could throttle
+        each other's own healthcheck into failing)."""
+        if request.url.path == "/healthz":
+            return await call_next(request)
+
         category = _rate_limit_category(request)
         principal_limit, workspace_limit = rate_limit_categories[category]
         window = config.RATE_LIMIT_WINDOW_SECONDS
@@ -478,6 +487,13 @@ async def _admin_workspace(
 
 
 def _register_routes(app: FastAPI) -> None:
+    @app.get("/healthz")
+    async def healthz():
+        """Liveness probe (06 §5, phase2-tasklist.md step 49) — no auth, no DB touch,
+        exempt from rate limiting (see `enforce_rate_limit` above). Docker's own
+        healthcheck and the load balancer's upstream check hit this, not a real client."""
+        return {"status": "ok"}
+
     @app.post("/sources", status_code=202)
     async def submit_source(
         request: Request,

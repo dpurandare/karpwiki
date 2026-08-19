@@ -77,3 +77,27 @@ async def test_middleware_returns_429_with_headers_once_the_limit_is_exhausted(
         assert "Retry-After" in third.headers
         assert third.headers["RateLimit-Remaining"] == "0"
         assert third.headers["RateLimit-Limit"] == "2"
+
+
+async def test_healthz_is_exempt_from_rate_limiting(monkeypatch, session):
+    """`/healthz` (step 49's Docker healthcheck target) must never itself get 429'd — an
+    unauthenticated caller's requests all share the "anon" Redis bucket, and many gateway
+    replicas each polling their own `/healthz` every few seconds would otherwise contend
+    for the same tiny shared counter."""
+    monkeypatch.setattr(config, "RATE_LIMIT_GENERAL_PER_PRINCIPAL", 2)
+
+    import karpwiki.api as api_module
+    from karpwiki.api import create_app
+
+    async def _one_session():
+        yield session
+
+    app = create_app()
+    app.dependency_overrides[api_module._session] = _one_session
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://gateway") as http:
+        for _ in range(5):
+            response = await http.get("/healthz")
+            assert response.status_code == 200
+            assert response.json() == {"status": "ok"}
+            assert "RateLimit-Limit" not in response.headers

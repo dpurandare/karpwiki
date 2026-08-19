@@ -2468,5 +2468,62 @@ standard error envelope (`{"error": {"type": "rate_limited", ...}}`) and a `Retr
 every request after; waiting out the window produced a fresh `200` with the counter reset,
 confirming the fixed-window `EXPIRE` behavior end to end against real Redis.
 
+## 52. Horizontal Gateway Scaling (Phase 2 Step 49)
+
+06 §5's "load-balanced Gateway tier" made real. Worker-pool independent scaling was already built
+and live-verified in step 34 (`docker compose up --scale worker-classification=N`); the Gateway
+itself had never been containerized at all — only ever run via a bare `uvicorn karpwiki.api:app
+--reload` on the host (README). **Scope confirmed via AskUserQuestion before building**: chosen
+over a documentation-only "audit statelessness, don't add infra" alternative, since step 50's own
+closing verify needs a real second gateway instance behind a real load balancer to run its MCP
+end-to-end check against, and this project's consistent discipline has been to build and
+live-verify real infra for every other scaling claim (worker containers, `celery-beat`, OpenSearch)
+rather than assert it from the design alone.
+
+**`gateway` (new docker-compose service) reuses the existing worker image, not a new one** — same
+`Dockerfile`, just `command: uvicorn karpwiki.api:app --host 0.0.0.0 --port 8000` in place of a
+Celery worker command, extending the exact convention the four worker services already established
+(one shared image, `command:` selects the role). `expose`, not `ports`: the service is meant to be
+scaled (`--scale gateway=N`), so a static host port mapping would collide across replicas — only
+`nginx` publishes a host port.
+
+**`nginx` (new service) is the load balancer**, `nginx.conf` (new file) round-robining across
+however many `gateway` replicas are up. The one real implementation subtlety: a bare `proxy_pass
+http://gateway:8000;` resolves the hostname once, at nginx startup, and caches that single
+container's IP for nginx's lifetime — new replicas added later via `--scale` would never receive
+traffic, and Docker's own embedded DNS round-robining across a scaled service's multiple containers
+would be invisible to nginx entirely. Fixed with the standard Docker Compose + nginx pattern: a
+`resolver 127.0.0.11 valid=10s` (Docker's embedded DNS) plus routing `proxy_pass` through a `set
+$upstream` variable, which forces nginx to re-resolve per the resolver's TTL instead of once at
+startup.
+
+**`GET /healthz` (new route) is the one new application-code surface this step needed** — Docker's
+own per-replica healthcheck needs *something* to poll, and every existing endpoint requires a real
+principal. Deliberately exempted from `enforce_rate_limit` entirely (an early return in the
+middleware, not folded into the "general" category): every replica's own healthcheck presents no
+auth header, so without the exemption every replica's healthchecks would all increment the *same*
+shared "anon" Redis counter (step 48's rate limiter is intentionally principal-keyed, not
+per-instance) — at enough replicas, healthchecks alone could exhaust that shared bucket and start
+failing each other's own liveness probes, a self-inflicted failure mode worth naming even though it
+never actually manifested at the replica counts tested here.
+
+**Live-verified against real containers, not asserted from the design.** Built the image, brought
+up the full stack, scaled `gateway` to 3 replicas (all reporting Docker-healthy independently), then
+fired 15 requests at `nginx`'s published port and confirmed via each container's own logs that the
+traffic actually split across all three (7/5/3, not all on one) — proving real round-robin
+distribution, not just that multiple containers happened to be running. Ran one full submit → real
+`gpt-5-nano` classify/curate → index → search round trip through the load balancer (not a bare-GET
+smoke test) to confirm the LB-fronted path works for genuinely stateful, multi-request-pipeline
+traffic, not only idempotent reads. Scaled back to 1 replica afterward (no reason to leave 3 idle
+app containers running); the throwaway workspace created for the live check was deleted before
+finishing, since `celery-beat` is live in this stack and would otherwise eventually sweep it with a
+real paid Contradiction Detector LLM call, the same reasoning behind step 42's earlier cleanup.
+
+**Spec touch-point** (applied): `06` §5's "minimal deployment... load-balanced Gateway tier" is now
+demonstrated, not just described — no wording change needed to `06` itself, since its own text
+already anticipated exactly this shape ("the spec doesn't mandate a specific orchestrator... all
+fit this shape"); `nginx` here is one concrete instance of "standard orchestration," not a new
+requirement.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)
