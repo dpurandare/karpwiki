@@ -50,6 +50,51 @@ async def test_grant_upgrades_an_existing_grant(session, workspace):
     assert [(g.principal, g.role) for g in grants] == [("user:x", Role.admin)]
 
 
+async def test_grant_defaults_fuse_access_to_false(session, workspace):
+    granted = await workspaces.grant(
+        session, workspace_id=workspace.workspace_id, principal="user:new", role=Role.reader
+    )
+    assert granted.fuse_access is False
+
+
+async def test_grant_sets_fuse_access_on_a_new_grant(session, workspace):
+    granted = await workspaces.grant(
+        session,
+        workspace_id=workspace.workspace_id,
+        principal="user:new",
+        role=Role.reader,
+        fuse_access=True,
+    )
+    assert granted.fuse_access is True
+
+
+async def test_grant_updates_fuse_access_on_an_existing_grant(session, workspace):
+    await workspaces.grant(session, workspace_id=workspace.workspace_id, principal="user:x", role=Role.reader)
+    updated = await workspaces.grant(
+        session,
+        workspace_id=workspace.workspace_id,
+        principal="user:x",
+        role=Role.reader,
+        fuse_access=True,
+    )
+    assert updated.fuse_access is True
+
+
+async def test_grant_omitting_fuse_access_leaves_it_unchanged(session, workspace):
+    await workspaces.grant(
+        session,
+        workspace_id=workspace.workspace_id,
+        principal="user:x",
+        role=Role.reader,
+        fuse_access=True,
+    )
+    updated = await workspaces.grant(
+        session, workspace_id=workspace.workspace_id, principal="user:x", role=Role.admin
+    )
+    assert updated.role is Role.admin
+    assert updated.fuse_access is True  # not touched — fuse_access wasn't passed
+
+
 async def test_revoke_removes_a_grant(session, workspace):
     await workspaces.grant(session, workspace_id=workspace.workspace_id, principal="user:x", role=Role.reader)
     await workspaces.revoke(session, workspace_id=workspace.workspace_id, principal="user:x")

@@ -450,6 +450,11 @@ class AccessPolicy(Base):
     )
     principal: Mapped[str] = mapped_column(String(255), primary_key=True)
     role: Mapped[Role] = mapped_column(Enum(Role, name="role"))
+    # Read-only FUSE-mount access to the wiki export (09 §12, phase3-tasklist.md step 58) —
+    # opt-in, orthogonal to `role`: granting it never widens what `role` itself permits, and
+    # holding a role (even `admin`) never implies it. False by default for every existing
+    # grant, matching 09 §12's "not automatic for every existing reader/contributor."
+    fuse_access: Mapped[bool] = mapped_column(default=False)
 
 
 class Connector(Base):

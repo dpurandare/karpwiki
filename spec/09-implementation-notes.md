@@ -3069,5 +3069,79 @@ here (non-transactional write, "regenerated projection" framing); the two AskUse
 above are implementation decisions filling in what the spec deliberately left open, not deviations
 from it.
 
+## 62. FUSE-Mount Access (Phase 3 Step 58)
+
+§12 above already decided the shape — read-only, opt-in per workspace via `access_policy`, scoped
+to exactly the wiki export (step 57) — but it was never built. This step builds it, with one real
+scope question resolved via AskUserQuestion before any code was written: an actual mount is an OS
+syscall requiring a kernel-level FUSE driver installed on the host (macFUSE on macOS, `fuse3` on
+Linux) — system software installation, a materially different kind of action than anything else in
+this codebase. Confirmed scope: build every real piece of app logic (the AuthZ grant, the
+scoped/read-only filesystem view, a real CLI entry point using `fsspec.fuse.run`), but do not
+install a FUSE driver or perform a live mount in this session.
+
+**`AccessPolicy.fuse_access`** (new column, migration `7ab85057a869`, `server_default=false` then
+dropped — same round-tripped, backfill-safe pattern `e139b033f7f3` already established for
+`workspace.dedicated_index`) — orthogonal to `role`, never widens what a role already permits and
+is never implied by one, matching §12's "not automatic for every existing reader/contributor."
+`workspaces.grant` gained an optional `fuse_access: bool | None = None` param — omitted leaves an
+existing grant's value unchanged (mirrors `workspaces.update`'s own "only supplied fields change"
+convention), matching `False` on a brand-new grant. `POST /workspaces/{id}/access-policy` passes it
+through; `GET` now returns it in every grant's body.
+
+**`wiki_mount.py`** (new): `check_fuse_access(session, principal_keys, workspace_id)` — a plain
+`AccessPolicy` query gating on `fuse_access.is_(True)`, raising `FuseAccessDenied` (a
+`PermissionError` subclass) otherwise — same `principal.policy_keys` group-aware pattern
+`auth.effective_role`/`has_role` already use. `scoped_filesystem(workspace_id)` builds a view
+rooted at exactly `/{workspace_id}/wiki/` via fsspec's own `DirFileSystem` (confirmed its real
+constructor signature directly against the installed `fsspec==2026.7.0`, not assumed from training
+data) — never `sources/`/`diffs/`/`assets/`, matching `02` §2's own scope boundary, since those are
+simply outside the wrapped root's path space.
+
+**`fsspec.fuse.run` has no read-only option of its own** — read its actual source directly (not
+assumed): its `FUSEr` operations class calls `write`/`create`/`mkdir`/`rmdir`/`unlink`/`chmod`
+straight through to whatever filesystem object it's handed, with no read-only flag anywhere in
+`run()`'s signature. `_ReadOnlyFileSystem` (new, in `wiki_mount.py`) is what actually makes
+"never write access" (`09` §12's own words) true: it wraps any fsspec filesystem, blocks every
+mutating method by name, and blocks `open()` in any non-read mode — verified this happens *before*
+the real backend is ever touched (see Verification below), not just that the call eventually fails.
+
+**Deferred import, confirmed necessary, not just cautious**: `import fsspec.fuse` (needed inside
+`run_mount` to actually call `fsspec.fuse.run`) transitively imports `fuse` (the `fusepy` PyPI
+package), whose own top-level `ctypes.util.find_library("fuse")` call raises `OSError: Unable to
+find libfuse` at import time — confirmed directly in this dev environment (macOS, no macFUSE
+installed) — if libfuse isn't present. Deferring the import to inside `run_mount` only (not at
+module top level) keeps `check_fuse_access`/`scoped_filesystem`/`_ReadOnlyFileSystem` — the actual
+app logic this step needed to build — importable and testable regardless. `fusepy` itself installs
+cleanly via plain `pip` (pure Python, no build step) — only *importing* it needs the system
+library — so it's declared as a new `fuse` extra in `pyproject.toml`
+(`pip install karpwiki[fuse]`), not the base dependency list every gateway/worker process would
+otherwise be forced to carry for a capability only the standalone mount CLI uses.
+
+**Identity resolution reuses `mcp_server._resolve_stdio_principal` directly**, rather than
+duplicating it: a FUSE-mount process is the same shape as the MCP stdio transport — one local
+process, one caller, no per-request headers — so `run_mount` imports the (module-private but
+reusable, no MCP-specific coupling) function rather than inventing a second `KARPWIKI_*_TOKEN`/
+`_USER`/`_GROUPS` convention for the same problem.
+
+**Verification**: `tests/test_wiki_mount.py` (new, 7 tests) — `check_fuse_access` denies with no
+grant, denies a role-only grant (`fuse_access=False`), allows a real grant, allows via a group
+grant; `scoped_filesystem` serves real content rooted at the right prefix and blocks every mutating
+call tried (`open` write modes, `rm`, `mkdir`, `touch`). `tests/test_workspaces.py`/
+`test_workspaces_api.py` gained matching coverage for `workspaces.grant`'s new param and the API's
+pass-through (plus fixed one pre-existing exact-dict response assertion that the new `fuse_access`
+field would otherwise have broken). Full suite (550 tests) green. No test anywhere imports
+`fsspec.fuse` or performs a real mount, per the confirmed scope. Live-verified against real dev
+Postgres and the real MinIO-backed S3 object store, plus the real REST API through the rebuilt
+`gateway`/`nginx` containers: `check_fuse_access` correctly denied/allowed against real grants,
+`scoped_filesystem` read real S3-backed content, and a real write/`rm` attempt against the real
+backend was blocked *before* touching it — re-read the file afterward to confirm it was genuinely
+unchanged, not just that the call raised. `POST`/`GET /workspaces/{id}/access-policy` through nginx
+correctly granted and listed `fuse_access: true`. Cleaned up the throwaway `live58-*`/`live58api-*`
+workspaces from dev Postgres afterward.
+
+**Spec touch-point** (applied): none required — `09` §12 already specifies this step's full scope;
+nothing built here diverges from it.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

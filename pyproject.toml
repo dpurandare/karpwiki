@@ -30,6 +30,12 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
+# Only the standalone FUSE-mount CLI (wiki_mount.py, 09 §12) needs this — it also needs a
+# kernel-level FUSE driver installed on the host (macFUSE/fuse3) to even import, so it's
+# kept out of the base dependency list every gateway/worker process would otherwise pull in.
+fuse = [
+    "fusepy>=3.0",
+]
 
 [build-system]
 requires = ["hatchling"]

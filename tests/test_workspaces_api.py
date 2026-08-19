@@ -95,12 +95,24 @@ async def test_grant_and_list_access_policy(client, session, workspace):
         "workspace_id": workspace.workspace_id,
         "principal": "user:morgan",
         "role": "reader",
+        "fuse_access": False,
     }
 
     listed = await client.get(f"/workspaces/{workspace.workspace_id}/access-policy", headers=ADMIN)
     principals = {g["principal"] for g in listed.json()["items"]}
     assert "user:morgan" in principals
     assert "avery" in principals  # the admin grant itself is visible too
+
+
+async def test_grant_access_policy_with_fuse_access(client, session, workspace):
+    await _grant_admin(session, workspace)
+    r = await client.post(
+        f"/workspaces/{workspace.workspace_id}/access-policy",
+        headers=ADMIN,
+        json={"principal": "user:morgan", "role": "reader", "fuse_access": True},
+    )
+    assert r.status_code == 201
+    assert r.json()["fuse_access"] is True
 
 
 async def test_revoke_access_policy(client, session, workspace):

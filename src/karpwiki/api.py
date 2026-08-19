@@ -498,10 +498,13 @@ class UpdateWorkspaceRequest(BaseModel):
 
 
 class GrantAccessRequest(BaseModel):
-    """POST /workspaces/{id}/access-policy body (05 §7, 06 §3)."""
+    """POST /workspaces/{id}/access-policy body (05 §7, 06 §3). `fuse_access` (09 §12,
+    phase3-tasklist.md step 58) is optional and orthogonal to `role` — omitted leaves an
+    existing grant's value unchanged."""
 
     principal: str
     role: Role
+    fuse_access: bool | None = None
 
 
 class BulkMoveRequest(BaseModel):
@@ -538,6 +541,7 @@ def _access_policy_body(policy: AccessPolicy) -> dict[str, Any]:
         "workspace_id": policy.workspace_id,
         "principal": policy.principal,
         "role": policy.role.value,
+        "fuse_access": policy.fuse_access,
     }
 
 
@@ -1209,7 +1213,11 @@ def _register_routes(app: FastAPI) -> None:
     ):
         await _admin_workspace(session, principal, workspace_id)
         granted = await workspaces.grant(
-            session, workspace_id=workspace_id, principal=payload.principal, role=payload.role
+            session,
+            workspace_id=workspace_id,
+            principal=payload.principal,
+            role=payload.role,
+            fuse_access=payload.fuse_access,
         )
         await session.commit()
         return _access_policy_body(granted)

@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-19): step 57 done, steps 58-78 not started.** Phase 1 (steps 1–21) and Phase 2
+**Status (2026-08-19): steps 57-58 done, steps 59-78 not started.** Phase 1 (steps 1–21) and Phase 2
 (steps 22–56) are both complete — see [`phase1-tasklist.md`](phase1-tasklist.md) and
 [`phase2-tasklist.md`](phase2-tasklist.md). See [`implementation-audit.md`](implementation-audit.md)
 for the full write-up of the two audit passes that shaped track 3a, including redundancy/dead-code
@@ -71,6 +71,24 @@ findings that don't need a roadmap step (tracked there instead).
     during Phase 1 planning (`phase2-tasklist.md`'s own "0 — Already Decided" table cites it) but
     no tasklist step ever actually built it, and it cannot exist before step 57 does — there is
     nothing to mount otherwise.
+
+    **Done** — `AccessPolicy.fuse_access` (migration `7ab85057a869`), settable via
+    [`workspaces.grant`](../src/karpwiki/workspaces.py) and the real
+    `POST /workspaces/{id}/access-policy` endpoint. New
+    [`wiki_mount.py`](../src/karpwiki/wiki_mount.py): `check_fuse_access` (AuthZ),
+    `scoped_filesystem` (a read-only view rooted at exactly `/{workspace_id}/wiki/`, via
+    fsspec's `DirFileSystem` wrapped in a `_ReadOnlyFileSystem` that blocks every mutating call —
+    `fsspec.fuse`'s own FUSE helper enforces no read-only option itself), and `run_mount`/`main`,
+    a real CLI entry point (`python -m karpwiki.wiki_mount`) using `fsspec.fuse.run` and the same
+    stdio identity convention `mcp_server.py` already uses. Confirmed via AskUserQuestion:
+    actually performing an OS-level mount needs a kernel FUSE driver installed on the host
+    (macFUSE/`fuse3`) — out of scope to install here, so `fsspec.fuse` is imported lazily inside
+    `run_mount` only, keeping the rest of the module (the real app logic — AuthZ + read-only
+    view-scoping) importable and testable without one. Live-verified against real dev Postgres
+    (grant/deny both through `workspaces.grant` and the real REST API via nginx) and the real
+    MinIO-backed S3 object store (`scoped_filesystem` reading real content, and blocking a real
+    write/`rm` attempt before it ever reached the real backend — confirmed the file was
+    unchanged after). See [09](09-implementation-notes.md) §62 for the full writeup.
 
 59. **Real `SCHEMA.md` storage and parsing** ([09](09-implementation-notes.md) §26). `05` §7
     lists "edit SCHEMA.md" as a workspace-lifecycle action, and `01` §7 frames it as "versioned

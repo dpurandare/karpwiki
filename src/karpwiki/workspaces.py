@@ -84,16 +84,31 @@ async def archive(session: AsyncSession, *, workspace: Workspace) -> Workspace:
 
 
 async def grant(
-    session: AsyncSession, *, workspace_id: str, principal: str, role: Role
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    principal: str,
+    role: Role,
+    fuse_access: bool | None = None,
 ) -> AccessPolicy:
     """Assign a principal a role in a workspace (05 §7). Upserts — granting a role to a
-    principal that already has one changes it, rather than requiring a separate revoke."""
+    principal that already has one changes it, rather than requiring a separate revoke.
+
+    `fuse_access` (09 §12, phase3-tasklist.md step 58) is read-only FUSE-mount access to
+    the wiki export, orthogonal to `role` — omitted (`None`) leaves an existing grant's
+    value unchanged, matching `update()`'s own "only supplied fields change" convention;
+    a brand-new grant defaults to `False` when omitted, same as the column's own default.
+    """
     existing = await session.get(AccessPolicy, (workspace_id, principal))
     if existing is not None:
         existing.role = role
+        if fuse_access is not None:
+            existing.fuse_access = fuse_access
         await session.flush()
         return existing
-    policy = AccessPolicy(workspace_id=workspace_id, principal=principal, role=role)
+    policy = AccessPolicy(
+        workspace_id=workspace_id, principal=principal, role=role, fuse_access=fuse_access or False
+    )
     session.add(policy)
     await session.flush()
     return policy
