@@ -1909,5 +1909,105 @@ step of its own.
 `prune`/`reindex` as the possible outcomes; this section records the candidate-band/cap decision
 and the `lint_log` scope call.
 
+## 44. Maintenance Advisor Scheduling — Cadence as a Deployment Knob, and a Real Beat Permission Bug (Phase 2 Step 41)
+
+Track 2c's closing step (05 §2's "scheduling philosophy") — the five detectors (steps 36-40) go
+from purely callable functions to something a real `celery-beat` process fires automatically.
+
+**Cadence is env-overridable; content thresholds are not — a deliberate asymmetry, confirmed with
+the user before writing code.** `config.py` gains `KARPWIKI_MAINTENANCE_INTERVAL_HOURS` (default
+24) and `KARPWIKI_MAINTENANCE_CONTRADICTION_INTERVAL_HOURS` (default 168/weekly) — Contradiction
+Detection spends a real LLM call per candidate (step 40), so it gets a separate, slower default
+than the other four (no LLM cost at detection). The first draft of this step hardcoded both as
+Python constants, matching every other detector threshold in `advisor.py`; asked "why hardcode it"
+and, after distinguishing *what* was being hardcoded, the user asked for cadence specifically (and
+anything like it) to be env-overridable. The distinction that emerged: cadence is a **deployment-
+wide operational knob** — how often *this deployment's* beat process sweeps, independent of any
+workspace's content — the same category `KARPWIKI_CELERY_BROKER_URL`/`KARPWIKI_LLM_CURATOR_MODEL`
+already occupy in `config.py`. Every other detector threshold (staleness days, orphan lookback,
+dedup similarity, contradiction band/cap) is a **per-workspace content threshold** that `09` §6's
+SCHEMA.md template scopes per workspace, not per deployment — real SCHEMA.md parsing stays out of
+scope (`09` §26), so those stay Python defaults with a function-parameter override, and promoting
+just cadence to an env var doesn't create the inconsistency it would if applied selectively to
+only some content thresholds. The two new staleness tiering values
+(`KARPWIKI_STALENESS_HIGH_TRAFFIC_DAYS`/`_LOW_TRAFFIC_DAYS`, defaults 90/365) ended up env vars too
+— the user's explicit call after weighing the tradeoff (an inconsistency with every *other*
+existing threshold, accepted in exchange for a real ops knob on this specific, newly-added pair)
+rather than the recommended "leave them as Python defaults like everything else" option.
+
+**Popularity tiering layers on `find_stale_pages` without changing it.** `find_stale_pages_tiered`
+(new, `advisor.py`) calls the existing, untouched `find_stale_pages` once at each tier's day count
+— `high_traffic_days` (90) is the more permissive/inclusive bound, `low_traffic_days` (365) the
+stricter one — then keeps a page from the permissive result if it's either genuinely high-traffic
+(reusing the orphan detector's own query_log-presence check and lookback window as the popularity
+signal, rather than inventing a second one) or already present in the strict result on its own
+merits. No new field on `StaleFinding`, no join added to `find_stale_pages` itself — every existing
+test and call site of that function is untouched. `run_staleness_detector` gained `tiered: bool =
+False` (default preserves the exact pre-step-41 flat behavior every existing test already
+exercises) plus the tier parameters; `tasks._detect_staleness_tiered` is a new, separate task
+(rather than a `tiered` kwarg on `detect_staleness` itself) matching this module's existing
+one-task-per-detector shape and sidestepping the `dispatched` test fixture's kwarg-less `.delay()`
+lambda entirely.
+
+**The dispatch shape: two thin tasks, not a static per-workspace schedule.** Celery beat's own
+schedule config is static and can't know about a workspace created after the process started, so
+`dispatch_daily_detectors`/`dispatch_contradiction_detector` are the only two `beat_schedule`
+entries — each enumerates `Workspace.status == active` at fire time and re-enqueues the
+already-existing per-workspace task (`detect_staleness_tiered`/`detect_superseded_sources`/
+`detect_existing_duplicates`/`detect_orphans`, or `detect_contradictions`) for each one, fanning
+out across `worker-maintenance` replicas rather than processing every workspace serially inside
+one long-running dispatch task (consistent with step 34's established per-queue scaling story).
+
+**A real, step-40 gap found while wiring this up: `detect_contradictions` didn't exist.**
+Steps 36-39 each added their own manual-dispatch Celery task alongside the detector itself
+(`detect_staleness`, `detect_superseded_sources`, `detect_existing_duplicates`, `detect_orphans`);
+step 40 built the Contradiction Detector in `advisor.py` but never gave it a task wrapper — a real
+gap in the prior step's own scope, caught only because this step needs every detector to have one
+to dispatch. Fixed here rather than treated as this step's own new surface, with the same `call`
+test-seam `_classify`/`_curate` already use (this detector's `call` is real work, unlike the other
+four, whose LLM calls — if any — happen at resolution, not detection).
+
+**A real bug caught live, not by any test:** `celery-beat` starts as the Dockerfile's non-root
+`karpwiki` user, but its default persistence file (`celerybeat-schedule`) writes to `/app` (the
+image's `WORKDIR`), which is root-owned from the build — `docker compose up -d celery-beat` failed
+immediately with `PermissionError: [Errno 13] Permission denied: 'celerybeat-schedule'`. No test
+could have caught this: nothing in the test suite runs a real containerized beat process. Fixed
+with `--schedule=/tmp/celerybeat-schedule` (world-writable, and losing this file on a restart only
+costs beat one schedule tick's memory of "did I already fire this," not application state — the
+detectors' own idempotency guards, e.g. `_open_prune_item`, are what actually prevent duplicate
+review items, not this file).
+
+**Live-verified against the real dev Postgres/broker/worker containers** (not committed): a
+workspace seeded with a high-traffic stale page (queried once, 100 days stale) and a low-traffic
+stale page (never queried, also 100 days stale). Both real `dispatch_*` tasks were called directly
+— exactly what a real `celery-beat` tick does — and the real `worker-maintenance` container picked
+up and completed every dispatched task across every active workspace in the dev DB: the tiered
+reindex item correctly named only the high-traffic page (the low-traffic one correctly excluded,
+100 days being short of its 365-day bar).
+
+The first contradiction check used the wrong test content and, in doing so, caught a real gap in
+this codebase's own test coverage rather than a bug: the pair borrowed from `test_advisor.py`'s
+unit tests ("restart daily via an automated script" vs. "restart weekly via a manual checklist")
+scored correctly into the candidate band, but the real `gpt-5-nano` call correctly judged it *not*
+a contradiction — two restart cadences can reasonably coexist, unlike step 40's proven "Friday
+deploys: allowed vs. banned" pair. That unit-test pair had only ever been exercised against a fake
+`call` forcing `contradicts=True`, never against the real model — this is the first time it hit
+a live judgment, and the negative result is correct, not a defect. Re-run with step 40's own
+proven pair, dispatched directly at the single target workspace (`detect_contradictions.delay`)
+rather than re-sweeping every active workspace a second time: confirmed and flagged correctly,
+explanation named the specific Friday/weekend conflict, resolved via `archive page` over the real
+code path.
+
+This run also surfaced a real operational fact worth recording rather than quietly fixing: **24
+workspaces in the dev DB are currently `active`**, almost all throwaway debris from this and prior
+sessions' live-verification scripts (steps 27, 29, 30, 31, 38-41's own `live*` workspaces, per each
+step's writeup) — a real beat tick now sweeps every one of them on every fire, including a real LLM
+call per workspace for the Contradiction Detector. Flagged directly to the user rather than
+archived unilaterally, since cleanup wasn't asked for and this step's own job is to verify the
+scheduler works, not to curate what it sweeps.
+
+**Spec touch-point**: none required — `05` §2 already frames scheduling as scheduler-owned tuning;
+this section records the cadence/env-var split, the tiering mechanism, and the beat permission fix.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

@@ -59,3 +59,24 @@ OPENSEARCH_URL = os.environ.get("KARPWIKI_OPENSEARCH_URL", "http://localhost:920
 # never configured here — it resolves from the secrets manager at call time (09 §13).
 LLM_CLASSIFIER_MODEL = os.environ.get("KARPWIKI_LLM_CLASSIFIER_MODEL", "")
 LLM_CURATOR_MODEL = os.environ.get("KARPWIKI_LLM_CURATOR_MODEL", "")
+
+# Maintenance Advisor Celery beat cadence (phase2-tasklist.md step 41, 05 §2's
+# "scheduling philosophy"). Deployment-wide operational tuning — how often *this
+# deployment's* beat process sweeps every workspace — unlike `advisor.py`'s own
+# DEFAULT_* thresholds, which are content tuning `09` §6's SCHEMA.md template scopes
+# per workspace (real SCHEMA.md parsing stays out of scope, `09` §26, so those stay
+# Python defaults with a function-parameter override instead of env vars). Contradiction
+# Detection spends a real LLM call per candidate (step 40), so it gets its own, less
+# frequent interval by default rather than sharing the other four detectors' cadence.
+MAINTENANCE_INTERVAL_HOURS = float(os.environ.get("KARPWIKI_MAINTENANCE_INTERVAL_HOURS", "24"))
+MAINTENANCE_CONTRADICTION_INTERVAL_HOURS = float(
+    os.environ.get("KARPWIKI_MAINTENANCE_CONTRADICTION_INTERVAL_HOURS", "168")
+)
+
+# Staleness popularity tiering (05 §2, `09` §6's SCHEMA.md `high_traffic_days`/
+# `low_traffic_days` illustrative defaults) — env-overridable like the cadence settings
+# above, even though every other detector threshold in `advisor.py` stays a plain Python
+# constant; a workspace's actual traffic pattern is closer to a deployment's own tuning
+# call than to the workspace-authored content thresholds SCHEMA.md would otherwise own.
+STALENESS_HIGH_TRAFFIC_DAYS = int(os.environ.get("KARPWIKI_STALENESS_HIGH_TRAFFIC_DAYS", "90"))
+STALENESS_LOW_TRAFFIC_DAYS = int(os.environ.get("KARPWIKI_STALENESS_LOW_TRAFFIC_DAYS", "365"))

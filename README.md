@@ -61,13 +61,17 @@ MCP, horizontal scaling) is [`07-additional-features-and-roadmap.md`](spec/07-ad
 Pipeline stages run as real automatic background jobs (steps 30–33): submitting a document
 enqueues classification, an accepted classification enqueues dedup-then-curation, every page write
 enqueues reindexing, and a worker that crashes mid-task gets its job redelivered rather than losing
-it — no test, admin action, or manual call needs to drive any of it. `docker compose up -d` (below)
-starts the four worker containers alongside the rest of the infra; see
-[Scaling](#scaling) for what running more than one of each looks like.
+it — no test, admin action, or manual call needs to drive any of it. The Maintenance Advisor's five
+detectors run on their own schedule too (step 41): a `celery-beat` container fires every active
+workspace's detector sweeps automatically — daily for the four with no LLM cost at detection,
+weekly for Contradiction Detection (a real model call per candidate), both intervals
+env-overridable (`.env.example`). `docker compose up -d` (below) starts the five worker containers
+and the beat scheduler alongside the rest of the infra; see [Scaling](#scaling) for what running
+more than one of each looks like.
 
 ```bash
 cp .env.example .env                     # then fill in OPENAI_API_KEY
-docker compose up -d                     # Postgres + Redis + MinIO + OpenSearch + 4 workers
+docker compose up -d                     # Postgres + Redis + MinIO + OpenSearch + 5 workers + beat
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e '.[dev]'                  # Python 3.11+ (tested on 3.14)
 alembic upgrade head                     # create the schema
@@ -150,6 +154,11 @@ duplicate or dropped work. This is exactly [06 §4](spec/06-api-mcp-and-scaling.
 and curation workers (LLM-bound) scale separately from indexing and maintenance-advisor workers
 (compute-bound)" made concrete — scale the LLM-bound queues under submission load without touching
 the compute-bound ones, or vice versa.
+
+**`celery-beat` — exactly one, by design, never scaled.** It only enqueues the two maintenance
+dispatch tasks on a schedule (step 41); running a second instance would double-fire every scheduled
+entry (Celery's own constraint, not a limitation of this codebase). `worker-maintenance`, which
+does the real per-workspace work those dispatches enqueue, scales like every other queue above.
 
 **The Gateway — real, not yet load-tested here.** `uvicorn karpwiki.api:app` holds no in-process
 state a second instance would need to share (`_session` opens a fresh DB session per request,

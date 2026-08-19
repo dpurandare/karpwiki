@@ -20,6 +20,7 @@ from karpwiki.models import (
     PipelineState,
     RawSource,
     WikiPage,
+    WorkspaceStatus,
 )
 
 CONTRIBUTOR = {"X-Karpwiki-User": "deepak"}
@@ -330,3 +331,162 @@ async def test_detect_orphans_task_raises_a_review_item(session, workspace, task
     ).scalar_one()
     assert item.detail["reason"] == "orphaned"
     assert item.detail["page_count"] == 1
+
+
+def test_maintenance_queue_registers_the_contradiction_detector():
+    """Step 40's task, added alongside step 41's scheduling (the gap noted in
+    `tasks._detect_contradictions`'s own docstring)."""
+    assert tasks.app.tasks["karpwiki.maintenance.detect_contradictions"] is not None
+
+
+def test_maintenance_queue_registers_the_tiered_staleness_and_dispatch_tasks():
+    """Step 41."""
+    assert tasks.app.tasks["karpwiki.maintenance.detect_staleness_tiered"] is not None
+    assert tasks.app.tasks["karpwiki.maintenance.dispatch_daily_detectors"] is not None
+    assert tasks.app.tasks["karpwiki.maintenance.dispatch_contradiction_detector"] is not None
+
+
+def test_beat_schedule_wires_both_dispatch_tasks():
+    schedule = tasks.app.conf.beat_schedule
+    assert schedule["maintenance-daily-detectors"]["task"] == "karpwiki.maintenance.dispatch_daily_detectors"
+    assert (
+        schedule["maintenance-contradiction-detector"]["task"]
+        == "karpwiki.maintenance.dispatch_contradiction_detector"
+    )
+    # Contradiction's interval must be >= the daily detectors' — it spends a real LLM
+    # call per candidate (step 40), so it should never run *more* often than the free ones.
+    assert schedule["maintenance-contradiction-detector"]["schedule"] >= schedule["maintenance-daily-detectors"]["schedule"]
+
+
+async def test_detect_contradictions_task_raises_a_review_item(session, workspace, task_db):
+    from datetime import date
+
+    from karpwiki import search, versioning
+    from karpwiki.advisor import ContradictionJudgment
+    from karpwiki.models import PageStatus, PageVersion, ReviewItem, ReviewKind
+
+    # Same scoring shape as tests/test_advisor.py's CONTRADICTION_BODY_A/B (~0.5
+    # containment against each other, tuned against the real full-text index).
+    body_a = (
+        "Restart the payments worker daily using the automated recovery script during "
+        "scheduled maintenance windows to clear the queue backlog."
+    )
+    body_b = (
+        "Restart the payments worker weekly using a manual failover checklist during "
+        "unplanned incident response to clear the queue backlog."
+    )
+    for title, body in (("Daily Restart", body_a), ("Weekly Restart", body_b)):
+        page = await versioning.create_page(
+            session,
+            workspace_id=workspace.workspace_id,
+            path=f"concepts/{title.lower().replace(' ', '-')}.md",
+            page_type=PageType.concept,
+            title=title,
+            description=f"About {title}.",
+            date=date(2026, 8, 19),
+            tags=["a", "b"],
+            body=body,
+            author="system:curator",
+            status=PageStatus.published,
+        )
+        version = await session.get(PageVersion, page.current_version_id)
+        await search.index_page(session, page=page, version=version)
+    await session.commit()
+
+    async def _fake_call(**_kwargs):
+        return ContradictionJudgment(contradicts=True, outdated_page="a", explanation="Conflicting cadence.")
+
+    await tasks._detect_contradictions(workspace.workspace_id, call=_fake_call)
+
+    item = (
+        await session.execute(
+            select(ReviewItem).where(
+                ReviewItem.workspace_id == workspace.workspace_id, ReviewItem.kind == ReviewKind.prune
+            )
+        )
+    ).scalar_one()
+    assert item.detail["reason"] == "contradicted_by"
+
+
+async def test_detect_staleness_tiered_task_flags_a_high_traffic_page_at_the_short_bar(
+    session, workspace, task_db
+):
+    from datetime import UTC, date, datetime, timedelta
+
+    from karpwiki import versioning
+    from karpwiki.models import PageStatus, PageVersion, QueryLog, ReviewItem, ReviewKind
+
+    page = await versioning.create_page(
+        session,
+        workspace_id=workspace.workspace_id,
+        path="concepts/popular-old-page.md",
+        page_type=PageType.concept,
+        title="Popular Old Page",
+        description="A popular old page.",
+        date=date(2026, 8, 17),
+        tags=["a", "b"],
+        body="Body.",
+        author="system:curator",
+        status=PageStatus.published,
+    )
+    status = await session.get(IndexStatus, (page.page_id, IndexType.fts))
+    status.state = IndexState.stale
+    version = await session.get(PageVersion, page.current_version_id)
+    version.created_at = datetime.now(UTC) - timedelta(days=100)
+    session.add(
+        QueryLog(
+            principal="user:deepak",
+            query_text="popular old page",
+            resolved_workspaces=[workspace.workspace_id],
+            results=[{"page_id": str(page.page_id), "score": 0.9}],
+        )
+    )
+    await session.commit()
+
+    await tasks._detect_staleness_tiered(workspace.workspace_id)
+
+    item = (
+        await session.execute(
+            select(ReviewItem).where(
+                ReviewItem.workspace_id == workspace.workspace_id, ReviewItem.kind == ReviewKind.reindex
+            )
+        )
+    ).scalar_one()
+    assert item.detail["page_count"] == 1
+
+
+async def test_dispatch_daily_detectors_enqueues_each_detector_per_active_workspace(
+    session, workspace, other_workspace, task_db, dispatched
+):
+    await session.commit()
+
+    await tasks._dispatch_daily_detectors()
+
+    for name in (
+        "detect_staleness_tiered",
+        "detect_superseded_sources",
+        "detect_existing_duplicates",
+        "detect_orphans",
+    ):
+        assert set(dispatched[name]) == {workspace.workspace_id, other_workspace.workspace_id}
+
+
+async def test_dispatch_daily_detectors_skips_archived_workspaces(
+    session, workspace, other_workspace, task_db, dispatched
+):
+    other_workspace.status = WorkspaceStatus.archived
+    await session.commit()
+
+    await tasks._dispatch_daily_detectors()
+
+    assert dispatched["detect_staleness_tiered"] == [workspace.workspace_id]
+
+
+async def test_dispatch_contradiction_detector_enqueues_per_active_workspace(
+    session, workspace, other_workspace, task_db, dispatched
+):
+    await session.commit()
+
+    await tasks._dispatch_contradiction_detector()
+
+    assert set(dispatched["detect_contradictions"]) == {workspace.workspace_id, other_workspace.workspace_id}

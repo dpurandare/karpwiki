@@ -144,6 +144,108 @@ async def test_find_stale_pages_ignores_indexed_pages(session, workspace):
     assert findings == []
 
 
+# --- find_stale_pages_tiered (05 §2's popularity-tiered refresh) — step 41 ---------------
+
+
+async def test_find_stale_pages_tiered_flags_a_high_traffic_page_at_the_short_threshold(session, workspace):
+    """Stale 100 days, queried recently -> high traffic -> the 90-day bar is enough, even
+    though it hasn't crossed the 365-day low-traffic bar."""
+    page = await _page(session, workspace, title="Popular Old Page")
+    await _make_stale(session, page, days_ago=100)
+    session.add(
+        QueryLog(
+            principal="user:deepak",
+            query_text="popular old page",
+            resolved_workspaces=[workspace.workspace_id],
+            results=[{"page_id": str(page.page_id), "score": 0.9}],
+        )
+    )
+    await session.flush()
+
+    findings = await advisor.find_stale_pages_tiered(
+        session, workspace_id=workspace.workspace_id, high_traffic_days=90, low_traffic_days=365
+    )
+    assert [f.page_id for f in findings] == [page.page_id]
+
+
+async def test_find_stale_pages_tiered_excludes_a_low_traffic_page_under_the_long_threshold(
+    session, workspace
+):
+    """Stale 100 days, never queried -> low traffic -> needs the 365-day bar, which 100
+    days doesn't clear."""
+    page = await _page(session, workspace, title="Unpopular Old Page")
+    await _make_stale(session, page, days_ago=100)
+
+    findings = await advisor.find_stale_pages_tiered(
+        session, workspace_id=workspace.workspace_id, high_traffic_days=90, low_traffic_days=365
+    )
+    assert findings == []
+
+
+async def test_find_stale_pages_tiered_flags_a_low_traffic_page_past_the_long_threshold(session, workspace):
+    """Stale 400 days, never queried -> low traffic, but 400 > 365 clears the stricter
+    bar on its own merits."""
+    page = await _page(session, workspace, title="Ancient Unpopular Page")
+    await _make_stale(session, page, days_ago=400)
+
+    findings = await advisor.find_stale_pages_tiered(
+        session, workspace_id=workspace.workspace_id, high_traffic_days=90, low_traffic_days=365
+    )
+    assert [f.page_id for f in findings] == [page.page_id]
+
+
+async def test_find_stale_pages_tiered_uses_config_defaults_when_omitted(session, workspace):
+    page = await _page(session, workspace, title="Default Tier Page")
+    await _make_stale(session, page, days_ago=100)
+
+    findings = await advisor.find_stale_pages_tiered(session, workspace_id=workspace.workspace_id)
+    # Never queried, 100 days < config.STALENESS_LOW_TRAFFIC_DAYS (365) -> excluded,
+    # proving the config.py defaults (not some other value) were actually applied.
+    assert findings == []
+
+
+async def test_run_staleness_detector_tiered_true_uses_tiered_thresholds(session, workspace):
+    high_traffic = await _page(session, workspace, title="High Traffic Stale Page")
+    await _make_stale(session, high_traffic, days_ago=100)
+    session.add(
+        QueryLog(
+            principal="user:deepak",
+            query_text="high traffic stale page",
+            resolved_workspaces=[workspace.workspace_id],
+            results=[{"page_id": str(high_traffic.page_id), "score": 0.9}],
+        )
+    )
+    low_traffic = await _page(session, workspace, title="Low Traffic Stale Page")
+    await _make_stale(session, low_traffic, days_ago=100)
+    await session.flush()
+
+    item = await advisor.run_staleness_detector(
+        session,
+        workspace_id=workspace.workspace_id,
+        tiered=True,
+        high_traffic_days=90,
+        low_traffic_days=365,
+    )
+    await session.commit()
+
+    assert item is not None
+    found_ids = {p["page_id"] for p in item.detail["pages"]}
+    assert found_ids == {str(high_traffic.page_id)}
+
+
+async def test_run_staleness_detector_default_is_not_tiered(session, workspace):
+    """Backward compatibility: omitting `tiered` keeps the flat, pre-step-41 behavior —
+    a page stale past `threshold_days` is flagged regardless of query traffic."""
+    page = await _page(session, workspace, title="Flat Mode Page")
+    await _make_stale(session, page, days_ago=100)
+
+    item = await advisor.run_staleness_detector(session, workspace_id=workspace.workspace_id, threshold_days=90)
+    await session.commit()
+
+    assert item is not None
+    assert {p["page_id"] for p in item.detail["pages"]} == {str(page.page_id)}
+
+
 # --- find_pages_citing_superseded_sources -----------------------------------------------
 
 

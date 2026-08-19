@@ -15,6 +15,14 @@ x-worker-env: &worker-env
   KARPWIKI_LLM_CLASSIFIER_MODEL: ${KARPWIKI_LLM_CLASSIFIER_MODEL:-openai:gpt-5-nano}
   KARPWIKI_LLM_CURATOR_MODEL: ${KARPWIKI_LLM_CURATOR_MODEL:-openai:gpt-5-nano}
   OPENAI_API_KEY: ${OPENAI_API_KEY}
+  # Maintenance Advisor scheduling (phase2-tasklist.md step 41) — read by `celery-beat`
+  # (decides fire timing) and by `worker-maintenance` (decides the staleness traffic
+  # tiers it applies); harmless on every other worker, same as e.g. KARPWIKI_OPENSEARCH_URL
+  # already being in every worker's env regardless of whether that worker's queue uses it.
+  KARPWIKI_MAINTENANCE_INTERVAL_HOURS: ${KARPWIKI_MAINTENANCE_INTERVAL_HOURS:-24}
+  KARPWIKI_MAINTENANCE_CONTRADICTION_INTERVAL_HOURS: ${KARPWIKI_MAINTENANCE_CONTRADICTION_INTERVAL_HOURS:-168}
+  KARPWIKI_STALENESS_HIGH_TRAFFIC_DAYS: ${KARPWIKI_STALENESS_HIGH_TRAFFIC_DAYS:-90}
+  KARPWIKI_STALENESS_LOW_TRAFFIC_DAYS: ${KARPWIKI_STALENESS_LOW_TRAFFIC_DAYS:-365}
 
 services:
   postgres:
@@ -138,10 +146,11 @@ services:
       opensearch:
         condition: service_healthy
 
-  # Maintenance Advisor detectors (track 2c, steps 36+): `detect_staleness` (step 36),
-  # `detect_superseded_sources` (step 37), `detect_existing_duplicates` (step 38),
-  # `detect_orphans` (step 39). Nothing schedules any of these automatically yet (step 41's
-  # Celery beat), so all four are dispatched manually per workspace.
+  # Maintenance Advisor detectors (track 2c, steps 36-40): `detect_staleness`/
+  # `detect_staleness_tiered`, `detect_superseded_sources`, `detect_existing_duplicates`,
+  # `detect_orphans`, `detect_contradictions`. `celery-beat` below now schedules these
+  # automatically (step 41) via the two `dispatch_*` tasks; the per-workspace tasks
+  # themselves stay directly callable too, for manual/ad-hoc dispatch.
   worker-maintenance:
     image: karpwiki-worker:local
     command: celery -A karpwiki.tasks worker -Q maintenance --loglevel=info -n maintenance@%h
@@ -153,6 +162,25 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+
+  # Fires the two `dispatch_*` tasks above on a schedule (phase2-tasklist.md step 41, 05
+  # §2's "scheduling philosophy") — exactly one `beat` process per deployment (Celery's own
+  # requirement: a second one would double-fire every scheduled entry). Doesn't process any
+  # queue itself, just enqueues; `worker-maintenance` (scaled independently, same as every
+  # other queue per step 34) does the real work.
+  celery-beat:
+    image: karpwiki-worker:local
+    # --schedule: beat's default persistence file lands in `/app` (the Dockerfile's
+    # WORKDIR), owned by root from the image build — but the container runs as the
+    # non-root `karpwiki` user (same Dockerfile), so the default path is not writable.
+    # Caught live (a real PermissionError on first start, not assumed away) — /tmp is
+    # writable by any user and losing this file on a container restart only means beat
+    # re-derives "last run was never" for one schedule tick, not lost application state.
+    command: celery -A karpwiki.tasks beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+    environment: *worker-env
+    depends_on:
+      redis:
+        condition: service_healthy
 
 volumes:
   pgdata:

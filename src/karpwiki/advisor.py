@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import curate, dedup, llm, review, search, versioning
+from . import config, curate, dedup, llm, review, search, versioning
 from .frontmatter import split_frontmatter
 from .models import (
     IndexState,
@@ -90,6 +90,64 @@ async def find_stale_pages(
     return [StaleFinding(page_id=pid, path=path, reason="stale_content") for pid, path in rows]
 
 
+async def find_stale_pages_tiered(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    high_traffic_days: int | None = None,
+    low_traffic_days: int | None = None,
+    traffic_lookback_days: int = DEFAULT_ORPHAN_QUERY_LOG_LOOKBACK_DAYS,
+) -> list[StaleFinding]:
+    """05 §2's popularity-tiered refresh, layered on top of `find_stale_pages` (Signal 1
+    only — Signal 2 has no duration to tier against, it's an immediate flag) without
+    changing that function at all: call it once at each tier's day count, then keep a page
+    from the more permissive (`high_traffic_days`) result if it's either genuinely
+    high-traffic, or stale enough to also appear in the stricter (`low_traffic_days`)
+    result on its own merits. "High traffic" reuses the orphan detector's own
+    query_log-presence check and lookback window (`find_orphaned_pages`) as the popularity
+    signal, rather than inventing a second one.
+
+    `high_traffic_days`/`low_traffic_days` default to `config.py`'s env-overridable
+    values — a deliberate exception to this module's usual pattern of local
+    `DEFAULT_*` constants, since cadence-adjacent scheduling knobs are a deployment-wide
+    concern (like `KARPWIKI_CELERY_BROKER_URL`), not a per-workspace content threshold
+    (see `config.py`'s own comment)."""
+    high_traffic_days = (
+        config.STALENESS_HIGH_TRAFFIC_DAYS if high_traffic_days is None else high_traffic_days
+    )
+    low_traffic_days = (
+        config.STALENESS_LOW_TRAFFIC_DAYS if low_traffic_days is None else low_traffic_days
+    )
+
+    permissive = await find_stale_pages(session, workspace_id=workspace_id, threshold_days=high_traffic_days)
+    if not permissive:
+        return []
+    strict_ids = {
+        f.page_id
+        for f in await find_stale_pages(session, workspace_id=workspace_id, threshold_days=low_traffic_days)
+    }
+
+    cutoff = datetime.now(UTC) - timedelta(days=traffic_lookback_days)
+    tiered: list[StaleFinding] = []
+    for finding in permissive:
+        if finding.page_id in strict_ids:
+            tiered.append(finding)
+            continue
+        queried = (
+            await session.execute(
+                select(QueryLog.query_id)
+                .where(
+                    QueryLog.created_at >= cutoff,
+                    QueryLog.results.contains([{"page_id": str(finding.page_id)}]),
+                )
+                .limit(1)
+            )
+        ).first()
+        if queried is not None:
+            tiered.append(finding)
+    return tiered
+
+
 async def find_pages_citing_superseded_sources(
     session: AsyncSession, *, workspace_id: str
 ) -> list[StaleFinding]:
@@ -142,15 +200,35 @@ async def run_staleness_detector(
     *,
     workspace_id: str,
     threshold_days: int = DEFAULT_STALENESS_THRESHOLD_DAYS,
+    tiered: bool = False,
+    high_traffic_days: int | None = None,
+    low_traffic_days: int | None = None,
+    traffic_lookback_days: int = DEFAULT_ORPHAN_QUERY_LOG_LOOKBACK_DAYS,
 ) -> ReviewItem | None:
     """05 §3: one batched `reindex` review item per workspace per run. Signal 2's pages are
     marked `stale` here (nothing else would ever do it — a superseded source doesn't itself
     trigger a page write) so approving the item can dispatch `reindex` the same way any
-    other stale page's does (02 §7)."""
+    other stale page's does (02 §7).
+
+    `tiered=False` (the default, unchanged from before step 41) uses `threshold_days` as a
+    single flat cutoff via `find_stale_pages`, same as every direct/manual call site and
+    every existing test. `tiered=True` — what step 41's beat-scheduled dispatch actually
+    uses — ignores `threshold_days` and calls `find_stale_pages_tiered` instead (05 §2's
+    popularity-tiered refresh); `threshold_days` stays a plain parameter rather than being
+    removed so a manual single-value check is still available either way."""
     if await _open_reindex_item(session, workspace_id=workspace_id) is not None:
         return None
 
-    stale = await find_stale_pages(session, workspace_id=workspace_id, threshold_days=threshold_days)
+    if tiered:
+        stale = await find_stale_pages_tiered(
+            session,
+            workspace_id=workspace_id,
+            high_traffic_days=high_traffic_days,
+            low_traffic_days=low_traffic_days,
+            traffic_lookback_days=traffic_lookback_days,
+        )
+    else:
+        stale = await find_stale_pages(session, workspace_id=workspace_id, threshold_days=threshold_days)
     superseded = await find_pages_citing_superseded_sources(session, workspace_id=workspace_id)
     for finding in superseded:
         await search.mark_stale(session, finding.page_id)

@@ -17,11 +17,16 @@ import logging
 import uuid
 
 from celery import Celery
+from sqlalchemy import select
 
 from . import advisor, ingestion, pipeline, search
-from .config import CELERY_BROKER_URL
+from .config import (
+    CELERY_BROKER_URL,
+    MAINTENANCE_CONTRADICTION_INTERVAL_HOURS,
+    MAINTENANCE_INTERVAL_HOURS,
+)
 from .db import engine, session_scope
-from .models import PipelineState, RawSource, Workspace
+from .models import PipelineState, RawSource, Workspace, WorkspaceStatus
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +58,25 @@ app.conf.task_reject_on_worker_lost = True
 # slowest real path today (curate_source: several sequential LLM-touched page writes) with
 # margin, while keeping a genuine crash's recovery bounded to minutes, not up to an hour.
 app.conf.broker_transport_options = {"visibility_timeout": 600}
+
+# Phase 2 step 41 (05 §2's "scheduling philosophy") — the two dispatcher tasks defined
+# below enumerate active workspaces at fire time (beat's own static schedule can't know
+# about a workspace created after the process started) and re-enqueue each detector's
+# existing per-workspace task. Contradiction Detection gets its own, less frequent
+# interval since it spends a real LLM call per candidate (step 40); the other four cost
+# nothing beyond a few DB queries, so they share the faster one. Both intervals are
+# env-overridable (`config.py`) — deployment-wide operational tuning, not per-workspace
+# content thresholds, which stay Python defaults elsewhere in `advisor.py`.
+app.conf.beat_schedule = {
+    "maintenance-daily-detectors": {
+        "task": "karpwiki.maintenance.dispatch_daily_detectors",
+        "schedule": MAINTENANCE_INTERVAL_HOURS * 3600,
+    },
+    "maintenance-contradiction-detector": {
+        "task": "karpwiki.maintenance.dispatch_contradiction_detector",
+        "schedule": MAINTENANCE_CONTRADICTION_INTERVAL_HOURS * 3600,
+    },
+}
 
 
 @app.task(name="karpwiki.curation.ping")
@@ -167,6 +191,68 @@ async def _detect_orphans(workspace_id: str) -> None:
         await advisor.run_orphan_detector(session, workspace_id=workspace_id)
 
 
+async def _detect_contradictions(
+    workspace_id: str, *, call: advisor.ContradictionCheckCall | None = None
+) -> None:
+    """Phase 2 step 40 — same manual-dispatch position as the four detectors above. Added
+    alongside step 41's scheduling rather than with step 40 itself, since step 40's own
+    scope was the detector/resolution logic in `advisor.py`, not its task wrapper — a gap
+    caught while wiring up the beat dispatcher below, which needs every detector to have
+    one. `call` is the same test-only seam `_classify`/`_curate` already use — never
+    passed by the real `@app.task` wrapper below, so production always takes the real
+    model; unlike the other four detectors' tasks, this one needs the seam because
+    step 40's detection itself spends a real LLM call, not just its resolution."""
+    async with session_scope() as session:
+        await advisor.run_contradiction_detector(session, workspace_id=workspace_id, call=call)
+
+
+async def _detect_staleness_tiered(workspace_id: str) -> None:
+    """Phase 2 step 41 — the popularity-tiered variant of `_detect_staleness` above (05 §2),
+    used only by the beat-scheduled dispatcher below. A separate task rather than a
+    `tiered` kwarg on `detect_staleness` itself, matching this module's existing
+    one-task-per-detector shape, and leaving manual/test dispatch of `detect_staleness`
+    exactly as it behaved before this step."""
+    async with session_scope() as session:
+        await advisor.run_staleness_detector(session, workspace_id=workspace_id, tiered=True)
+
+
+async def _active_workspace_ids(session) -> list[str]:
+    return (
+        (
+            await session.execute(
+                select(Workspace.workspace_id).where(Workspace.status == WorkspaceStatus.active)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def _dispatch_daily_detectors() -> None:
+    """Fired by `KARPWIKI_MAINTENANCE_INTERVAL_HOURS` (default 24h, `config.py`) — the four
+    detectors with no LLM cost at detection time. Enumerates active workspaces at fire
+    time (see the `beat_schedule` comment above for why) and re-enqueues each one's
+    existing per-workspace task, so a large workspace count fans out across
+    `worker-maintenance` replicas rather than being processed serially inside this task."""
+    async with session_scope() as session:
+        workspace_ids = await _active_workspace_ids(session)
+    for workspace_id in workspace_ids:
+        detect_staleness_tiered.delay(workspace_id)
+        detect_superseded_sources.delay(workspace_id)
+        detect_existing_duplicates.delay(workspace_id)
+        detect_orphans.delay(workspace_id)
+
+
+async def _dispatch_contradiction_detector() -> None:
+    """Fired by `KARPWIKI_MAINTENANCE_CONTRADICTION_INTERVAL_HOURS` (default 168h/weekly,
+    `config.py`) — separated from the four above since this one spends a real LLM call per
+    candidate (step 40)."""
+    async with session_scope() as session:
+        workspace_ids = await _active_workspace_ids(session)
+    for workspace_id in workspace_ids:
+        detect_contradictions.delay(workspace_id)
+
+
 async def _run_and_release(coro) -> None:
     """`db.engine`'s connection pool is a process-level singleton, but each `@app.task`
     below gets its own `asyncio.run()` — a fresh event loop per call — and an asyncpg
@@ -215,3 +301,23 @@ def detect_existing_duplicates(workspace_id: str) -> None:
 @app.task(name="karpwiki.maintenance.detect_orphans")
 def detect_orphans(workspace_id: str) -> None:
     asyncio.run(_run_and_release(_detect_orphans(workspace_id)))
+
+
+@app.task(name="karpwiki.maintenance.detect_contradictions")
+def detect_contradictions(workspace_id: str) -> None:
+    asyncio.run(_run_and_release(_detect_contradictions(workspace_id)))
+
+
+@app.task(name="karpwiki.maintenance.detect_staleness_tiered")
+def detect_staleness_tiered(workspace_id: str) -> None:
+    asyncio.run(_run_and_release(_detect_staleness_tiered(workspace_id)))
+
+
+@app.task(name="karpwiki.maintenance.dispatch_daily_detectors")
+def dispatch_daily_detectors() -> None:
+    asyncio.run(_run_and_release(_dispatch_daily_detectors()))
+
+
+@app.task(name="karpwiki.maintenance.dispatch_contradiction_detector")
+def dispatch_contradiction_detector() -> None:
+    asyncio.run(_run_and_release(_dispatch_contradiction_detector()))

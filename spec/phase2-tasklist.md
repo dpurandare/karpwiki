@@ -11,8 +11,8 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–40 done, tracks 2a and 2b complete, track 2c in progress (all five
-detectors built; step 41 scheduling next).** Phase 1 (steps 1–21,
+**Status (2026-08-19): steps 22–41 done, tracks 2a, 2b, and 2c all complete.** Track 2c's closing
+verify (step 42) is next, then track 2d. Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
 number is unambiguous across both files.
@@ -271,7 +271,33 @@ is a real Authenticator implementation using that pick, not a library search.
     resolved, a real same-band-but-non-conflicting pair correctly raised nothing. See
     [09](09-implementation-notes.md) §43.
 41. Scheduling: popularity-tiered refresh via Celery beat
-    ([05](05-admin-backend-and-maintenance.md) §2's scheduling philosophy).
+    ([05](05-admin-backend-and-maintenance.md) §2's scheduling philosophy). **Done** — a
+    `celery-beat` service fires two dispatcher tasks (`dispatch_daily_detectors`,
+    `dispatch_contradiction_detector`) that enumerate active workspaces at fire time and
+    re-enqueue each detector's existing per-workspace task; Contradiction Detection gets
+    its own, less frequent interval since it spends a real LLM call per candidate (step
+    40), the other four (no LLM cost at detection) share the faster one. Both intervals
+    are env-overridable (`KARPWIKI_MAINTENANCE_INTERVAL_HOURS`, default 24;
+    `KARPWIKI_MAINTENANCE_CONTRADICTION_INTERVAL_HOURS`, default 168) — a deployment-wide
+    operational knob, unlike every detector's own content thresholds, which stay Python
+    defaults per `09` §26's SCHEMA.md-deferral precedent. Popularity tiering itself
+    (`advisor.find_stale_pages_tiered`) layers on top of `find_stale_pages` without
+    changing it: call it once per tier's day count (also env-overridable —
+    `KARPWIKI_STALENESS_HIGH_TRAFFIC_DAYS`/`_LOW_TRAFFIC_DAYS`, defaults 90/365) and keep
+    a page that clears either its own tier's bar or the stricter one; "high traffic"
+    reuses the orphan detector's existing query_log-presence check as the popularity
+    signal. A real bug caught live: `celery-beat` running as the Dockerfile's non-root
+    user couldn't write its default schedule file to `/app` (root-owned from the image
+    build) — fixed with `--schedule=/tmp/celerybeat-schedule`. Live-verified against the
+    real dev Postgres/broker/worker containers: both dispatcher tasks fired for real
+    through the real broker, correctly enumerating every active workspace; tiered
+    staleness correctly flagged only the high-traffic page. A real contradiction check
+    against test-suite content the model correctly judged non-conflicting (not a bug —
+    just never previously checked against the real model), re-verified with step 40's
+    own proven conflicting pair, dispatched directly and confirmed/resolved correctly.
+    Also surfaced that this session's accumulated throwaway live-check workspaces are all
+    still `active`, so a real beat tick now sweeps all of them too — flagged to the user,
+    not fixed as part of this step. See [09](09-implementation-notes.md) §44.
 42. **Verify**: seed stale, orphaned, superseded, and duplicate content; run the advisor; confirm
     review items appear in the existing queue with correct evidence and resolve through the same
     endpoints ingest-time items already use.
