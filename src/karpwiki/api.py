@@ -416,8 +416,9 @@ class CreateConnectorRequest(BaseModel):
     """POST /connectors body (06 §1, 05 §7, 09 §13, phase2-tasklist.md step 51).
 
     `credential_ref` must already be a pointer into the deployment's own secrets manager —
-    step 51 does not build the secrets-manager write path (step 53), so nothing here ever
-    accepts or stores a raw credential value (09 §13's "never stored in the Metadata DB").
+    this endpoint never accepts or stores a raw credential value (09 §13's "never stored in
+    the Metadata DB"); resolving the ref into a real secret happens only at poll time,
+    in-memory (`secrets_manager.py`, step 53).
     `config`/`schedule` are opaque, connector-type-specific JSON (no type is implemented
     until step 54, so nothing here validates their shape).
     """

@@ -17,8 +17,8 @@ class _StubAdapter:
         self._error = error
         self.calls = []
 
-    async def poll(self, connector, credential_ref):
-        self.calls.append((connector.connector_id, credential_ref))
+    async def poll(self, connector, credential):
+        self.calls.append((connector.connector_id, credential))
         if self._error is not None:
             raise self._error
         return self._items, self._new_cursor
@@ -79,16 +79,49 @@ async def test_poll_updates_cursor_and_last_run_detail_on_success(session, works
     assert connector.state is ConnectorState.enabled
 
 
-async def test_poll_passes_the_credential_ref_through_unresolved(session, workspace, registered_adapter):
-    """Step 52 does not resolve credential_ref against a real secrets manager (step 53) —
-    the adapter receives exactly the opaque pointer string stored on the connector."""
+async def test_poll_passes_the_adapter_the_resolved_credential_not_the_ref(
+    session, workspace, registered_adapter, monkeypatch
+):
+    """The adapter never sees `credential_ref` (the opaque pointer, step 51) — only the
+    real value `secrets_manager.SecretResolver` resolves it to (step 53). Uses the real
+    default `EnvSecretResolver`, not a stub, so this exercises the real resolution path."""
+    monkeypatch.setenv("TEST_CONNECTOR_TOKEN", "s3cr3t-value")
     adapter = registered_adapter(_StubAdapter())
-    connector = await _connector(session, workspace, credential_ref="vault:kv/connectors/git-main")
+    connector = await _connector(session, workspace, credential_ref="TEST_CONNECTOR_TOKEN")
     await session.commit()
 
     await connector_polling.poll_connector(session, connector=connector)
 
-    assert adapter.calls == [(connector.connector_id, "vault:kv/connectors/git-main")]
+    assert adapter.calls == [(connector.connector_id, "s3cr3t-value")]
+
+
+async def test_poll_with_no_credential_ref_passes_none(session, workspace, registered_adapter):
+    adapter = registered_adapter(_StubAdapter())
+    connector = await _connector(session, workspace)  # credential_ref defaults to None
+    await session.commit()
+
+    await connector_polling.poll_connector(session, connector=connector)
+
+    assert adapter.calls == [(connector.connector_id, None)]
+
+
+async def test_poll_unresolvable_credential_ref_disables_the_connector(session, workspace, registered_adapter):
+    """A `credential_ref` that doesn't resolve to anything is an auth-adjacent failure
+    (09 §13) — the connector can't possibly authenticate without ever obtaining the
+    credential, same outcome as the adapter itself rejecting a bad one."""
+    adapter = registered_adapter(_StubAdapter())
+    connector = await _connector(session, workspace, credential_ref="NO_SUCH_ENV_VAR_SET")
+    await session.commit()
+
+    source_ids = await connector_polling.poll_connector(session, connector=connector)
+    await session.commit()
+    await session.refresh(connector)
+
+    assert source_ids == []
+    assert adapter.calls == []  # never reached the adapter at all
+    assert connector.state is ConnectorState.disabled_auth
+    assert connector.last_run_detail["outcome"] == "auth_failed"
+    assert "NO_SUCH_ENV_VAR_SET" in connector.last_run_detail["message"]
 
 
 async def test_poll_with_no_registered_adapter_is_not_an_error(session, workspace):

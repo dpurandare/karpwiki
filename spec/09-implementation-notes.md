@@ -2731,5 +2731,60 @@ connector-created source really is indistinguishable from a normal submission on
 **Spec touch-point** (applied): none required — `09` §4 already specified this step's execution
 model in full; nothing here needed a wording change.
 
+## 56. Connector Credential Resolution (Phase 2 Step 53)
+
+`secrets_manager.py` (new) — a `SecretResolver` Protocol + `default_secret_resolver()` factory
+mirroring `auth.py`'s pluggable `Authenticator` shape exactly, per 09 §13's own note that
+credential resolution "follows that same shape." `connector_polling.poll_connector` now resolves
+`connector.credential_ref` into the real secret before ever calling the adapter — the adapter's
+`poll(connector, credential)` receives the resolved value, never the ref (a deliberate signature
+change from step 52, flagged here rather than silently changed, though no concrete adapter exists
+yet to actually break).
+
+**Scope confirmed via AskUserQuestion before building**: 09 §13 frames the backend as "a role, not
+a product" — Vault, AWS Secrets Manager, GCP Secret Manager, and Kubernetes secrets are all named
+as equally valid, unlike OIDC where `08` §2 named a specific library (Authlib) as the stack's own
+pick. Built one concrete provider, `EnvSecretResolver` (`credential_ref` names an environment
+variable; resolving it reads `os.environ`), over also standing up a real Vault dev-mode server +
+`hvac` client. This is not a toy stand-in the way `TrustedHeaderAuthenticator` is (explicitly
+"sound only behind a proxy") — it's how a Kubernetes Secret most commonly reaches a running
+process in the first place (injected as a pod env var), so it's genuinely production-viable, not
+just a local-dev convenience. A deployment backed by Vault/AWS/GCP instead implements
+`SecretResolver` and swaps it in via `default_secret_resolver()`, with no change to
+`connector_polling.py` — the same swap-with-no-handler-changes property `default_authenticator()`
+already proved out for OIDC.
+
+**A resolution failure is treated as an auth failure, not a generic fetch error.** `credential_ref`
+that doesn't resolve to anything (`SecretNotFoundError`) is re-raised as `ConnectorAuthError`
+inside `poll_connector`, funneling through the exact same handling step 52 already built —
+`disabled_auth`, not a silent retry-next-time. Reasoning: a connector that can't even *obtain* its
+credential can't possibly authenticate, the same outcome as an adapter rejecting a bad one after
+actually trying. Resolution is skipped entirely (never attempted) when `credential_ref` is `None`
+— not every connector type necessarily needs a credential (a public git repo, a public website).
+
+**`credential_ref`'s own contract from step 51 is unchanged.** Step 53 is the *resolve* half only
+— given a ref, fetch the real value at poll time, in memory, for one run (09 §13). It does not add
+a "write a raw secret into the secrets manager" path to the `connectors` API; an admin still
+configures `credential_ref` as a pointer they already hold from their own secrets manager, exactly
+as step 51 scoped it. Updated stale docstrings in `models.Connector` and `api.CreateConnectorRequest`
+that had described step 53 as "the write path" — it isn't; this section is the accurate boundary.
+
+**Live-verified in three parts against real infra** (no real adapter exists until step 54, so no
+single run exercises every piece at once): (1) `EnvSecretResolver` resolving a real env var, and
+correctly raising on a missing one, run via `docker exec` *inside* the real, rebuilt
+`worker-connector-polling` container — not just local pytest. (2) A real unresolvable
+`credential_ref` against real dev Postgres, through the real `poll_connector` orchestration
+(a throwaway adapter registered in-process asserted it was never even reached): correctly flipped
+the connector to `disabled_auth` with the exact missing-variable message in `last_run_detail`, no
+retry. (3) A real resolved credential flowing all the way through: a throwaway stub adapter
+asserted it received the exact resolved string (not the ref), created a real `raw_source`, and
+dispatching `classify_source` afterward through the real broker was picked up by the real
+`worker-classification` container and classified via real `gpt-5-nano`. Cleaned up the throwaway
+workspace/connector/source afterward.
+
+**Spec touch-point** (applied): none required — `09` §13 already specified this step's model in
+full ("mirroring the pluggable `Authenticator` pattern" is the tasklist's own wording); nothing
+here needed a wording change.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

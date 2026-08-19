@@ -11,7 +11,7 @@ Service's full delivery mechanics, the search feedback loop, content quality sco
 multi-language support, fine-grained (per-page-type) access control, analytics dashboards, bulk
 import/export, compliance erasure/legal hold, data residency, and multi-region/DR topology.
 
-**Status (2026-08-19): steps 22–52 done, tracks 2a, 2b, 2c, and 2d all complete and closed out;
+**Status (2026-08-19): steps 22–53 done, tracks 2a, 2b, 2c, and 2d all complete and closed out;
 track 2e (Connector Framework) in progress.** Phase 1 (steps 1–21,
 [`phase1-tasklist.md`](phase1-tasklist.md)) is complete; implementation continues in
 [`src/karpwiki/`](../src/karpwiki/). Numbering continues from Phase 1 (starts at 22) so a step
@@ -524,7 +524,27 @@ is a real Authenticator implementation using that pick, not a library search.
     workspace/connector/source afterward. See [09](09-implementation-notes.md) §55.
 53. Credential resolution via the secrets-manager interface
     ([09](09-implementation-notes.md) §13), mirroring the pluggable `Authenticator` pattern
-    already in [`auth.py`](../src/karpwiki/auth.py).
+    already in [`auth.py`](../src/karpwiki/auth.py). **Done** — `secrets_manager.py` (new): a
+    `SecretResolver` Protocol + `default_secret_resolver()` factory, mirroring `auth.py`'s
+    pluggable-provider shape exactly. Scope confirmed via AskUserQuestion first: built one
+    concrete provider, `EnvSecretResolver` (`credential_ref` names an environment variable),
+    over also standing up a real Vault dev server + `hvac` client — 09 §13 frames the backend as
+    "a role, not a product," unlike OIDC's specific Authlib pick, and env-var resolution is a
+    genuinely production-viable pattern (the most common way a Kubernetes Secret reaches a
+    process), not a toy stand-in. `connector_polling.poll_connector` now resolves
+    `credential_ref` into the real secret before calling the adapter — `poll(connector,
+    credential)` receives the resolved value, never the ref, a deliberate signature change from
+    step 52. A resolution failure (`SecretNotFoundError`) is re-raised as `ConnectorAuthError`,
+    funneling through step 52's existing `disabled_auth` handling — can't authenticate without
+    ever obtaining the credential. `credential_ref`'s own contract from step 51 is unchanged;
+    this step is the *resolve* half only, not a "write a raw secret in" API path. Live-verified
+    in three parts against real infra (no real adapter exists until step 54): `EnvSecretResolver`
+    resolving a real env var inside the real, rebuilt `worker-connector-polling` container (not
+    just pytest); a real unresolvable ref against real dev Postgres correctly disabling the
+    connector with no retry, the adapter never reached; a real resolved credential flowing
+    through to a throwaway adapter, creating a real `raw_source` that a real
+    `worker-classification` container then classified via real `gpt-5-nano`. See
+    [09](09-implementation-notes.md) §56.
 54. First concrete connector type — a Git repo poller, the simplest state model (commit-SHA
     diffing) — [03](03-ingestion-and-review-workflows.md) §2.
 55. `disabled_auth` state + Notification Service hook for connector auth failures

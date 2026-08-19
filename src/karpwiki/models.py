@@ -472,10 +472,11 @@ class Connector(Base):
     52).
 
     `credential_ref` is a pointer into the deployment's secrets manager, never a raw secret
-    (09 §13: "Connector secrets are never stored in the Metadata DB... any log stream").
-    Step 51 does not yet build the secrets-manager write path (that's step 53) — callers
-    must already hold a ref from their own secrets manager; nothing in this table or API
-    ever accepts or stores a raw credential value.
+    (09 §13: "Connector secrets are never stored in the Metadata DB... any log stream") —
+    callers must already hold a ref from their own secrets manager; nothing in this table
+    or the `connectors` API ever accepts or stores a raw credential value. Resolving a ref
+    into the real secret value happens only at poll time, in-memory, for one run
+    (`secrets_manager.py`, phase2-tasklist.md step 53) — never here.
     """
 
     __tablename__ = "connector"
