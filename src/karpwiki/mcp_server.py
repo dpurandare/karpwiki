@@ -184,11 +184,21 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
                 session, principal=principal, workspace_id=workspace_id, required=required
             ):
                 raise McpAuthError(f"Listing pages here requires the {required.value} role.")
+
+            # Step 70 (07 §2): same page_type-scope narrowing `list_pages_endpoint` applies —
+            # shared logic in `api._visible_page_type_filter`, only this thin call-site wiring
+            # is duplicated (this module's own established convention).
+            effective_page_types = await api._visible_page_type_filter(
+                session, principal, workspace_id=workspace_id, required=required, requested=page_type
+            )
+            if effective_page_types == []:
+                return {"items": [], "next_cursor": None}
+
             statuses = [status] if status else ["published"]
             pages, next_cursor = await versioning.list_pages(
                 session,
                 workspace_id=workspace_id,
-                page_types=page_type,
+                page_types=effective_page_types,
                 tags=tags,
                 date_from=date_from,
                 date_to=date_to,

@@ -26,12 +26,21 @@ from karpwiki.models import AccessPolicy, PageStatus, PageType, PageVersion, Raw
 DUPLICATE_BODY = "The payments worker drains its queue before restart."
 
 
-async def _page(session, workspace, *, title, body="Body.", status=PageStatus.published, indexed=False):
+async def _page(
+    session,
+    workspace,
+    *,
+    title,
+    body="Body.",
+    status=PageStatus.published,
+    indexed=False,
+    page_type=PageType.concept,
+):
     page = await versioning.create_page(
         session,
         workspace_id=workspace.workspace_id,
         path=f"concepts/{title.lower().replace(' ', '-')}.md",
-        page_type=PageType.concept,
+        page_type=page_type,
         title=title,
         description=f"About {title}.",
         date=date(2026, 8, 19),
@@ -229,6 +238,30 @@ async def test_wiki_list_pages_filters_by_workspace(
         is_error, body = await _call(mcp_client, "wiki_list_pages", workspace_id=workspace.workspace_id)
     assert not is_error
     assert [i["title"] for i in body["items"]] == ["Mine"]
+
+
+async def test_wiki_list_pages_excludes_a_scope_restricted_type(
+    client, session, workspace, mcp_client_factory, monkeypatch
+):
+    """07 §2, phase3-tasklist.md step 70 — same page_type-scope narrowing `GET /pages`
+    applies, via the shared `api._visible_page_type_filter`."""
+    await _page(session, workspace, title="Open Concept")
+    await _page(session, workspace, title="Restricted Entity", page_type=PageType.entity)
+    session.add(
+        AccessPolicy(
+            workspace_id=workspace.workspace_id,
+            principal="someone-else",
+            role=Role.reader,
+            scope="page_type:entity",
+        )
+    )
+    await session.commit()
+    monkeypatch.setenv("KARPWIKI_MCP_USER", "deepak")
+
+    async with mcp_client_factory() as mcp_client:
+        is_error, body = await _call(mcp_client, "wiki_list_pages", workspace_id=workspace.workspace_id)
+    assert not is_error
+    assert [i["title"] for i in body["items"]] == ["Open Concept"]
 
 
 async def test_wiki_list_workspaces_returns_accessible_only(

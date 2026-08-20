@@ -24,12 +24,13 @@ async def _page(
     body="Body text.",
     tags=("a", "b"),
     status=PageStatus.published,
+    page_type=PageType.concept,
 ):
     return await versioning.create_page(
         session,
         workspace_id=workspace.workspace_id,
         path=path or f"concepts/{title.lower().replace(' ', '-')}.md",
-        page_type=PageType.concept,
+        page_type=page_type,
         title=title,
         description=f"About {title}.",
         date=date(2026, 8, 19),
@@ -78,6 +79,68 @@ async def test_list_pages_filters_by_page_type(client, session, workspace):
     )
     assert r.status_code == 200
     assert [i["page_type"] for i in r.json()["items"]] == ["entity"]
+
+
+async def test_list_pages_excludes_a_scope_restricted_type_for_a_plain_reader(
+    client, session, workspace
+):
+    """07 §2, phase3-tasklist.md step 70."""
+    await _page(session, workspace, title="A Concept")
+    await _page(session, workspace, title="Restricted Entity", page_type=PageType.entity)
+    session.add(
+        AccessPolicy(
+            workspace_id=workspace.workspace_id,
+            principal="someone-else",
+            role=Role.reader,
+            scope="page_type:entity",
+        )
+    )
+    await session.commit()
+
+    r = await client.get("/pages", headers=READER, params={"workspace_id": workspace.workspace_id})
+    assert [i["page_type"] for i in r.json()["items"]] == ["concept"]
+
+
+async def test_list_pages_includes_a_restricted_type_for_the_scoped_reader(
+    client, session, workspace
+):
+    await _page(session, workspace, title="A Concept")
+    await _page(session, workspace, title="Restricted Entity", page_type=PageType.entity)
+    session.add(
+        AccessPolicy(
+            workspace_id=workspace.workspace_id,
+            principal="casey",
+            role=Role.reader,
+            scope="page_type:entity",
+        )
+    )
+    await session.commit()
+
+    r = await client.get("/pages", headers=READER, params={"workspace_id": workspace.workspace_id})
+    assert {i["page_type"] for i in r.json()["items"]} == {"concept", "entity"}
+
+
+async def test_list_pages_explicit_filter_for_a_restricted_type_the_reader_cannot_see_is_empty(
+    client, session, workspace
+):
+    await _page(session, workspace, title="Restricted Entity", page_type=PageType.entity)
+    session.add(
+        AccessPolicy(
+            workspace_id=workspace.workspace_id,
+            principal="someone-else",
+            role=Role.reader,
+            scope="page_type:entity",
+        )
+    )
+    await session.commit()
+
+    r = await client.get(
+        "/pages",
+        headers=READER,
+        params={"workspace_id": workspace.workspace_id, "page_type": "entity"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"items": [], "next_cursor": None}
 
 
 async def test_list_pages_filters_by_tags(client, session, workspace):
@@ -224,6 +287,62 @@ async def test_get_page_forbidden_with_no_access(client, session, other_workspac
 
     r = await client.get(f"/pages/{page.page_id}", headers=READER)
     assert r.status_code == 403
+
+
+# --- Fine-grained (page_type) access control (07 §2, phase3-tasklist.md step 70) ---------
+
+
+async def test_get_page_denies_a_plain_reader_once_the_type_is_scope_restricted(
+    client, session, workspace
+):
+    page = await _page(session, workspace, title="Restricted Entity", page_type=PageType.entity)
+    session.add(
+        AccessPolicy(
+            workspace_id=workspace.workspace_id,
+            principal="someone-else",
+            role=Role.reader,
+            scope="page_type:entity",
+        )
+    )
+    await session.commit()
+
+    r = await client.get(f"/pages/{page.page_id}", headers=READER)
+    assert r.status_code == 403
+
+
+async def test_get_page_allows_the_scoped_reader(client, session, workspace):
+    page = await _page(session, workspace, title="Restricted Entity", page_type=PageType.entity)
+    session.add(
+        AccessPolicy(
+            workspace_id=workspace.workspace_id,
+            principal="casey",
+            role=Role.reader,
+            scope="page_type:entity",
+        )
+    )
+    await session.commit()
+
+    r = await client.get(f"/pages/{page.page_id}", headers=READER)
+    assert r.status_code == 200
+
+
+async def test_get_page_scope_restriction_never_applies_to_workspace_admin(
+    client, session, workspace
+):
+    page = await _page(session, workspace, title="Restricted Entity", page_type=PageType.entity)
+    session.add(AccessPolicy(workspace_id=workspace.workspace_id, principal="avery", role=Role.admin))
+    session.add(
+        AccessPolicy(
+            workspace_id=workspace.workspace_id,
+            principal="someone-else",
+            role=Role.reader,
+            scope="page_type:entity",
+        )
+    )
+    await session.commit()
+
+    r = await client.get(f"/pages/{page.page_id}", headers=ADMIN)
+    assert r.status_code == 200
 
 
 # --- Read-time link resolution + cross-workspace AuthZ re-check (01 §3,

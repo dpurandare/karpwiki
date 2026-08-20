@@ -60,6 +60,9 @@ from .auth import (
     any_workspace_with_role,
     default_authenticator,
     has_role,
+    has_role_for_page,
+    page_type_scope,
+    visible_page_types,
 )
 from .db import SessionLocal
 from .models import (
@@ -70,6 +73,7 @@ from .models import (
     IdempotencyRecord,
     PageLink,
     PageStatus,
+    PageType,
     PageVersion,
     PipelineState,
     RawSource,
@@ -339,12 +343,14 @@ async def _reader_page(session: AsyncSession, principal: Principal, page_id: uui
     page needs `contributor` instead: the same "elevated scope" `/search`'s
     `include_drafts` already established for this exact content model (04 §6) — an
     unreviewed page shouldn't leak to a mere reader just because this is a plainer
-    lookup than search."""
+    lookup than search. `has_role_for_page` (not `has_role`) since step 70: a workspace
+    role alone isn't enough once this page's `page_type` has been scope-restricted (07
+    §2)."""
     page = await session.get(WikiPage, page_id)
     if page is None:
         raise ApiError(404, "not_found", f"No page {page_id}.")
     required = Role.contributor if page.status is PageStatus.draft else Role.reader
-    if not await has_role(session, principal=principal, workspace_id=page.workspace_id, required=required):
+    if not await has_role_for_page(session, principal=principal, page=page, required=required):
         raise ApiError(403, "forbidden", f"Viewing this page requires the {required.value} role.")
     return page
 
@@ -359,16 +365,17 @@ async def _resolve_page_links(
     Reads the already-parsed `page_link` rows (no markdown re-parsing needed at read time)
     and applies the exact same access check `_reader_page` uses for a direct fetch of that
     target — same required role (`contributor` if the target is still `draft`, matching
-    `_reader_page`'s own "elevated scope" reasoning, not just a workspace-level check) —
+    `_reader_page`'s own "elevated scope" reasoning, not just a workspace-level check),
+    and since step 70 the same page_type-scope narrowing too (`has_role_for_page`) —
     inlined rather than calling `_reader_page` again since the target `WikiPage` row is
     already in hand from the join below.
 
     A link that fails the check is simply omitted, not included-but-flagged-inaccessible:
     `01` §3 says AuthZ is re-checked "before resolving," so an unauthorized target's very
     existence (id, path, even that a link once pointed there) is never confirmed to the
-    caller — same reasoning `07` §2's per-tag access control roadmap item will eventually
-    extend this to. Archived-workspace targets are never excluded on that basis alone (`01`
-    §3: "archived workspaces remain queryable") — only the same role check applies.
+    caller — the same omission step 70's own fine-grained checks below use. Archived-
+    workspace targets are never excluded on that basis alone (`01` §3: "archived workspaces
+    remain queryable") — only the same role check applies.
     """
     result = await session.execute(
         select(PageLink, WikiPage)
@@ -378,9 +385,7 @@ async def _resolve_page_links(
     links = []
     for link, target in result.all():
         required = Role.contributor if target.status is PageStatus.draft else Role.reader
-        if not await has_role(
-            session, principal=principal, workspace_id=target.workspace_id, required=required
-        ):
+        if not await has_role_for_page(session, principal=principal, page=target, required=required):
             continue
         links.append(
             {
@@ -391,6 +396,35 @@ async def _resolve_page_links(
             }
         )
     return links
+
+
+_ALL_PAGE_TYPE_VALUES = {pt.value for pt in PageType}
+
+
+async def _visible_page_type_filter(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    workspace_id: str,
+    required: Role,
+    requested: list[str] | None,
+) -> list[str] | None:
+    """Intersects a caller's own `page_type` filter (if any, `GET /pages`/`GET /search`)
+    with what page_type scoping (07 §2, phase3-tasklist.md step 70) allows this principal
+    to see. `None` means "no filter at all" — preserves `versioning.list_pages`'s/
+    `search.search()`'s exact prior query when nothing in this workspace has ever been
+    scope-restricted, rather than a pointless full-enumeration filter that changes
+    nothing. An empty list is a real, distinct answer ("nothing this principal may see
+    matches") — the caller must check for it and short-circuit before querying, since
+    `list_pages`/`search.search()` both treat an empty *filter* list as "no filter"."""
+    visible = await visible_page_types(
+        session, principal=principal, workspace_id=workspace_id, required=required
+    )
+    if {pt.value for pt in visible} == _ALL_PAGE_TYPE_VALUES:
+        return requested
+    visible_values = {pt.value for pt in visible}
+    allowed = (set(requested) & visible_values) if requested else visible_values
+    return sorted(allowed)
 
 
 async def _admin_page(session: AsyncSession, principal: Principal, page_id: uuid.UUID) -> WikiPage:
@@ -562,11 +596,15 @@ class RollbackSchemaRequest(BaseModel):
 class GrantAccessRequest(BaseModel):
     """POST /workspaces/{id}/access-policy body (05 §7, 06 §3). `fuse_access` (09 §12,
     phase3-tasklist.md step 58) is optional and orthogonal to `role` — omitted leaves an
-    existing grant's value unchanged."""
+    existing grant's value unchanged. `page_type` (07 §2, step 70) is also optional and
+    orthogonal to `fuse_access` — omitted grants workspace-wide, same as every grant
+    before step 70; naming a `page_type` grants (or updates) a separate, narrower row
+    scoped to just that type instead."""
 
     principal: str
     role: Role
     fuse_access: bool | None = None
+    page_type: PageType | None = None
 
 
 class BulkMoveRequest(BaseModel):
@@ -627,6 +665,9 @@ def _access_policy_body(policy: AccessPolicy) -> dict[str, Any]:
         "principal": policy.principal,
         "role": policy.role.value,
         "fuse_access": policy.fuse_access,
+        # step 70 (07 §2): `None` for the (still typical) workspace-wide row; the scoped
+        # page_type value for a narrower one, read back off the raw `scope` string.
+        "page_type": policy.scope.removeprefix("page_type:") if policy.scope else None,
     }
 
 
@@ -869,11 +910,20 @@ def _register_routes(app: FastAPI) -> None:
         if not await has_role(session, principal=principal, workspace_id=workspace_id, required=required):
             raise ApiError(403, "forbidden", f"Listing pages here requires the {required.value} role.")
 
+        # Step 70 (07 §2): narrow the requested page_type filter to what scoping allows —
+        # an empty result here means a real "nothing this principal may see," not "no
+        # filter," so it short-circuits before ever querying (see the helper's own note).
+        effective_page_types = await _visible_page_type_filter(
+            session, principal, workspace_id=workspace_id, required=required, requested=page_type
+        )
+        if effective_page_types == []:
+            return {"items": [], "next_cursor": None}
+
         statuses = [status] if status else [PageStatus.published.value]
         pages, next_cursor = await versioning.list_pages(
             session,
             workspace_id=workspace_id,
-            page_types=page_type,
+            page_types=effective_page_types,
             tags=tags,
             date_from=date_from,
             date_to=date_to,
@@ -1387,6 +1437,7 @@ def _register_routes(app: FastAPI) -> None:
             principal=payload.principal,
             role=payload.role,
             fuse_access=payload.fuse_access,
+            scope=page_type_scope(payload.page_type) if payload.page_type else "",
         )
         await session.commit()
         return _access_policy_body(granted)
@@ -1397,9 +1448,19 @@ def _register_routes(app: FastAPI) -> None:
         revoked_principal: str,
         principal: Annotated[Principal, Depends(_principal)],
         session: Annotated[AsyncSession, Depends(_session)],
+        page_type: PageType | None = None,
     ):
+        # step 70 (07 §2): no `page_type` revokes the workspace-wide grant, matching this
+        # endpoint's exact behavior before this step; naming one revokes only that
+        # narrower scoped row, leaving the workspace-wide grant (and any other scope)
+        # untouched.
         await _admin_workspace(session, principal, workspace_id)
-        await workspaces.revoke(session, workspace_id=workspace_id, principal=revoked_principal)
+        await workspaces.revoke(
+            session,
+            workspace_id=workspace_id,
+            principal=revoked_principal,
+            scope=page_type_scope(page_type) if page_type else "",
+        )
         await session.commit()
 
     async def _admin_both_workspaces(
@@ -1759,6 +1820,24 @@ async def run_search(
     # only after the two pools are combined — taking `limit` from each independently
     # first could drop a higher-ranked hit in favor of a lower one from the other pool.
     results = search.merge_federated(shared_hits, dedicated_hits)[:limit]
+
+    # Step 70 (07 §2): page_type scoping applies per result's own workspace — computed
+    # once per distinct workspace_id present, not once per result. A filtered-out result
+    # is omitted outright (same "never confirm an inaccessible target's existence"
+    # reasoning `_resolve_page_links` already uses), so it never reaches `query_log`
+    # either — this can return fewer than `limit` items even when more exist beyond what
+    # was fetched, the same accepted approximation every other omission-based filter here
+    # already carries (no re-query/re-paginate to backfill the difference).
+    visible_by_workspace: dict[str, set[PageType]] = {}
+    filtered_results = []
+    for r in results:
+        if r.workspace_id not in visible_by_workspace:
+            visible_by_workspace[r.workspace_id] = await visible_page_types(
+                session, principal=principal, workspace_id=r.workspace_id, required=required_role
+            )
+        if PageType(r.page_type) in visible_by_workspace[r.workspace_id]:
+            filtered_results.append(r)
+    results = filtered_results
 
     await query_log.record(
         session,

@@ -24,7 +24,9 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-64 and 78 done, steps 65-77 and 79 not started.** Step 78 (track
+**Status (2026-08-20): steps 57-65, 70, and 78 done, steps 66-69, 71-77, and 79 not started.**
+Step 65 was resolved (not built as a standalone primitive) alongside step 70, both done together
+out of numeric sequence, per step 65's own text. Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
 not by either completeness audit pass; see its own entry for why. Phase 1 (steps 1–21) and Phase 2
 (steps 22–56) are both complete — see [`phase1-tasklist.md`](phase1-tasklist.md) and
@@ -288,14 +290,15 @@ findings that don't need a roadmap step (tracked there instead).
     `test_placeholder.py` case it required.
 
 65. **Real cross-workspace / global-admin grant primitive, or an explicit decision not to build
-    one** ([06](06-api-mcp-and-scaling.md) §3). `06` §3's own principal table names "global admin
-    across all workspaces" as distinct from per-workspace admin, but no `access_policy` row shape
-    represents it — every workspace-less admin check (submission/classification review items,
-    `POST /workspaces`'s own bootstrap check) still uses the "admin in at least one workspace"
-    workaround `09` §22 built deliberately rather than invent the primitive speculatively. Resolve
-    alongside step 70 (fine-grained access control) rather than before it, since that's the first
-    feature that might actually need a real answer — but resolve it, one way or the other, rather
-    than leaving the flag open a third phase running.
+    one** ([06](06-api-mcp-and-scaling.md) §3). **Done — resolved: not needed.** Built alongside
+    step 70 as planned; building the real fine-grained feature confirmed rather than just
+    re-asserted `09` §22's original reasoning — page_type scoping is a pure narrowing of what a
+    workspace-level role already covers, every grant (scoped or not) stays
+    `(workspace_id, principal, scope)`, never crossing a workspace boundary. "Global admin across
+    all workspaces" still has no concrete caller three phases in; `any_workspace_with_role`'s
+    "admin in at least one workspace" workaround remains sufficient for every workspace-less case
+    that exists. Formally closed rather than carried forward again. See
+    [09](09-implementation-notes.md) §70 for the full writeup.
 
 66. **API pagination-contract gap** ([09](09-implementation-notes.md) §14). `09` §14 states
     cursor pagination (`{"items": [...], "next_cursor": <string|null>}`, `limit`/`cursor` params)
@@ -355,10 +358,34 @@ findings that don't need a roadmap step (tracked there instead).
 ## 3c — Fine-Grained Access Control ([07](07-additional-features-and-roadmap.md) §2)
 
 70. **Per-page-type / per-tag permissions within a workspace** ([06](06-api-mcp-and-scaling.md)
-    §3). Extends the baseline `reader`/`contributor`/`admin` roles to scope by `page_type` or tag
-    (e.g. a "Legal" sub-area of a workspace visible only to a subset of readers). Resolve step 65's
-    global-admin question as part of this design, not before it — this is the first feature where
-    the answer might actually matter.
+    §3). **Done.** `page_type` scoping built for real; `tag` scoping named as a deliberate,
+    documented deferred gap (confirmed via AskUserQuestion) — `page_type` is a stable column
+    already on `WikiPage`, free at every call site; `tags` live in per-version frontmatter JSONB
+    and would force a join onto several currently-simple endpoints for a dimension `07` §2 itself
+    treats as optional between the two. `access_policy` gained a `scope` column (migration
+    `88ee7671b581`, PK widened to `(workspace_id, principal, scope)`) rather than a new table —
+    `scope=""` means exactly what every grant meant before this step, backward-compatible by
+    construction. Enforcement is opt-in: a `page_type` becomes restricted the moment any scoped
+    grant exists for it in a workspace, at which point the plain workspace role alone is no longer
+    enough — the principal needs its own matching scoped grant; workspace `admin` always bypasses.
+    New `auth.has_role_for_page` (single-page checks: `GET /pages/{id}`, link resolution) and
+    `auth.visible_page_types` (list/search checks, batched to two queries regardless of result-set
+    size — no N+1). `GET /pages`/`wiki_list_pages` intersect the filter at the query level
+    (preserves exact cursor-pagination correctness); `GET /search` post-filters results per
+    distinct workspace instead, since one federated call spans many workspaces each with
+    independent restriction config. Grant/revoke gained an optional `page_type`, orthogonal to
+    `fuse_access` the same way `fuse_access` is orthogonal to `role`. 686 tests green (28 new: a
+    new `test_auth.py` unit-testing the two new pure functions directly, plus REST/MCP enforcement
+    coverage across four existing test files). Live-verified against the real dev stack: seeded a
+    real workspace with a real `concept` and a real `entity` page, a plain admin, a plain reader —
+    granted a real scoped grant to a *different* principal through the live API and watched the
+    reader immediately lose both list and direct-fetch access to the entity page while the admin's
+    access stayed intact (bypass); granted the reader the same scope and watched access return, no
+    gateway restart anywhere in the cycle; revoked just the scoped grant and confirmed an explicit
+    `?page_type=entity` filter correctly returned empty (not "no filter") while the workspace-wide
+    grant stayed untouched. Also resolved step 65's global-admin question as part of this design,
+    per this step's own instruction — see that step's own entry. See
+    [09](09-implementation-notes.md) §70 for the full writeup.
 
 71. **PII detection at ingestion.** Classifier (or a dedicated scanner) flags sources containing
     PII; a new `pii_review` review-item kind blocks ingestion until an admin clears it, mirroring

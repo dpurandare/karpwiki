@@ -9,15 +9,16 @@ from karpwiki import dedicated_index, search, versioning
 from karpwiki.models import AccessPolicy, PageStatus, PageType, PageVersion, QueryLog, Role
 
 CONTRIBUTOR = {"X-Karpwiki-User": "deepak"}
+READER = {"X-Karpwiki-User": "casey"}
 ADMIN = {"X-Karpwiki-User": "avery"}
 
 
-async def _page(session, workspace, *, title, body):
+async def _page(session, workspace, *, title, body, page_type=PageType.concept):
     page = await versioning.create_page(
         session,
         workspace_id=workspace.workspace_id,
         path=f"concepts/{title.lower().replace(' ', '-')}.md",
-        page_type=PageType.concept,
+        page_type=page_type,
         title=title,
         description=f"About {title}.",
         date=date(2026, 8, 14),
@@ -199,3 +200,47 @@ async def test_both_backends_down_returns_a_fully_partial_empty_result(
     assert body["partial"] is True
     assert set(body["unavailable"]) == {workspace.workspace_id, dedicated_workspace.workspace_id}
     assert body["items"] == []
+
+
+# --- Fine-grained (page_type) access control (07 §2, phase3-tasklist.md step 70) ---------
+
+
+async def test_search_omits_a_scope_restricted_result_for_a_plain_reader(client, session, workspace):
+    await _page(session, workspace, title="Open Concept", body="widget rollout notes")
+    await _page(
+        session, workspace, title="Restricted Entity", body="widget rollout notes", page_type=PageType.entity
+    )
+    session.add(
+        AccessPolicy(
+            workspace_id=workspace.workspace_id,
+            principal="someone-else",
+            role=Role.reader,
+            scope="page_type:entity",
+        )
+    )
+    await session.commit()
+
+    r = await client.get("/search", headers=READER, params={"q": "widget rollout"})
+    assert r.status_code == 200
+    titles = {i["title"] for i in r.json()["items"]}
+    assert titles == {"Open Concept"}
+
+
+async def test_search_includes_a_restricted_result_for_the_scoped_reader(client, session, workspace):
+    await _page(
+        session, workspace, title="Restricted Entity", body="widget rollout notes", page_type=PageType.entity
+    )
+    session.add(
+        AccessPolicy(
+            workspace_id=workspace.workspace_id,
+            principal="casey",
+            role=Role.reader,
+            scope="page_type:entity",
+        )
+    )
+    await session.commit()
+
+    r = await client.get("/search", headers=READER, params={"q": "widget rollout"})
+    assert r.status_code == 200
+    titles = {i["title"] for i in r.json()["items"]}
+    assert titles == {"Restricted Entity"}

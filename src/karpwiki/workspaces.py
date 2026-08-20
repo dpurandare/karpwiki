@@ -82,6 +82,7 @@ async def grant(
     principal: str,
     role: Role,
     fuse_access: bool | None = None,
+    scope: str = "",
 ) -> AccessPolicy:
     """Assign a principal a role in a workspace (05 §7). Upserts — granting a role to a
     principal that already has one changes it, rather than requiring a separate revoke.
@@ -90,8 +91,13 @@ async def grant(
     the wiki export, orthogonal to `role` — omitted (`None`) leaves an existing grant's
     value unchanged, matching `update()`'s own "only supplied fields change" convention;
     a brand-new grant defaults to `False` when omitted, same as the column's own default.
+
+    `scope` (07 §2, phase3-tasklist.md step 70) defaults to `""` — a workspace-wide grant,
+    the only shape that existed before this step. A caller passing `auth.page_type_scope(...)`
+    instead upserts a page_type-scoped grant, a separate row from any workspace-wide one for
+    the same principal (`fuse_access` has no meaning on a scoped row — omitted there too).
     """
-    existing = await session.get(AccessPolicy, (workspace_id, principal))
+    existing = await session.get(AccessPolicy, (workspace_id, principal, scope))
     if existing is not None:
         existing.role = role
         if fuse_access is not None:
@@ -99,15 +105,19 @@ async def grant(
         await session.flush()
         return existing
     policy = AccessPolicy(
-        workspace_id=workspace_id, principal=principal, role=role, fuse_access=fuse_access or False
+        workspace_id=workspace_id,
+        principal=principal,
+        role=role,
+        fuse_access=fuse_access or False,
+        scope=scope,
     )
     session.add(policy)
     await session.flush()
     return policy
 
 
-async def revoke(session: AsyncSession, *, workspace_id: str, principal: str) -> None:
-    policy = await session.get(AccessPolicy, (workspace_id, principal))
+async def revoke(session: AsyncSession, *, workspace_id: str, principal: str, scope: str = "") -> None:
+    policy = await session.get(AccessPolicy, (workspace_id, principal, scope))
     if policy is not None:
         await session.delete(policy)
         await session.flush()
@@ -117,7 +127,7 @@ async def list_access(session: AsyncSession, *, workspace_id: str) -> list[Acces
     result = await session.execute(
         select(AccessPolicy)
         .where(AccessPolicy.workspace_id == workspace_id)
-        .order_by(AccessPolicy.principal)
+        .order_by(AccessPolicy.principal, AccessPolicy.scope)
     )
     return list(result.scalars())
 

@@ -29,11 +29,11 @@ from joserfc import jwt
 from joserfc.errors import JoseError
 from joserfc.jwk import KeySet
 from joserfc.jwt import JWTClaimsRegistry
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import config
-from .models import AccessPolicy, Role
+from .models import AccessPolicy, PageType, Role, WikiPage
 
 # Ascending authority: a role satisfies any requirement at or below its own rank.
 _RANK: dict[Role, int] = {Role.reader: 0, Role.contributor: 1, Role.admin: 2}
@@ -202,13 +202,19 @@ def default_authenticator() -> Authenticator:
 
 
 async def effective_role(
-    session: AsyncSession, *, principal: Principal, workspace_id: str
+    session: AsyncSession, *, principal: Principal, workspace_id: str, scope: str = ""
 ) -> Role | None:
-    """The strongest role this principal holds in a workspace, directly or via a group."""
+    """The strongest role this principal holds in a workspace, directly or via a group.
+
+    `scope` (phase3-tasklist.md step 70, 07 §2) defaults to `""` — the workspace-wide
+    grant every call site used before this step, unchanged. A caller checking a specific
+    `page_type:<value>` scope passes it explicitly; every existing call site here is
+    untouched by that addition."""
     result = await session.execute(
         select(AccessPolicy.role).where(
             AccessPolicy.workspace_id == workspace_id,
             AccessPolicy.principal.in_(principal.policy_keys),
+            AccessPolicy.scope == scope,
         )
     )
     roles = list(result.scalars())
@@ -233,7 +239,96 @@ async def any_workspace_with_role(
     """
     result = await session.execute(
         select(AccessPolicy.workspace_id, AccessPolicy.role).where(
-            AccessPolicy.principal.in_(principal.policy_keys)
+            AccessPolicy.principal.in_(principal.policy_keys), AccessPolicy.scope == ""
         )
     )
     return sorted({ws for ws, role in result.all() if _RANK[role] >= _RANK[required]})
+
+
+def page_type_scope(page_type: PageType) -> str:
+    """`access_policy.scope` value for a page_type-scoped grant (07 §2, phase3-tasklist.md
+    step 70) — the one place this string is built, so every reader/writer of it agrees."""
+    return f"page_type:{page_type.value}"
+
+
+async def _scope_is_restricted(session: AsyncSession, *, workspace_id: str, scope: str) -> bool:
+    """A page_type becomes restricted the moment any grant exists for it in this workspace
+    — opt-in, so a workspace nobody has ever scoped behaves exactly as before this step."""
+    result = await session.execute(
+        select(
+            exists().where(AccessPolicy.workspace_id == workspace_id, AccessPolicy.scope == scope)
+        )
+    )
+    return bool(result.scalar())
+
+
+async def has_role_for_page(
+    session: AsyncSession, *, principal: Principal, page: WikiPage, required: Role
+) -> bool:
+    """`has_role`, narrowed by `page.page_type` scoping if this workspace has ever
+    restricted it (07 §2, phase3-tasklist.md step 70). Workspace `admin` always bypasses —
+    an admin already controls the workspace's own grants, including this one. Otherwise: if
+    nothing has scoped this page_type, the workspace-wide role alone decides, unchanged from
+    every phase before this step; if something has, the workspace-wide role is no longer
+    sufficient on its own — the principal needs its own `page_type:<value>`-scoped grant at
+    `required`."""
+    workspace_role = await effective_role(session, principal=principal, workspace_id=page.workspace_id)
+    if workspace_role is Role.admin:
+        return True
+    scope = page_type_scope(page.page_type)
+    if not await _scope_is_restricted(session, workspace_id=page.workspace_id, scope=scope):
+        return workspace_role is not None and _RANK[workspace_role] >= _RANK[required]
+    scoped_role = await effective_role(
+        session, principal=principal, workspace_id=page.workspace_id, scope=scope
+    )
+    return scoped_role is not None and _RANK[scoped_role] >= _RANK[required]
+
+
+async def visible_page_types(
+    session: AsyncSession, *, principal: Principal, workspace_id: str, required: Role
+) -> set[PageType]:
+    """Every `PageType` this principal may see at `required` in this workspace, accounting
+    for page_type scoping (07 §2, phase3-tasklist.md step 70) — the list-shaped counterpart
+    to `has_role_for_page`'s single-page check, batched to avoid one query per candidate
+    page/search-result. Admin sees every type; otherwise a type stays visible unless it's
+    been scope-restricted, in which case it needs the principal's own scoped grant at
+    `required` (the workspace-wide role no longer being enough on its own)."""
+    workspace_role = await effective_role(session, principal=principal, workspace_id=workspace_id)
+    if workspace_role is Role.admin:
+        return set(PageType)
+    restricted = set(
+        (
+            await session.execute(
+                select(AccessPolicy.scope)
+                .where(
+                    AccessPolicy.workspace_id == workspace_id,
+                    AccessPolicy.scope != "",
+                    AccessPolicy.scope.startswith("page_type:"),
+                )
+                .distinct()
+            )
+        ).scalars()
+    )
+    if not restricted:
+        return set(PageType)
+    own_rows = (
+        await session.execute(
+            select(AccessPolicy.scope, AccessPolicy.role).where(
+                AccessPolicy.workspace_id == workspace_id,
+                AccessPolicy.principal.in_(principal.policy_keys),
+                AccessPolicy.scope.in_(restricted),
+            )
+        )
+    ).all()
+    own_scoped: dict[str, Role] = {}
+    for scope, role in own_rows:
+        # A principal can hold this scope via more than one policy_key (e.g. a direct grant
+        # and a group grant) — keep the strongest, same reduction `effective_role` does.
+        if scope not in own_scoped or _RANK[role] > _RANK[own_scoped[scope]]:
+            own_scoped[scope] = role
+    visible = set(PageType)
+    for scope in restricted:
+        held = own_scoped.get(scope)
+        if held is None or _RANK[held] < _RANK[required]:
+            visible.discard(PageType(scope.removeprefix("page_type:")))
+    return visible

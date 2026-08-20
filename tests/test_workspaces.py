@@ -117,6 +117,71 @@ async def test_revoke_a_missing_grant_is_a_no_op(session, workspace):
     await workspaces.revoke(session, workspace_id=workspace.workspace_id, principal="user:ghost")
 
 
+# --- scope (page_type-scoped grants, 07 §2, phase3-tasklist.md step 70) ------------------
+
+
+async def test_grant_defaults_scope_to_workspace_wide(session, workspace):
+    granted = await workspaces.grant(
+        session, workspace_id=workspace.workspace_id, principal="user:new", role=Role.reader
+    )
+    assert granted.scope == ""
+
+
+async def test_grant_with_a_scope_is_a_separate_row_from_the_workspace_wide_grant(session, workspace):
+    await workspaces.grant(session, workspace_id=workspace.workspace_id, principal="user:x", role=Role.reader)
+    await workspaces.grant(
+        session,
+        workspace_id=workspace.workspace_id,
+        principal="user:x",
+        role=Role.admin,
+        scope="page_type:policy",
+    )
+    grants = await workspaces.list_access(session, workspace_id=workspace.workspace_id)
+    assert {(g.scope, g.role) for g in grants} == {
+        ("", Role.reader),
+        ("page_type:policy", Role.admin),
+    }
+
+
+async def test_grant_upgrades_an_existing_scoped_grant_not_the_workspace_wide_one(session, workspace):
+    await workspaces.grant(session, workspace_id=workspace.workspace_id, principal="user:x", role=Role.reader)
+    await workspaces.grant(
+        session,
+        workspace_id=workspace.workspace_id,
+        principal="user:x",
+        role=Role.reader,
+        scope="page_type:policy",
+    )
+    await workspaces.grant(
+        session,
+        workspace_id=workspace.workspace_id,
+        principal="user:x",
+        role=Role.admin,
+        scope="page_type:policy",
+    )
+    grants = await workspaces.list_access(session, workspace_id=workspace.workspace_id)
+    assert {(g.scope, g.role) for g in grants} == {
+        ("", Role.reader),
+        ("page_type:policy", Role.admin),
+    }
+
+
+async def test_revoke_with_a_scope_removes_only_that_row(session, workspace):
+    await workspaces.grant(session, workspace_id=workspace.workspace_id, principal="user:x", role=Role.reader)
+    await workspaces.grant(
+        session,
+        workspace_id=workspace.workspace_id,
+        principal="user:x",
+        role=Role.admin,
+        scope="page_type:policy",
+    )
+    await workspaces.revoke(
+        session, workspace_id=workspace.workspace_id, principal="user:x", scope="page_type:policy"
+    )
+    grants = await workspaces.list_access(session, workspace_id=workspace.workspace_id)
+    assert {(g.scope, g.role) for g in grants} == {("", Role.reader)}
+
+
 async def test_list_for_principal_returns_only_accessible_workspaces(session, workspace, other_workspace):
     session.add(AccessPolicy(workspace_id=workspace.workspace_id, principal="user:deepak", role=Role.reader))
     await session.flush()

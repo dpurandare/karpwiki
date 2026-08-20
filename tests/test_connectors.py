@@ -9,7 +9,7 @@ from karpwiki.models import AccessPolicy, ConnectorState, Role
 async def test_create_grants_the_connector_principal_contributor(session, workspace):
     connector = await connectors.create(session, workspace_id=workspace.workspace_id, type="git")
     policy = await session.get(
-        AccessPolicy, (workspace.workspace_id, f"connector:{connector.connector_id}")
+        AccessPolicy, (workspace.workspace_id, f"connector:{connector.connector_id}", "")
     )
     assert policy is not None
     assert policy.role is Role.contributor

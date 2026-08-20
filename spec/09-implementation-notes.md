@@ -3684,5 +3684,131 @@ path. Cleaned up all seeded rows and the throwaway workspace afterward.
 detector — not built yet") is closed. No deviation from `03` §1's transition table beyond the
 one documented, precedented widening above.
 
+## 70. Fine-Grained (page_type) Access Control, and Step 65's Global-Admin Question Resolved
+(Phase 3 Steps 65 and 70)
+
+Built together, per `phase3-tasklist.md` step 65's own instruction ("resolve alongside step 70
+... not before it, since that's the first feature where the answer might actually matter").
+
+**Step 65 resolved: no separate global-admin/cross-workspace primitive is needed — building the
+real fine-grained feature confirms this rather than just re-asserting `09` §22's original
+reasoning.** Every grant, scoped or not, stays `(workspace_id, principal, scope)` — page_type
+scoping is a pure *narrowing* of what a workspace-level role already covers, never a *widening*
+across workspaces. "Global admin across all workspaces" (`06` §3's principal table) still has no
+concrete caller three phases in; `any_workspace_with_role`'s "admin in at least one workspace"
+workaround remains sufficient for every workspace-less case that exists. Formally closed, not left
+open a fourth phase.
+
+**Scope dimension: `page_type` only, for real; `tag` scoping is a named, deferred gap.** `07` §2
+says "per-`page_type` *or* per-tag" — `page_type` is a stable column directly on `WikiPage`, free
+at every call site that already has the page loaded; `tags` live in per-version `frontmatter`
+JSONB, which would force a join onto several currently-simple endpoints (`GET /pages/{id}`, link
+resolution, the version-history admin gates) for a feature this step's own spec text treats as
+optional between the two. Matches this project's existing precedent for scoping a real primitive
+tightly and naming the rest (`doc_extract`'s legacy-`.doc` exclusion, `dedicated_index`'s
+approximations) — confirmed via AskUserQuestion before building, not assumed.
+
+**Schema: `access_policy` gained a `scope` column** (migration `88ee7671b581`; PK widened to
+`(workspace_id, principal, scope)`) rather than a new table — one table the AuthZ layer already
+reads, `scope=""` (the server-default backfill for every pre-existing row) meaning exactly what
+every grant meant before this step. A non-empty `scope` is always `f"page_type:{value}"`
+(`auth.page_type_scope`, the one place this string is built). Confirmed via AskUserQuestion.
+
+**Enforcement model: opt-in restriction, admin bypass.** A `page_type` becomes restricted the
+moment *any* scoped grant exists for it in a workspace — an untouched workspace behaves exactly as
+before this step, by construction (`auth._scope_is_restricted`). Once restricted, the plain
+workspace-wide role is no longer sufficient on its own for that type; the principal needs its own
+matching `page_type:<value>`-scoped grant at the required rank. Workspace `admin` always bypasses
+— an admin already controls the workspace's own grants, including this one, so gating admin
+against its own configuration would be circular. This is the one part of the design not offered as
+a fork to the user — the spec's "visible only to a subset of readers" framing has no other
+coherent reading once opt-in-per-type is the shape.
+
+**`effective_role`/`has_role`/`any_workspace_with_role` needed a real, necessary correction, not
+just an addition**: before this step they implicitly meant "workspace-wide" by never filtering on
+`scope` at all; once `scope` became a real PK component, a principal holding *only* a narrow
+`page_type:X` grant would otherwise have silently counted as holding that role across the whole
+workspace (e.g. for submission's `any_workspace_with_role`). Fixed by filtering every one of these
+three to `scope == ""` explicitly — `effective_role` also gained an optional `scope` parameter
+(default `""`, so every pre-step-70 call site is byte-for-byte unaffected) so the new page-scoped
+checks could reuse it directly rather than duplicating the role-reduction logic.
+
+**Two new `auth.py` functions, not one, because point-checks and list-checks have genuinely
+different cost shapes**: `has_role_for_page(principal, page, required)` for the single-page case
+(`_reader_page`, `_resolve_page_links`'s per-target check) — one workspace-role lookup, one
+restriction-exists check, one scoped-role lookup, all cheap for exactly one page.
+`visible_page_types(principal, workspace_id, required)` for the list/search case — batches to
+*two* queries total regardless of result-set size (every restricted scope in the workspace, then
+this principal's own scoped grants), avoiding an N+1 that a naive per-result `has_role_for_page`
+call would otherwise cause on `GET /pages`/`GET /search`.
+
+**`GET /pages` and `wiki_list_pages` intersect the filter at the query level, not a post-fetch
+filter** — `api._visible_page_type_filter` narrows the caller's own optional `page_type` request
+(or the full type set, if none) against `visible_page_types`, and the *narrowed* list is what
+`versioning.list_pages` actually queries with. This keeps cursor pagination exactly correct (a
+post-filter would silently return fewer than `limit` items on a page boundary even when more
+visible ones exist beyond it). One real subtlety: `versioning.list_pages` already treats an empty
+`page_types` list as "no filter" (falsy-list shortcut) — so a principal who can see *zero* matching
+types needs the caller to short-circuit to an empty result explicitly, never pass `[]` through, or
+that shortcut would silently return everything instead of nothing. `mcp_server.py`'s `wiki_list_pages`
+duplicates only the thin call-site wiring (this module's own established convention for the eight
+simpler tools) — the actual filtering logic is the one shared `api._visible_page_type_filter` call.
+
+**`GET /search` post-filters instead**, a deliberate, narrower exception to the above: results
+span multiple workspaces in one federated call, each with its own independent restriction
+configuration, and `search.search()`/`dedicated_index.search()` both take one flat `page_types`
+filter applied uniformly across every workspace in the call — pushing per-workspace visibility down
+into that shared query would mean either N separate backend calls (breaking the existing
+one-call-covers-every-workspace batching `04` §4 relies on) or denormalizing scope state into the
+query itself. Post-filtering `results` once per distinct `workspace_id` present (not per result)
+keeps this to a bounded number of extra lookups and accepts the same "can return fewer than
+`limit` even when more exist" approximation this codebase already carries elsewhere for omission-
+based filters (`_resolve_page_links`, the partial-failure degradation). A filtered-out result is
+also never written to `query_log` — it was never really shown, matching the "never confirm an
+inaccessible target's existence" reasoning `_resolve_page_links` already established.
+
+**Grant/revoke API**: `GrantAccessRequest` gained an optional `page_type` field, orthogonal to
+`fuse_access` exactly the way `fuse_access` is already orthogonal to `role` — omitted grants
+workspace-wide (unchanged from every grant before this step); naming one upserts a separate,
+narrower row. `DELETE .../access-policy/{principal}` gained an optional `page_type` query
+parameter with the identical default-omitted-means-workspace-wide shape, so the endpoint's
+existing no-argument behavior is byte-for-byte unchanged. `_access_policy_body` gained a
+`"page_type"` key (`null` for a workspace-wide row) rather than exposing the raw `scope` string,
+keeping the wire format symmetric with the request.
+
+**Verification**: `tests/test_auth.py` (new, 12 tests) — the two new `auth.py` functions unit-
+tested directly (unlike every other AuthZ primitive in this codebase, tested only through
+endpoints; these two have enough real internal logic to warrant it): unrestricted falls back to
+workspace role, no role at all denies, a restricted type denies a plain workspace reader, grants
+the scoped principal (including via a group), admin always bypasses, `visible_page_types`'s
+admin/unrestricted/restricted-with-and-without-grant cases, and a regression proving
+`effective_role`'s new `scope` parameter defaults to today's workspace-wide behavior unchanged.
+`tests/test_workspaces.py` (+4): scoped grants are separate rows, upsert targets the right one,
+revoke-by-scope leaves the workspace-wide grant untouched. `tests/test_workspaces_api.py` (+3):
+the REST grant/revoke surface for `page_type`. `tests/test_pages_sources_api.py` (+6): `GET
+/pages/{id}` and `GET /pages` list enforcement, including the explicit-filter-for-an-invisible-
+type-returns-empty case and the admin-bypass case. `tests/test_federated_search_api.py` (+2):
+search omits/includes a restricted result. `tests/test_mcp_server.py` (+1): `wiki_list_pages`
+parity. Two pre-existing tests needed a real, necessary update, not a workaround: the PK widened
+from a 2-tuple to a 3-tuple, so `session.get(AccessPolicy, (ws, principal))` in
+`test_connectors.py`/`test_connectors_api.py` became a 3-tuple with `scope=""`, and
+`test_workspaces_api.py`'s one exact-dict-equality assertion gained the new `"page_type": None`
+key. Full suite: 686 tests green. Live-verified against the real dev stack: applied the migration
+directly, rebuilt/restarted `gateway`; seeded a real workspace with a real `concept` page and a
+real `entity` page, a plain admin, and a plain reader — confirmed the reader saw both before any
+restriction. Granted a real scoped `page_type:entity` reader grant to a *different* principal
+through the live `POST /workspaces/{id}/access-policy` endpoint — the plain reader immediately lost
+both list and direct-fetch access to the entity page (`GET /pages` dropped it, direct `GET
+/pages/{id}` returned a real 403), while the real admin's direct fetch still succeeded (bypass).
+Granted the plain reader the same scope — access came back on the next request, no gateway restart
+anywhere in the cycle. Revoked just the scoped grant via `DELETE .../access-policy/{principal}?
+page_type=entity` — confirmed an explicit `?page_type=entity` list request now correctly returned
+an empty result (not "no filter") while the reader's own workspace-wide grant and its `concept`
+visibility stayed untouched. Cleaned up the throwaway `live70-ws` workspace afterward.
+
+**Spec touch-point** (applied): `07` §2's fine-grained access control roadmap item is built (the
+`page_type` half; `tag` remains a named, deferred gap). `phase3-tasklist.md` step 65's own
+global-admin question is formally resolved: not needed, closed rather than carried forward again.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

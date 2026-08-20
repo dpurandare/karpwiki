@@ -484,6 +484,13 @@ class AccessPolicy(Base):
         ForeignKey("workspace.workspace_id"), primary_key=True
     )
     principal: Mapped[str] = mapped_column(String(255), primary_key=True)
+    # Fine-grained access control (07 §2, phase3-tasklist.md step 70). `""` (the default,
+    # every grant before this step) means workspace-wide, unchanged in meaning. A non-empty
+    # scope (`page_type:<value>`) narrows this row to just that page_type — a page_type
+    # becomes restricted the moment any such row exists for it in this workspace, at which
+    # point a plain workspace-wide role alone stops being sufficient to see it (`auth.py`'s
+    # `has_role_for_page`/`visible_page_types`); workspace `admin` always bypasses.
+    scope: Mapped[str] = mapped_column(String(64), primary_key=True, default="")
     role: Mapped[Role] = mapped_column(Enum(Role, name="role"))
     # Read-only FUSE-mount access to the wiki export (09 §12, phase3-tasklist.md step 58) —
     # opt-in, orthogonal to `role`: granting it never widens what `role` itself permits, and

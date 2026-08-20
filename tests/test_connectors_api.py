@@ -93,7 +93,9 @@ async def test_create_grants_the_connector_principal_contributor(client, session
     assert r.status_code == 201
     connector_id = r.json()["connector_id"]
 
-    policy = await session.get(AccessPolicy, (workspace.workspace_id, f"connector:{connector_id}"))
+    policy = await session.get(
+        AccessPolicy, (workspace.workspace_id, f"connector:{connector_id}", "")
+    )
     assert policy is not None
     assert policy.role is Role.contributor
 

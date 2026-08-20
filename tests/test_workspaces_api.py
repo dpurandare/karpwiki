@@ -96,6 +96,7 @@ async def test_grant_and_list_access_policy(client, session, workspace):
         "principal": "user:morgan",
         "role": "reader",
         "fuse_access": False,
+        "page_type": None,
     }
 
     listed = await client.get(f"/workspaces/{workspace.workspace_id}/access-policy", headers=ADMIN)
@@ -129,6 +130,65 @@ async def test_revoke_access_policy(client, session, workspace):
 
     listed = await client.get(f"/workspaces/{workspace.workspace_id}/access-policy", headers=ADMIN)
     assert "user:morgan" not in {g["principal"] for g in listed.json()["items"]}
+
+
+# --- Fine-grained (page_type-scoped) grants (07 §2, phase3-tasklist.md step 70) ----------
+
+
+async def test_grant_access_policy_with_a_page_type_creates_a_scoped_row(client, session, workspace):
+    await _grant_admin(session, workspace)
+    r = await client.post(
+        f"/workspaces/{workspace.workspace_id}/access-policy",
+        headers=ADMIN,
+        json={"principal": "user:morgan", "role": "reader", "page_type": "entity"},
+    )
+    assert r.status_code == 201
+    assert r.json()["page_type"] == "entity"
+
+
+async def test_grant_access_policy_page_type_is_a_separate_row_from_workspace_wide(
+    client, session, workspace
+):
+    await _grant_admin(session, workspace)
+    await client.post(
+        f"/workspaces/{workspace.workspace_id}/access-policy",
+        headers=ADMIN,
+        json={"principal": "user:morgan", "role": "reader"},
+    )
+    await client.post(
+        f"/workspaces/{workspace.workspace_id}/access-policy",
+        headers=ADMIN,
+        json={"principal": "user:morgan", "role": "admin", "page_type": "entity"},
+    )
+    listed = await client.get(f"/workspaces/{workspace.workspace_id}/access-policy", headers=ADMIN)
+    rows = [g for g in listed.json()["items"] if g["principal"] == "user:morgan"]
+    assert {(g["page_type"], g["role"]) for g in rows} == {(None, "reader"), ("entity", "admin")}
+
+
+async def test_revoke_access_policy_with_a_page_type_leaves_the_workspace_wide_grant(
+    client, session, workspace
+):
+    await _grant_admin(session, workspace)
+    await client.post(
+        f"/workspaces/{workspace.workspace_id}/access-policy",
+        headers=ADMIN,
+        json={"principal": "user:morgan", "role": "reader"},
+    )
+    await client.post(
+        f"/workspaces/{workspace.workspace_id}/access-policy",
+        headers=ADMIN,
+        json={"principal": "user:morgan", "role": "reader", "page_type": "entity"},
+    )
+    r = await client.delete(
+        f"/workspaces/{workspace.workspace_id}/access-policy/user:morgan",
+        headers=ADMIN,
+        params={"page_type": "entity"},
+    )
+    assert r.status_code == 204
+
+    listed = await client.get(f"/workspaces/{workspace.workspace_id}/access-policy", headers=ADMIN)
+    rows = [g for g in listed.json()["items"] if g["principal"] == "user:morgan"]
+    assert [(g["page_type"], g["role"]) for g in rows] == [(None, "reader")]
 
 
 async def test_access_policy_management_requires_admin(client, session, workspace):
