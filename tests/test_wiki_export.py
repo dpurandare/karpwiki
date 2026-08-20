@@ -129,3 +129,49 @@ async def test_bulk_move_removes_the_stale_mirror_at_the_old_workspace(session, 
     assert objectstore.exists(new_path)
     exported = objectstore.read_text(new_path)
     assert "# Retry" in exported
+
+
+# --- build_archive (phase3-tasklist.md step 74) --------------------------------------------------
+
+
+async def test_build_archive_contains_the_wiki_mirror(session, workspace):
+    import io
+    import tarfile
+
+    page = await versioning.create_page(
+        session, workspace_id=workspace.workspace_id, body="# Retry\n", **PAGE
+    )
+    await session.commit()
+
+    archive = wiki_export.build_archive(workspace.workspace_id)
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        names = tar.getnames()
+        assert f"{workspace.workspace_id}/wiki/{page.path}" in names
+        member = tar.extractfile(f"{workspace.workspace_id}/wiki/{page.path}")
+        assert b"# Retry" in member.read()
+
+
+async def test_build_archive_includes_raw_sources_alongside_the_wiki(session, workspace):
+    import io
+    import tarfile
+
+    objectstore.write_bytes(f"/{workspace.workspace_id}/sources/abc/raw.md", b"raw source content")
+
+    archive = wiki_export.build_archive(workspace.workspace_id)
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        names = tar.getnames()
+        assert f"{workspace.workspace_id}/sources/abc/raw.md" in names
+
+
+async def test_build_archive_excludes_a_different_workspace(session, workspace, other_workspace):
+    await versioning.create_page(
+        session, workspace_id=other_workspace.workspace_id, body="# Other\n", **PAGE
+    )
+    await session.commit()
+
+    archive = wiki_export.build_archive(workspace.workspace_id)
+    import io
+    import tarfile
+
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        assert all(not n.startswith(f"{other_workspace.workspace_id}/") for n in tar.getnames())

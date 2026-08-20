@@ -64,6 +64,20 @@ def exists(path: str, *, url: str | None = None) -> bool:
     return fs.exists(f"{root.rstrip('/')}{path}")
 
 
+def list_files(prefix: str, *, url: str | None = None) -> list[str]:
+    """Every object's own `/`-rooted path (this module's own scheme, not the backend's raw
+    key) under a prefix — the enumeration primitive `wiki_export.build_archive` (07 §5,
+    phase3-tasklist.md step 74) needs to package a whole workspace's object-store content.
+    `fs.find()` is one of fsspec's generic operations, same backend-agnostic reasoning
+    `size_bytes` below already uses for `fs.du()`."""
+    fs, root = _fs_and_root(url)
+    full = f"{root.rstrip('/')}{prefix}"
+    if not fs.exists(full):
+        return []
+    root_len = len(root.rstrip("/"))
+    return [f[root_len:] for f in fs.find(full)]
+
+
 def size_bytes(prefix: str, *, url: str | None = None) -> int:
     """Total bytes stored under a path prefix — the Storage Utilization dashboard's
     object-store metric (05 §8, phase2-tasklist.md step 44). `fs.du()` is one of fsspec's

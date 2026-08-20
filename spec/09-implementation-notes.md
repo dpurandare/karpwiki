@@ -4384,4 +4384,108 @@ statement each, completed and verified cleanly.
 built; no `05`/`07` table needed updating since neither ever listed this dashboard as a row.
 
 ---
+
+## 78. Bulk Import/Export (Phase 3 Step 74)
+
+`07` §5's Platform Operations table names this in one cell: "Admin tooling to seed a new workspace
+from an existing document repository (bulk submission, bypassing per-document review-item noise
+but still subject to classification/dedup), and to export a workspace's wiki + sources for
+migration/backup." Two halves, two real design forks, both confirmed via `AskUserQuestion` before
+building.
+
+**Import fork**: how literal should "bypassing per-document review-item noise" be? Each document
+still needs the real classification/dedup pipeline (`ingestion.classify_source`, async, per-source
+Celery task) — a genuine batch-consolidation reading (collect anything flagged into ONE review item
+per bulk run) would need a new batch-completion tracking mechanism nothing in this codebase has.
+Confirmed the simpler reading: one new `POST /sources/bulk` endpoint accepts multiple files in one
+call and dispatches N real, independent `classify_source` pipelines — the exact same pipeline
+`POST /sources` already runs, just N times per call instead of N separate HTTP round trips. "Noise"
+bypassed = the manual per-file API calls, not a change to when a review item gets raised: a
+genuinely ambiguous document still raises its own item exactly as today (03 §5's always-on
+informational `submission` item included — confirmed by a dedicated test that each bulk-imported
+file gets its own).
+
+`classify_source` deliberately takes no `workspace` parameter at all (03 §3: it routes against the
+whole central taxonomy, resolving `document_type -> workspace_id` only once a label is chosen, not
+from a workspace the caller already picked) — so `POST /sources/bulk` isn't workspace-scoped in its
+own path either; a bulk-imported repository routes into whichever workspace(s) its own document
+types actually belong to, the same as any other real submission would.
+
+Gated at **admin**, not the ordinary contributor bar `POST /sources` uses — `07` §5 frames this
+explicitly as "Admin tooling," and a single call fanning out to N real pipelines is a higher-
+leverage entry point than one document at a time, worth the higher bar. An unreadable file
+(`UnsupportedContentError`) is **skipped, not a whole-batch failure** — reuses the exact
+per-item-skip-not-whole-run-crash precedent `connector_polling.poll_connector` already established
+for this same error (`09` §66, step 78's own earlier writeup — confusingly the SAME numeral as this
+tasklist step, but a different one: that was phase3-tasklist.md step 78, binary document ingestion;
+this is step 74, referenced here only for the precedent it set). Idempotency-Key replay (09 §14)
+extends unchanged: `IdempotencyRecord.response_body` is already a JSONB field, so the bulk
+endpoint's list-shaped `{"submitted": [...], "rejected": [...]}` body stores and replays through the
+identical mechanism `POST /sources` already uses, no special-casing needed. Also added `/sources/
+bulk` to `_rate_limit_category`'s existing `"submit"` bucket (found while wiring the endpoint, not
+asked about separately) — a single bulk call can create many sources, so it belongs under the
+tighter category, not "general."
+
+**Export fork**: build a new packaged-download endpoint, or document the existing infrastructure
+(step 57's always-current wiki mirror + direct object-store access) as already satisfying "export"?
+Confirmed the former — `02` §2's own text calls the mirror "usable independent of the Platform's
+database," but relying on that literally would mean an admin needs direct S3/MinIO client access or
+the FUSE mount (step 58, which needs a host kernel driver never installed in this project) to
+actually retrieve anything; `07` §5 asks for "Admin tooling," which a raw object-store prefix isn't.
+New `GET /workspaces/{workspace_id}/export`, admin-gated via the existing `_admin_workspace` helper
+(`/workspaces/{id}/bulk-move` and friends already share it). Runs `wiki_export.export_workspace`
+first — a cheap repair pass (that function's own docstring already names this exact use: "doubles
+as a repair tool if the object store's mirror ever falls out of sync") — then `wiki_export.
+build_archive`, new, which `tar`s everything under `/{workspace_id}/` in the object store into one
+in-memory `gzip`-compressed archive. **No filtering**: `wiki/`, `sources/`, `diffs/` are already all
+namespaced under the same workspace prefix, and "wiki + sources for migration/backup" is naturally
+satisfied by the whole thing — diffs count as version-history wiki content too, and excluding them
+would need an inclusion/exclusion rule nothing asked for. New `objectstore.list_files(prefix)`
+(`fs.find()`, the same backend-agnostic fsspec primitive `size_bytes`'s own `fs.du()` already uses)
+is the one new enumeration primitive this needed.
+
+**Documented limitation, not silently missed**: the archive is built fully in memory (`io.BytesIO`),
+not streamed. Simplest correct implementation for a reference deployment; a production-scale
+workspace's export would want a real streaming tar instead — the same shape of accepted
+approximation `storage_utilization`'s own content-byte docstring already carries for a different
+reason.
+
+No MCP tool for either half: `wiki_submit`'s own docstring already explains file/URL upload doesn't
+map onto MCP's JSON-shaped arguments even for a SINGLE file, so a multi-file bulk-import tool would
+be even less natural; none of the five `/metrics/*` dashboards has an MCP counterpart either
+(admin-only backend operations, confirmed by checking `mcp_server.py` directly), and a binary
+`tar.gz` download doesn't fit an MCP tool's return shape at all. Both are precedent-by-omission, not
+fresh decisions.
+
+**Verification**: `tests/test_bulk_import_api.py` (new, 8 tests): multiple real files accepted in
+one call; each file gets its own real `submission` review item (the "review items unchanged"
+design, directly tested); an unreadable file among good ones is skipped, not a batch failure; every
+stored file gets a real `classify_source.delay` dispatch; admin-vs-contributor-vs-reader gating; a
+retried bulk submission (same Idempotency-Key) creates sources exactly once. `tests/test_export_
+api.py` (new, 6 tests): admin gating (including cross-workspace rejection), 404 for an unknown
+workspace, a real downloadable `tar.gz` containing the expected wiki path, and the repair-pass test
+proving `export_workspace` genuinely re-runs before packaging (deletes a mirrored file first, then
+confirms the export response contains it anyway). `tests/test_wiki_export.py` (+4): `build_archive`
+contains the wiki mirror, includes raw sources alongside it, and correctly excludes a different
+workspace's content. `tests/test_ratelimit.py` (+1): `/sources/bulk` shares the `"submit"` category.
+Full suite: 806 tests green (32 new).
+
+Live-verified against the real dev stack (no migration, no new task — rebuilt/restarted only
+`gateway`): a real two-file bulk import through the live gateway (`POST /sources/bulk`) returned two
+real `source_id`s; both were picked up by the live `worker-classification` container and resolved to
+the real seeded workspace (`classified`/`ingested` pipeline states confirmed via `psql`, not just the
+initial 202 response). `GET /workspaces/live74-ws/export` through the live gateway returned a real
+`tar.gz` (`Content-Disposition: attachment`) containing real `wiki/`, `sources/`, and `diffs/`
+entries; extracted one real source file from the downloaded archive and confirmed its bytes matched
+`objectstore.read_bytes` exactly. Cleaned up all seeded DB rows afterward, each `DELETE` as its own
+separate `psql -c` invocation this time (`09` §77's own documented lesson from the previous step's
+cleanup mistake) — left the object-store files themselves in place, matching this project's existing
+precedent for throwaway live-verify workspaces (steps 57/61 and others).
+
+**Spec touch-point** (applied): `07` §5's Bulk import/export cell is built in full — both the
+"bypassing per-document review-item noise" bulk-submission half and the "export a workspace's wiki
++ sources for migration/backup" half, the latter reusing step 57's mirror exactly as `02` §2
+intended rather than a second, parallel export mechanism.
+
+---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

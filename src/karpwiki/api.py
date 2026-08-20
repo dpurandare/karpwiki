@@ -29,7 +29,7 @@ from datetime import date
 from typing import Annotated, Any
 
 import redis.asyncio as redis
-from fastapi import Depends, FastAPI, Form, Header, Query, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -54,6 +54,7 @@ from . import (
     search,
     tasks,
     versioning,
+    wiki_export,
     workspaces,
 )
 from .auth import (
@@ -95,6 +96,7 @@ from .search_result import DEFAULT_SEARCH_LIMIT
 logger = logging.getLogger(__name__)
 
 SUBMIT_ENDPOINT = "POST /sources"
+BULK_SUBMIT_ENDPOINT = "POST /sources/bulk"
 RESOLVE_ENDPOINT = "POST /review-items/{id}/resolve"
 ROLLBACK_ENDPOINT = "POST /pages/{id}/rollback"
 
@@ -124,7 +126,7 @@ def _envelope(request: Request, exc: ApiError) -> JSONResponse:
 
 
 def _rate_limit_category(request: Request) -> str:
-    if request.method == "POST" and request.url.path == "/sources":
+    if request.method == "POST" and request.url.path in ("/sources", "/sources/bulk"):
         return "submit"
     if request.method == "GET" and request.url.path == "/search":
         return "search"
@@ -782,6 +784,82 @@ def _register_routes(app: FastAPI) -> None:
         # only after commit — the classification task opens its own session and must see
         # this source row.
         tasks.classify_source.delay(str(source.source_id))
+        return body
+
+    @app.post("/sources/bulk", status_code=202)
+    async def bulk_submit_sources(
+        request: Request,
+        response: Response,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        files: Annotated[list[UploadFile], File()],
+        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    ):
+        """Bulk import (07 §5, phase3-tasklist.md step 74) — "seed a new workspace from an
+        existing document repository." No `workspace_id` parameter: `classify_source` routes
+        against the whole central taxonomy exactly like a single `POST /sources` call
+        (03 §3's own no-workspace-hint design) — this endpoint is a real batch of that SAME
+        pipeline, not a second, workspace-scoped path. "Bypassing per-document review-item
+        noise" (07 §5's own wording, confirmed via AskUserQuestion) means no more manual
+        per-file `POST /sources` calls, not a change to when a review item gets raised — a
+        document that's genuinely ambiguous still raises its own item exactly as today.
+
+        Gated at admin (not the ordinary contributor bar `POST /sources` uses): this is
+        framed as "Admin tooling" (07 §5), and a single call fanning out to N real pipelines
+        is a higher-leverage entry point worth the higher bar.
+
+        An unreadable file (`UnsupportedContentError`) is skipped, not a whole-batch
+        failure — the same per-item-skip-not-whole-run-crash precedent `connector_polling.
+        poll_connector` already established for this exact error (phase3-tasklist.md step
+        78) — so one bad file among many doesn't force the admin to resubmit everything.
+        """
+        if not await any_workspace_with_role(session, principal=principal, required=Role.admin):
+            raise ApiError(
+                403,
+                "forbidden",
+                "Bulk import requires the admin role in at least one workspace.",
+                {"principal": principal.id},
+            )
+
+        if idempotency_key:
+            replayed = await _replay(session, idempotency_key, principal, BULK_SUBMIT_ENDPOINT)
+            if replayed is not None:
+                response.headers["Idempotency-Replayed"] = "true"
+                return replayed
+
+        submitted: list[dict] = []
+        rejected: list[dict] = []
+        for upload in files:
+            payload, filename = await upload.read(), upload.filename or "upload"
+            try:
+                source = await ingestion.store(
+                    session, payload, filename, submitted_by=f"user:{principal.id}"
+                )
+            except ingestion.UnsupportedContentError as exc:
+                rejected.append({"filename": filename, "error": str(exc)})
+                continue
+            submitted.append(
+                {
+                    "source_id": str(source.source_id),
+                    "pipeline_state": source.pipeline_state.value,
+                    "filename": source.filename,
+                }
+            )
+        body = {"submitted": submitted, "rejected": rejected}
+        if idempotency_key:
+            session.add(
+                IdempotencyRecord(
+                    key=idempotency_key,
+                    principal=principal.id,
+                    endpoint=BULK_SUBMIT_ENDPOINT,
+                    response_status=202,
+                    response_body=body,
+                )
+            )
+        await session.commit()
+        # Dispatched only after commit, same discipline every other submission path uses.
+        for entry in submitted:
+            tasks.classify_source.delay(entry["source_id"])
         return body
 
     @app.get("/sources/{source_id}")
@@ -1501,6 +1579,38 @@ def _register_routes(app: FastAPI) -> None:
             scope=page_type_scope(page_type) if page_type else "",
         )
         await session.commit()
+
+    @app.get("/workspaces/{workspace_id}/export")
+    async def export_workspace_endpoint(
+        workspace_id: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+    ):
+        """Bulk export (07 §5, phase3-tasklist.md step 74) — "export a workspace's wiki +
+        sources for migration/backup," reusing step 57's real wiki markdown mirror rather
+        than a second, parallel export mechanism (02 §2 already names "backup/migration/
+        export" as that mirror's own first purpose). Everything under `/{workspace_id}/`
+        in the object store — `wiki/`, `sources/`, `diffs/` alike — is already namespaced
+        by workspace, so one prefix packages the whole thing; no filtering needed.
+
+        Runs `wiki_export.export_workspace` first: the write-through hook (step 57) keeps
+        the mirror current on every page write, so this is normally a no-op, but it's the
+        same repair-pass guarantee that function already exists to give (its own docstring
+        names this exact "doubles as a repair tool" use), cheap insurance that the archive
+        never ships a stale mirror.
+
+        Built fully in memory, not streamed — the simplest correct implementation for a
+        reference deployment; a production-scale workspace would want a streaming tar
+        instead (documented limitation, not silently missed, matching this module's own
+        precedent for the `storage_utilization` content-byte approximation)."""
+        await _admin_workspace(session, principal, workspace_id)
+        await wiki_export.export_workspace(session, workspace_id=workspace_id)
+        archive = wiki_export.build_archive(workspace_id)
+        return Response(
+            content=archive,
+            media_type="application/gzip",
+            headers={"Content-Disposition": f'attachment; filename="{workspace_id}-export.tar.gz"'},
+        )
 
     async def _admin_both_workspaces(
         session: AsyncSession, principal: Principal, source_workspace_id: str, payload: BulkMoveRequest

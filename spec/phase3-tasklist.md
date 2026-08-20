@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-73 and 78 done, steps 74-77 and 79 not started.**
+**Status (2026-08-20): steps 57-74 and 78 done, steps 75-77 and 79 not started.**
 Step 65 was resolved (not built as a standalone primitive) alongside step 70, both done together
 out of numeric sequence, per step 65's own text. Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
@@ -516,12 +516,35 @@ findings that don't need a roadmap step (tracked there instead).
     on a later error (Postgres's simple-query protocol treats a `;`-separated batch as one implicit
     transaction). See [09](09-implementation-notes.md) §77 for the full writeup.
 
-74. **Bulk import/export.** Admin tooling to seed a new workspace from an existing document
-    repository (bulk submission, bypassing per-document review-item noise but still subject to
-    real classification/dedup — not a side channel around them), and to export a workspace's wiki
-    + sources for migration/backup. The export half should reuse step 57's real wiki markdown
-    mirror rather than build a second, parallel export mechanism — `02` §2 already names
-    "backup/migration/export" as that mirror's own first purpose.
+74. **Bulk import/export.** **Done.** Admin tooling to seed a new workspace from an existing
+    document repository (bulk submission, bypassing per-document review-item noise but still
+    subject to real classification/dedup — not a side channel around them), and to export a
+    workspace's wiki + sources for migration/backup. Two design forks, both confirmed via
+    AskUserQuestion. **Import**: new `POST /sources/bulk`, admin-gated (higher bar than ordinary
+    `POST /sources`'s contributor requirement — "Admin tooling," 07 §5), accepts multiple files
+    and dispatches N real independent `classify_source` pipelines — "bypassing noise" means no
+    more manual per-file API calls, not a change to when a review item gets raised; a genuinely
+    ambiguous document still raises its own, exactly as today. No `workspace_id` scope on the
+    endpoint — `classify_source` never takes one (03 §3: routes against the whole central
+    taxonomy). An unreadable file is skipped, not a whole-batch failure, reusing step 78's own
+    `connector_polling` per-item-skip precedent; idempotency-key replay extends unchanged (the
+    existing `IdempotencyRecord.response_body` JSONB field already stores a list-shaped body);
+    `/sources/bulk` added to the existing `"submit"` rate-limit category. **Export**: new
+    `GET /workspaces/{id}/export`, admin-gated, reuses step 57's real wiki markdown mirror exactly
+    as this step's own text calls for — runs `wiki_export.export_workspace` as a repair pass, then
+    a new `wiki_export.build_archive` tars the *entire* `/{workspace_id}/` object-store prefix
+    (`wiki/`, `sources/`, `diffs/` together, no filtering needed since all three are already
+    namespaced together) into one in-memory `gzip` archive, new `objectstore.list_files` the one
+    new enumeration primitive needed. In-memory archive building is a documented limitation, not
+    silently missed — a production-scale export would want real streaming instead. No MCP tool
+    for either half (file/URL upload already doesn't map onto MCP's JSON-shaped arguments even
+    for `wiki_submit`'s single-file case; no `/metrics/*` dashboard has an MCP counterpart either;
+    a binary archive doesn't fit an MCP tool's return shape at all) — precedent by omission. 806
+    tests green (32 new). Live-verified against the real dev stack (no migration, no new task —
+    rebuilt only `gateway`): a real two-file bulk import through the live gateway was picked up
+    and classified for real by the live worker; the live export endpoint returned a real `tar.gz`
+    whose extracted file content matched the object store byte-for-byte. See
+    [09](09-implementation-notes.md) §78 for the full writeup.
 
 75. **Workspace templates.** Predefined `SCHEMA.md` templates for common document-type categories
     (e.g. "Policy workspace," "Engineering docs workspace") to bootstrap a new workspace with

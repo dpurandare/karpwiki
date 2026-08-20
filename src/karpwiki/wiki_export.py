@@ -37,11 +37,31 @@ Deliberately does **not** write `index.md`: nothing creates a real `index`-type 
 hook as any other wiki page, no changes needed here.
 """
 
+import io
+import tarfile
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import objectstore
 from .models import PageVersion, SchemaVersion, WikiPage, Workspace
+
+
+def build_archive(workspace_id: str) -> bytes:
+    """Bulk export (07 §5, phase3-tasklist.md step 74): a real downloadable `tar.gz` of
+    everything under `/{workspace_id}/` in the object store — `wiki/`, `sources/`,
+    `diffs/` alike, since all three are already namespaced by workspace and "wiki +
+    sources for migration/backup" (07 §5's own wording) is naturally satisfied by the
+    whole prefix, no filtering needed. Built fully in memory (see `api.py`'s
+    `export_workspace_endpoint` docstring for why that's an accepted limitation here)."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for path in objectstore.list_files(f"/{workspace_id}/"):
+            payload = objectstore.read_bytes(path)
+            info = tarfile.TarInfo(name=path.lstrip("/"))
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+    return buffer.getvalue()
 
 
 def export_path(workspace_id: str, path: str) -> str:

@@ -40,6 +40,19 @@ def test_principal_key_falls_back_to_anon_when_unauthenticated():
     assert ratelimit.principal_key({}) == "anon"
 
 
+def test_bulk_submit_shares_the_submit_rate_limit_category():
+    """phase3-tasklist.md step 74 — a single bulk call can create many sources, so it
+    belongs under the same tighter "submit" category as POST /sources, not "general"."""
+    from unittest.mock import MagicMock
+
+    from karpwiki.api import _rate_limit_category
+
+    request = MagicMock()
+    request.method = "POST"
+    request.url.path = "/sources/bulk"
+    assert _rate_limit_category(request) == "submit"
+
+
 async def test_middleware_returns_429_with_headers_once_the_limit_is_exhausted(
     monkeypatch, session
 ):
