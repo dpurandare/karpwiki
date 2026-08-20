@@ -321,6 +321,10 @@ def _page_summary_body(row: versioning.PageSummary) -> dict[str, Any]:
         "description": row.description,
         "tags": row.tags,
         "date": row.date,
+        # Content quality scoring (07 §4, phase3-tasklist.md step 69) — sortable Admin
+        # Console column; null for a page never touched by curate_source (source/
+        # overview/index/log pages, or one only ever hand-edited).
+        "quality_score": row.quality_score,
     }
 
 
@@ -332,6 +336,7 @@ def _page_body(page: WikiPage, version: PageVersion | None) -> dict[str, Any]:
         "page_type": page.page_type.value,
         "status": page.status.value,
         "current_version_id": str(page.current_version_id) if page.current_version_id else None,
+        "quality_score": page.quality_score,
     }
     if version is not None:
         body["title"] = version.frontmatter.get("title")

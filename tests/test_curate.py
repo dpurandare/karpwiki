@@ -2,6 +2,8 @@
 
 from datetime import datetime, timezone
 
+import pytest
+
 from karpwiki import curate
 from karpwiki.curate import CuratedContent, CuratedPage, ExistingPage
 
@@ -160,3 +162,52 @@ def test_structured_curated_content_requires_an_intent_statement():
 
     with pytest.raises(ValidationError):
         StructuredCuratedContent(source_title="X", intent_statement="")
+
+
+# --- Content quality scoring (07 §4, phase3-tasklist.md step 69) -------------------------
+
+
+def test_score_content_quality_zero_citations_and_links_is_zero():
+    body = "Plain prose with no citations and no internal links at all here."
+    score = curate.score_content_quality(body)
+    assert score.citation_density == 0.0
+    assert score.cross_reference_completeness == 0.0
+    assert score.combined == 0.0
+
+
+def test_score_content_quality_caps_citation_density_at_one():
+    # 100-word body with 5 citation footnotes, target is 3 per 1000 words — way over.
+    body = " ".join(["word"] * 100) + "\n" + "\n".join(f"[^{i}]: def {i}" for i in range(5))
+    score = curate.score_content_quality(body, citation_target_per_1000_words=3.0)
+    assert score.citation_density == 1.0
+
+
+def test_score_content_quality_caps_cross_reference_completeness_at_one():
+    body = "See " + " ".join(f"[link{i}](concepts/other{i}.md)" for i in range(10)) + "."
+    score = curate.score_content_quality(body, cross_reference_target=3)
+    assert score.cross_reference_completeness == 1.0
+
+
+def test_score_content_quality_combined_is_the_mean():
+    # One citation footnote (~1000 body words) and one of two target links.
+    body = "word " * 1000 + "\n[^1]: a definition\n\nSee [x](concepts/x.md)."
+    score = curate.score_content_quality(
+        body, citation_target_per_1000_words=2.0, cross_reference_target=2
+    )
+    assert score.citation_density == pytest.approx(0.5, abs=0.01)
+    assert score.cross_reference_completeness == 0.5
+    assert score.combined == round((score.citation_density + score.cross_reference_completeness) / 2, 4)
+
+
+def test_freshness_score_is_one_at_zero_age():
+    assert curate.freshness_score(0) == 1.0
+
+
+def test_freshness_score_is_half_at_the_half_life():
+    assert curate.freshness_score(180, half_life_days=180) == 0.5
+
+
+def test_freshness_score_decays_toward_zero_as_age_grows():
+    near = curate.freshness_score(30, half_life_days=180)
+    far = curate.freshness_score(360, half_life_days=180)
+    assert 0.0 < far < near < 1.0

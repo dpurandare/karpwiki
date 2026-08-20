@@ -15,6 +15,7 @@ from sqlalchemy import (
     ARRAY,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -244,6 +245,13 @@ class WikiPage(Base):
     status: Mapped[PageStatus] = mapped_column(
         Enum(PageStatus, name="page_status"), default=PageStatus.draft
     )
+    # Content quality scoring (07 §4, phase3-tasklist.md step 69) — `curate.
+    # ContentQualityScore.combined` (citation density + cross-reference completeness),
+    # set whenever `curate_source` writes/updates a concept or entity page. Null for
+    # every other page type and for a page never touched by an ingest — nothing backfills
+    # it, same as every other "added mid-project, not retroactively computed" column here
+    # (`RawSource.created_at`, step 43).
+    quality_score: Mapped[float | None] = mapped_column(Float)
 
 
 class PageVersion(Base):
@@ -402,6 +410,30 @@ class AdminActionLog(Base):
     detail: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.clock_timestamp()
+    )
+
+
+class LintLog(Base):
+    """Curator Agent lint passes (02 §5) — the fourth `log.md` source stream, named there
+    since Phase 1 but never built: steps 36-39 (Phase 2 track 2c) never wrote to it,
+    reusing `review_item.detail` as their evidence store instead (09 §22), and the
+    Contradiction Detector (step 40) does the same — deliberately left `lint_log` unbuilt
+    at the time (09 §43's own decision log entry), "for a stream nothing currently reads."
+    Content quality scoring (phase3-tasklist.md step 69) is the first real writer.
+
+    `kind` stays a plain string, not a closed enum — `Connector.type`'s own precedent for
+    "no concrete second event type exists yet to give this a fixed shape."
+    """
+
+    __tablename__ = "lint_log"
+
+    entry_id: Mapped[uuid.UUID] = _uuid_pk()
+    page_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("wiki_page.page_id"), index=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspace.workspace_id"), index=True)
+    kind: Mapped[str] = mapped_column(String(64))
+    detail: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.clock_timestamp(), index=True
     )
 
 

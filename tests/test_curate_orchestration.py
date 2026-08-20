@@ -130,6 +130,74 @@ async def test_proposed_pages_are_created_when_no_match_exists(session, workspac
     assert page.status is PageStatus.published
 
 
+# --- Content quality scoring (07 §4, phase3-tasklist.md step 69) -------------------------
+
+
+async def test_curate_source_sets_quality_score_on_a_new_page(session, workspace):
+    source = await _classified(session, workspace)
+    content = _content(
+        pages=[
+            CuratedPage(
+                page_type="concept",
+                title="Backoff",
+                tags=["reliability", "ops"],
+                body="See [related](concepts/related.md).\n\n[^1]: a citation",
+            )
+        ]
+    )
+    await ingestion.curate_source(session, source=source, workspace=workspace, call=_returns(content))
+    await session.commit()
+
+    page = (
+        await session.execute(select(WikiPage).where(WikiPage.page_type == PageType.concept))
+    ).scalar_one()
+    assert page.quality_score is not None
+    assert page.quality_score > 0.0
+
+
+async def test_curate_source_writes_a_lint_log_entry(session, workspace):
+    from karpwiki.models import LintLog
+
+    source = await _classified(session, workspace)
+    content = _content(
+        pages=[
+            CuratedPage(page_type="concept", title="Backoff", tags=["reliability", "ops"], body="Plain body.")
+        ]
+    )
+    await ingestion.curate_source(session, source=source, workspace=workspace, call=_returns(content))
+    await session.commit()
+
+    page = (
+        await session.execute(select(WikiPage).where(WikiPage.page_type == PageType.concept))
+    ).scalar_one()
+    entry = (
+        await session.execute(select(LintLog).where(LintLog.page_id == page.page_id))
+    ).scalar_one()
+    assert entry.kind == "quality_score"
+    assert entry.workspace_id == workspace.workspace_id
+    assert "citation_density" in entry.detail
+    assert "cross_reference_completeness" in entry.detail
+    assert entry.detail["combined"] == page.quality_score
+
+
+async def test_log_reflects_a_lint_entry(session, workspace):
+    source = await _classified(session, workspace)
+    content = _content(
+        pages=[
+            CuratedPage(page_type="concept", title="Backoff", tags=["reliability", "ops"], body="Plain body.")
+        ]
+    )
+    await ingestion.curate_source(session, source=source, workspace=workspace, call=_returns(content))
+    await session.commit()
+
+    page = (
+        await session.execute(select(WikiPage).where(WikiPage.path == "log.md"))
+    ).scalar_one()
+    version = await session.get(PageVersion, page.current_version_id)
+    assert "Lint:" in version.content
+    assert "concepts/backoff.md" in version.content
+
+
 async def test_curate_source_uses_the_workspaces_schema_configured_curator_model(session, workspace):
     """phase3-tasklist.md step 59: llm.resolve_model's own `schema: dict | None` parameter
     has never been passed anything but `None` until this step wired it up."""

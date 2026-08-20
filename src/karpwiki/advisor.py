@@ -310,6 +310,25 @@ async def run_staleness_detector(
     if not findings:
         return None
 
+    # Step 69 (07 §4): prioritize by content quality, worst first — a real signal beyond
+    # the recency-only order these three signals would otherwise leave findings in. A page
+    # never scored (not written via `curate_source`, or a structural page type quality
+    # scoring doesn't cover — source/overview/index/log) sorts as if fully-scored (1.0)
+    # rather than ahead of a confirmed-bad one, since there's no evidence it's actually low
+    # quality. Doesn't change *which* pages are flagged, only the order an admin sees them
+    # in within this one batched item — confirmed with the user as this step's intended
+    # scope, not a new eligibility signal.
+    scores = dict(
+        (
+            await session.execute(
+                select(WikiPage.page_id, WikiPage.quality_score).where(
+                    WikiPage.page_id.in_([f.page_id for f in findings])
+                )
+            )
+        ).all()
+    )
+    findings = sorted(findings, key=lambda f: scores.get(f.page_id) if scores.get(f.page_id) is not None else 1.0)
+
     severity = "high" if len(findings) >= 20 else "medium" if len(findings) >= 5 else "low"
     return await review.create(
         session,

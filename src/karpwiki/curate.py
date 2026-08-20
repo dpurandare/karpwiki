@@ -19,8 +19,65 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from . import page_links, search_result
+
 OVERVIEW_RECENT_LIMIT = 10
 LOG_RECENT_LIMIT = 20
+
+# Content quality scoring (07 §4, phase3-tasklist.md step 69) — mechanical, not an LLM
+# judgment: all three dimensions 07 §4 names (citation density, cross-reference
+# completeness, freshness) are objectively measurable from the body text and its
+# timestamp, so nothing here spends a model call.
+DEFAULT_CITATION_TARGET_PER_1000_WORDS = 3.0
+DEFAULT_CROSS_REFERENCE_TARGET = 3
+DEFAULT_FRESHNESS_HALF_LIFE_DAYS = 180.0
+
+
+@dataclass(frozen=True)
+class ContentQualityScore:
+    """Citation density and cross-reference completeness only — both genuinely reflect
+    the *content itself* and stay valid until the page is next edited, so this is what
+    gets stored (`WikiPage.quality_score` is `combined`, `lint_log.detail` keeps the
+    breakdown). Freshness (07 §4's third dimension) deliberately isn't part of this —
+    see `freshness_score` below for why."""
+
+    citation_density: float
+    cross_reference_completeness: float
+    combined: float
+
+
+def score_content_quality(
+    body: str,
+    *,
+    citation_target_per_1000_words: float = DEFAULT_CITATION_TARGET_PER_1000_WORDS,
+    cross_reference_target: int = DEFAULT_CROSS_REFERENCE_TARGET,
+) -> ContentQualityScore:
+    """`citation_density`: footnote citations per 1000 words, capped at 1.0 against
+    `citation_target_per_1000_words`. `cross_reference_completeness`: internal wiki links
+    present, capped at 1.0 against `cross_reference_target`. `combined` is their
+    unweighted mean — 07 §4 names no relative weighting between dimensions."""
+    word_count = max(len(body.split()), 1)
+    citations = len(search_result.extract_citations(body))
+    citation_density = min(1.0, (citations / word_count * 1000) / citation_target_per_1000_words)
+
+    cross_references = len(page_links.extract_link_targets(body))
+    cross_reference_completeness = min(1.0, cross_references / cross_reference_target)
+
+    return ContentQualityScore(
+        citation_density=round(citation_density, 4),
+        cross_reference_completeness=round(cross_reference_completeness, 4),
+        combined=round((citation_density + cross_reference_completeness) / 2, 4),
+    )
+
+
+def freshness_score(age_days: float, *, half_life_days: float = DEFAULT_FRESHNESS_HALF_LIFE_DAYS) -> float:
+    """Exponential decay: 1.0 for a just-written page, 0.5 at exactly one half-life,
+    asymptotic toward 0 as age grows. Deliberately never stored — a page's age changes
+    every day whether or not the page itself does, so baking "today's" freshness into a
+    score computed once at ingest would make the stored number silently wrong the moment
+    time passes. Computed fresh wherever "how fresh is this page right now" is actually
+    needed (the Maintenance Advisor's own prioritization, phase3-tasklist.md step 69)."""
+    return round(0.5 ** (age_days / half_life_days), 4)
 
 
 class CuratedPage(BaseModel):

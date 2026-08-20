@@ -39,6 +39,7 @@ from .models import (
     AdminActionLog,
     Connector,
     ContentShape,
+    LintLog,
     PageStatus,
     PageType,
     PageVersion,
@@ -946,9 +947,10 @@ async def curate_source(
 
         pages_touched = 1
         for page in pages:
-            await _write_curated_page(
+            wiki_page = await _write_curated_page(
                 session, workspace_id=workspace.workspace_id, page=page, existing=existing
             )
+            await _score_and_log_quality(session, page=wiki_page, body=page.body)
             pages_touched += 1
     except Exception as exc:
         # 03 §6: "on failure at any step" — this covers steps 1-3; the state transitions
@@ -1060,7 +1062,7 @@ async def _write_curated_page(
     workspace_id: str,
     page: curate.CuratedPage,
     existing: list[curate.ExistingPage],
-) -> None:
+) -> WikiPage:
     match = curate.match_existing(page.title, existing)
     page_type = PageType.concept if page.page_type == "concept" else PageType.entity
 
@@ -1074,9 +1076,9 @@ async def _write_curated_page(
             trigger=VersionTrigger.ingest,
             change_summary="Updated during source ingest.",
         )
-        return
+        return wiki_page
 
-    await versioning.create_page(
+    return await versioning.create_page(
         session,
         workspace_id=workspace_id,
         path=f"{curate.PAGE_DIRECTORY[page.page_type]}/{curate.slugify(page.title)}.md",
@@ -1089,6 +1091,31 @@ async def _write_curated_page(
         author="system:curator",
         status=PageStatus.published,
     )
+
+
+async def _score_and_log_quality(session: AsyncSession, *, page: WikiPage, body: str) -> None:
+    """Content quality scoring (07 §4, phase3-tasklist.md step 69) — mechanical, computed
+    from the body just written (`curate.score_content_quality`), never an LLM judgment.
+    `page.quality_score` is the sortable Admin Console value; the full breakdown goes into
+    a new `lint_log` entry — the first real writer of that stream (`models.LintLog`'s own
+    docstring explains why it sat unbuilt since Phase 1). Scoped to concept/entity pages
+    only (`curate_source`'s own loop, the only caller) — a source/overview/index/log page
+    is provenance/bookkeeping, not the knowledge content these dimensions describe."""
+    score = curate.score_content_quality(body)
+    page.quality_score = score.combined
+    session.add(
+        LintLog(
+            page_id=page.page_id,
+            workspace_id=page.workspace_id,
+            kind="quality_score",
+            detail={
+                "citation_density": score.citation_density,
+                "cross_reference_completeness": score.cross_reference_completeness,
+                "combined": score.combined,
+            },
+        )
+    )
+    await session.flush()
 
 
 async def _refresh_overview(session: AsyncSession, *, workspace_id: str) -> None:
@@ -1119,8 +1146,9 @@ async def _refresh_overview(session: AsyncSession, *, workspace_id: str) -> None
 
 
 async def refresh_log(session: AsyncSession, *, workspace_id: str) -> None:
-    """log.md merges `ingestion_log` and `admin_action_log` (02 §5, 09 §23) — `lint_log`
-    doesn't exist in Phase 1, no lint pass is built.
+    """log.md merges `ingestion_log`, `admin_action_log`, and `lint_log` (02 §5, 09 §23,
+    §73) — `lint_log` sat named-but-unbuilt since Phase 1 until content quality scoring
+    (phase3-tasklist.md step 69) became its first real writer.
 
     Public: `curate_source` below calls it after an ingest, and `api.py`'s rollback
     endpoint calls it after a rollback — `versioning.rollback` can't call it itself
@@ -1142,6 +1170,14 @@ async def refresh_log(session: AsyncSession, *, workspace_id: str) -> None:
         session, workspace_id=workspace_id, limit=curate.LOG_RECENT_LIMIT
     ):
         rows.append((entry.created_at, f"{entry.actor}: {entry.action} ({entry.subject_ref})"))
+
+    for entry in await _recent_lint_entries(
+        session, workspace_id=workspace_id, limit=curate.LOG_RECENT_LIMIT
+    ):
+        page = await session.get(WikiPage, entry.page_id)
+        path = page.path if page is not None else "?"
+        combined = entry.detail.get("combined") if isinstance(entry.detail, dict) else None
+        rows.append((entry.created_at, f"Lint: `{path}` quality score {combined}"))
 
     rows.sort(key=lambda row: row[0], reverse=True)
     body = curate.render_log_body(rows)
@@ -1215,6 +1251,16 @@ async def _recent_admin_actions(
         select(AdminActionLog)
         .where(AdminActionLog.workspace_id == workspace_id)
         .order_by(AdminActionLog.created_at.desc(), AdminActionLog.entry_id.desc())
+        .limit(limit)
+    )
+    return list(result.scalars())
+
+
+async def _recent_lint_entries(session: AsyncSession, *, workspace_id: str, limit: int) -> list[LintLog]:
+    result = await session.execute(
+        select(LintLog)
+        .where(LintLog.workspace_id == workspace_id)
+        .order_by(LintLog.created_at.desc(), LintLog.entry_id.desc())
         .limit(limit)
     )
     return list(result.scalars())

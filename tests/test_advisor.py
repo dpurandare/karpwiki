@@ -404,6 +404,28 @@ async def test_run_staleness_detector_batches_into_one_item(session, workspace):
     assert status.state is IndexState.stale
 
 
+async def test_run_staleness_detector_sorts_findings_by_quality_worst_first(session, workspace):
+    """Step 69 (07 §4): content quality scoring prioritizes an admin's batch, worst
+    structural quality first — doesn't change which pages are flagged, only their order."""
+    good_page = await _page(session, workspace, title="Good Old Page")
+    good_page.quality_score = 0.9
+    await _make_stale(session, good_page, days_ago=100)
+    bad_page = await _page(session, workspace, title="Bad Old Page")
+    bad_page.quality_score = 0.1
+    await _make_stale(session, bad_page, days_ago=100)
+    unscored_page = await _page(session, workspace, title="Unscored Old Page")
+    await _make_stale(session, unscored_page, days_ago=100)
+
+    item = await advisor.run_staleness_detector(session, workspace_id=workspace.workspace_id, threshold_days=90)
+    await session.commit()
+
+    ordered_ids = [p["page_id"] for p in item.detail["pages"]]
+    assert ordered_ids[0] == str(bad_page.page_id)
+    # An unscored page sorts as if fully-scored (1.0) — never ahead of a confirmed-bad one.
+    assert ordered_ids.index(str(bad_page.page_id)) < ordered_ids.index(str(good_page.page_id))
+    assert ordered_ids.index(str(bad_page.page_id)) < ordered_ids.index(str(unscored_page.page_id))
+
+
 async def test_run_staleness_detector_no_findings_returns_none(session, workspace):
     await _page(session, workspace, title="Fine Page")
     item = await advisor.run_staleness_detector(session, workspace_id=workspace.workspace_id)

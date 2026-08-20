@@ -55,6 +55,30 @@ async def test_list_pages_returns_published_pages_by_default(client, session, wo
     assert paths == {"concepts/runbook-one.md"}
 
 
+async def test_list_pages_exposes_quality_score(client, session, workspace):
+    """Step 69 (07 §4) — the sortable Admin Console column, null for a page never scored."""
+    scored = await _page(session, workspace, title="Scored Page")
+    scored.quality_score = 0.75
+    unscored = await _page(session, workspace, title="Unscored Page")
+    await session.commit()
+
+    r = await client.get("/pages", headers=READER, params={"workspace_id": workspace.workspace_id})
+    assert r.status_code == 200
+    scores = {i["page_id"]: i["quality_score"] for i in r.json()["items"]}
+    assert scores[str(scored.page_id)] == 0.75
+    assert scores[str(unscored.page_id)] is None
+
+
+async def test_get_page_exposes_quality_score(client, session, workspace):
+    page = await _page(session, workspace, title="Scored Page")
+    page.quality_score = 0.6
+    await session.commit()
+
+    r = await client.get(f"/pages/{page.page_id}", headers=READER)
+    assert r.status_code == 200
+    assert r.json()["quality_score"] == 0.6
+
+
 async def test_list_pages_filters_by_page_type(client, session, workspace):
     await _page(session, workspace, title="A Concept")
     await versioning.create_page(

@@ -263,6 +263,7 @@ class PageSummary:
     description: str
     tags: list[str]
     date: str | None
+    quality_score: float | None
 
 
 async def list_pages(
@@ -315,7 +316,8 @@ async def list_pages(
         "       COALESCE(pv.frontmatter ->> 'title', '') AS title, "
         "       COALESCE(pv.frontmatter ->> 'description', '') AS description, "
         "       pv.frontmatter -> 'tags' AS tags, "
-        "       pv.frontmatter ->> 'date' AS date "
+        "       pv.frontmatter ->> 'date' AS date, "
+        "       p.quality_score AS quality_score "
         "FROM wiki_page p "
         "JOIN page_version pv ON pv.version_id = p.current_version_id "
         f"WHERE {' AND '.join(filters)} "
@@ -341,6 +343,7 @@ async def list_pages(
             description=r.description,
             tags=list(r.tags or []),
             date=r.date,
+            quality_score=r.quality_score,
         )
         for r in rows
     ], next_cursor

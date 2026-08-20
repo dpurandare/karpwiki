@@ -4058,5 +4058,90 @@ staleness-detector connection; `02` §5's `query_log` stream row now mentions `q
 `05` §3's reason vocabulary gains `low_feedback`; `06` §1/§2 name the new REST resource and MCP
 tool.
 
+## 74. Content Quality Scoring, and `lint_log`'s First Real Writer (Phase 3 Step 69)
+
+`07` §4 names three scoring dimensions (citation density, cross-reference completeness,
+freshness) and two consumers (a sortable Admin Console column, and Maintenance Advisor
+prioritization). This step also closes `lint_log`'s own long-standing gap: named in `02` §5 since
+Phase 1, deliberately left unbuilt through the Contradiction Detector (step 40, `09` §43) "for a
+stream nothing currently reads" — content quality scoring is that first real reader/writer.
+
+**Mechanical, not an LLM judgment — confirmed against 07 §4's own wording, no cost spent.** All
+three named dimensions are objectively measurable from the body text and its timestamp (a
+footnote/link count, an age), unlike the Contradiction Detector's genuine "does this conflict"
+judgment call (`09` §43). `curate.score_content_quality`/`freshness_score` are pure functions —
+no model call, matching this codebase's cost-conscious default of not spending an LLM call where
+a mechanical signal already answers the question.
+
+**Freshness is deliberately never stored — computed fresh wherever it's actually needed.** Citation
+density and cross-reference completeness genuinely reflect the *content itself* and stay valid
+until the page is next edited, so they're computed once at ingest and stored
+(`WikiPage.quality_score` is their mean). Freshness is inherently time-varying — a page's age
+changes every day whether or not the page does — so baking "today's" freshness into a score
+computed once at write time would make the stored number silently wrong the moment time passes.
+`curate.freshness_score(age_days)` stays a standalone pure function, callable wherever "how fresh
+is this page right now" is actually needed, rather than a field on `ContentQualityScore`.
+
+**Scoped to concept/entity pages only — the pages `_write_curated_page` writes, not source/
+overview/index/log.** A source page is a provenance record, not the knowledge content these three
+dimensions describe; overview/index/log are structural bookkeeping pages this codebase already
+treats as a distinct category from real content elsewhere (e.g. step 60's `index.md` catalog
+explicitly excludes them). `WikiPage.quality_score` is null for all of these, same as for any page
+never touched by `curate_source` (a purely hand-edited page, for instance) — not a bug, a
+documented scope boundary.
+
+**A real design fork, checked with the user rather than assumed**: `07` §4 says quality scoring
+should let the Advisor "prioritize lint/reindex work ahead of the recency-only signal it uses
+today" — genuinely ambiguous between (a) reordering an already-flagged batch by quality, worst
+first, or (b) a fourth staleness *eligibility* signal (a low-quality page becomes stale-candidate
+on its own, even if not old). Confirmed (a): `run_staleness_detector`'s three existing signals
+(content-age, superseded-source, low-feedback — steps 36, 37, 68) still decide *which* pages get
+flagged; a new batch query (`WikiPage.quality_score` for every finding's `page_id`, one query, not
+N) sorts the combined findings list ascending by score before it's written into the review item's
+`detail["pages"]`, worst structural quality first — an admin working through a big batch sees the
+most urgent pages first. A page with no stored score sorts as if fully-scored (1.0), never ahead
+of a confirmed-bad one, since there's no evidence it's actually low quality.
+
+**`lint_log` closes for real**: new `LintLog` model (migration `e8b1f5be5c9c`, `kind` a plain
+string like `Connector.type`'s own precedent — no second event type exists yet to give it a fixed
+shape), written by the new `ingestion._score_and_log_quality` right after each concept/entity page
+write inside `curate_source`. `ingestion.refresh_log` now merges `lint_log` entries into `log.md`
+alongside `ingestion_log`/`admin_action_log` — the fourth and final stream `02` §5 always named,
+now genuinely all reachable from the rendered timeline. No enum type in this migration (avoided
+the exact footgun class `09` §73 just documented — `kind` is a plain `VARCHAR`, nothing to
+double-create).
+
+**`_write_curated_page` gained a return value** (the written/updated `WikiPage`) — every existing
+call site is `curate_source`'s own loop, which previously discarded it; needed so the new scoring
+step can act on the exact row just written without a redundant re-fetch.
+
+**API surface**: `WikiPage.quality_score` surfaced in both `GET /pages` (via a new
+`PageSummary.quality_score` field, `versioning.list_pages`'s query gained one more selected
+column) and `GET /pages/{id}` — null, not omitted, when unset, so a client can distinguish "no
+score" from "score of zero." No new sort parameter: `00` §1 scopes this repo to admin-console
+*backend data*, not UI, matching `05` §8's own monitoring-dashboard precedent — "sortable" is
+satisfied by the field being present for a real console to sort client-side.
+
+**Verification**: `tests/test_curate.py` (+7): citation-density/cross-reference-completeness
+capping and combining, `freshness_score` at zero age/half-life/decay. `tests/
+test_curate_orchestration.py` (+3): `curate_source` sets a real `quality_score`, writes a real
+`lint_log` entry with the full breakdown, and `log.md` reflects it. `tests/test_advisor.py` (+1):
+`run_staleness_detector` sorts a mixed batch worst-quality-first, an unscored page never jumping
+ahead of a confirmed-bad one. `tests/test_pages_sources_api.py` (+2): `quality_score` surfaced on
+both `GET /pages` and `GET /pages/{id}`, null for an unscored page. Full suite: 743 tests green.
+Live-verified against the real dev stack (migration round-trip verified up/down/up first, per this
+project's own discipline): submitted real runbook text through the live gateway, let it classify
+and curate for real via `gpt-5-nano` — four real concept/entity pages landed with a real, non-null
+`quality_score` (all `0.0`, genuinely correct: the model's own generated bodies for this run had
+no citation footnotes or internal links, confirmed by reading the actual stored content, not
+assumed) and four matching `lint_log` rows; `log.md`'s real content showed all four `Lint:` lines
+interleaved with the ingest entry, newest-first. Separately gave two of the real pages different
+scores (0.9 and 0.0) and made both stale — the real staleness detector, run in the live
+maintenance worker, correctly ordered the worse one first in the raised review item's own
+`detail["pages"]`. Cleaned up the throwaway `live69-ws` workspace and its rows afterward.
+
+**Spec touch-point** (applied): `07` §4's Content quality scoring roadmap item is built; `02` §5's
+`lint_log` row is no longer named-but-unbuilt — this section records it as closed.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

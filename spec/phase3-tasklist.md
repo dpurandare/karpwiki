@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-68, 70, and 78 done, steps 69, 71-77, and 79 not started.**
+**Status (2026-08-20): steps 57-70 and 78 done, steps 71-77 and 79 not started.**
 Step 65 was resolved (not built as a standalone primitive) alongside step 70, both done together
 out of numeric sequence, per step 65's own text. Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
@@ -379,16 +379,36 @@ findings that don't need a roadmap step (tracked there instead).
     stale-marking fix prevents), page settled back to `indexed`. See
     [09](09-implementation-notes.md) §73 for the full writeup.
 
-69. **Content quality scoring.** Curator Agent lint-pass scoring (citation density,
-    cross-reference completeness, freshness) on ingest; surfaced as a sortable Admin Console
-    column; used by the Maintenance Advisor to prioritize lint/reindex work ahead of the
-    recency-only signal it uses today (step 36). **Closes another named-but-unbuilt gap as a
-    direct consequence**: `02` §5 names `lint_log` as one of `log.md`'s four source streams
-    (alongside `ingestion_log`, `query_log`, `admin_action_log`), but it was deliberately left
-    unbuilt through all of track 2c "for a stream nothing currently reads" — `09`'s own words,
-    resolved via AskUserQuestion at the time as correct *because* no lint pass existed yet. This
-    step is that lint pass; write to `lint_log` as part of it rather than leaving the stream
-    permanently named-but-empty.
+69. **Content quality scoring.** **Done.** Mechanical, not an LLM judgment — all three named
+    dimensions (citation density, cross-reference completeness, freshness) are objectively
+    measurable from body text and a timestamp, so `curate.score_content_quality`/`freshness_score`
+    spend no model call. Scoped to concept/entity pages only (source/overview/index/log are
+    provenance/structural, not the knowledge content these dimensions describe) —
+    `WikiPage.quality_score` (new column) is their citation+cross-ref mean; freshness is
+    deliberately never stored (it's time-varying, so a value baked in at ingest would go silently
+    wrong the moment time passes) — computed fresh wherever needed instead.
+    **Genuine design fork checked with the user**: "prioritize... ahead of the recency-only
+    signal" read two ways — reorder an already-flagged batch by quality (chosen) vs. a new
+    staleness-eligibility signal (not chosen, bigger change). `run_staleness_detector` now sorts
+    its combined findings by `quality_score` ascending before batching, worst structural quality
+    first — doesn't change which pages get flagged, only the order an admin sees them in.
+    **Closes another named-but-unbuilt gap as a direct consequence**: new `lint_log` table
+    (migration `e8b1f5be5c9c`) — named since Phase 1, deliberately left unbuilt through track 2c
+    "for a stream nothing currently reads" (`09` §43) — is now genuinely written
+    (`ingestion._score_and_log_quality`, one entry per scored page) and merged into `log.md`
+    alongside `ingestion_log`/`admin_action_log` by `refresh_log`, the fourth and final stream
+    `02` §5 always named. `quality_score` surfaced on both `GET /pages` and `GET /pages/{id}` —
+    "sortable Admin Console column" satisfied by the field being present, no new server-side sort
+    param (matches `05` §8's own backend-data-not-UI scope). 743 tests green (13 new).
+    Live-verified against the real dev stack (migration round-trip verified first): submitted real
+    runbook text through the live gateway, classified and curated via real `gpt-5-nano` — four
+    real concept/entity pages landed with a real, correct `quality_score` of `0.0` (confirmed by
+    reading the actual generated bodies: genuinely no citations/links in this run, not a bug) and
+    four matching `lint_log` rows; `log.md`'s real content showed all four `Lint:` lines
+    interleaved with the ingest entry. Gave two real pages different scores and made both stale —
+    the real staleness detector, run in the live maintenance worker, correctly ordered the
+    worse-scored one first in the raised item. See [09](09-implementation-notes.md) §74 for the
+    full writeup.
 
 ## 3c — Fine-Grained Access Control ([07](07-additional-features-and-roadmap.md) §2)
 
