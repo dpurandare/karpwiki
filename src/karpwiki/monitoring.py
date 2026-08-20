@@ -3,12 +3,16 @@ the Admin Console. `00` §1 scopes this repo to "admin console scope, not pixel-
 design," so this module (and its `GET /metrics/*` endpoints in `api.py`) is the backend
 data a real dashboard would render, not a UI.
 
-One accepted gap, documented here rather than silently missing:
-
-- **Cache hit rate** (05 §8's Search Performance row): `02` §6's optional cache layer was
-  never built in this implementation — flagged roadmap-only since phase2-tasklist.md step
-  34's writeup. `search_performance()` reports `cache_hit_rate: None` rather than a fake
-  number.
+**Cache hit rate** (05 §8's Search Performance row) was an accepted gap — `02` §6's optional
+cache layer was never built, flagged roadmap-only since phase2-tasklist.md step 34's
+writeup — until phase3-tasklist.md step 76 built one: a new `cache.py` module (search
+results only, off by default via `config.CACHE_ENABLED`). `search_performance()` below
+still returns `cache_hit_rate: None` on its own — it stays pure-DB, needing no live Redis
+connection to test, the same reasoning `queue_depths()` below already established — the
+real value is merged in at the API layer (`api.py`'s `search_performance_metrics`) the
+same way `ingestion_pipeline_metrics` merges in `queue_depths()`. Still `None`, not `0.0`,
+when the cache has never been looked up (disabled, or simply no traffic yet) — `0.0` would
+misleadingly claim measurement occurred and found zero hits.
 
 **Storage trend** (05 §8's Storage Utilization row) was the same shape of gap — "no
 metrics-history/time-series mechanism exists anywhere in this codebase" — until

@@ -74,7 +74,20 @@ async def test_ingestion_pipeline_endpoint_includes_queue_depths(client, session
     }
 
 
-async def test_search_performance_endpoint_reports_accepted_cache_gap(client, session, workspace):
+async def test_search_performance_endpoint_reports_none_cache_hit_rate_with_no_activity(
+    client, session, workspace
+):
+    """Step 76 built a real cache — `cache_hit_rate` is `None` only because nothing has
+    looked the cache up yet (disabled by default, or simply no traffic), not because the
+    mechanism doesn't exist (see cache.py's own docstring)."""
+    import redis.asyncio as redis
+
+    from karpwiki import cache, config
+
+    redis_client = redis.from_url(config.CELERY_BROKER_URL)
+    await redis_client.delete(cache._HITS_KEY, cache._MISSES_KEY)
+    await redis_client.aclose()
+
     session.add(AccessPolicy(workspace_id=workspace.workspace_id, principal="avery", role=Role.admin))
     await session.commit()
 
@@ -83,6 +96,33 @@ async def test_search_performance_endpoint_reports_accepted_cache_gap(client, se
     )
     assert r.status_code == 200
     assert r.json()["cache_hit_rate"] is None
+
+
+async def test_search_performance_endpoint_reports_a_real_cache_hit_rate(client, session, workspace):
+    import redis.asyncio as redis
+
+    from karpwiki import cache, config
+
+    redis_client = redis.from_url(config.CELERY_BROKER_URL)
+    await redis_client.delete(cache._HITS_KEY, cache._MISSES_KEY)
+    await redis_client.set(cache._HITS_KEY, 1)
+    await redis_client.set(cache._MISSES_KEY, 1)
+    try:
+        session.add(
+            AccessPolicy(workspace_id=workspace.workspace_id, principal="avery", role=Role.admin)
+        )
+        await session.commit()
+
+        r = await client.get(
+            "/metrics/search-performance",
+            headers=ADMIN,
+            params={"workspace_id": workspace.workspace_id},
+        )
+        assert r.status_code == 200
+        assert r.json()["cache_hit_rate"] == 0.5
+    finally:
+        await redis_client.delete(cache._HITS_KEY, cache._MISSES_KEY)
+        await redis_client.aclose()
 
 
 async def test_storage_utilization_endpoint_reports_empty_trend_before_any_snapshot(

@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-75 and 78 done, steps 76-77 and 79 not started. Track 3d
+**Status (2026-08-20): steps 57-76 and 78 done, steps 77 and 79 not started. Track 3d
 (Platform Operations) is now fully complete and closed out.**
 Step 65 was resolved (not built as a standalone primitive) alongside step 70, both done together
 out of numeric sequence, per step 65's own text. Step 78 (track
@@ -574,12 +574,33 @@ Lighter-weight than the tracks above, and explicitly optional per the spec's own
 items — included so they're planned rather than perpetually deferred, not because Phase 3 can't
 close without them.
 
-76. **Optional read-through cache layer** ([02](02-storage-and-indexing.md) §6). Page/search-result
-    caching, keyed by `(workspace_id, page_id, version_id)` or `(workspace_id, query_hash)` so a
-    new page version or reindex naturally invalidates stale entries with no explicit cache-busting
-    logic. "Not required for correctness — purely a latency optimization," per `02` §6's own
-    wording; closes the "cache hit rate: `None`, no cache layer exists" accepted gap `monitoring.py`
-    (step 44) documented rather than faked.
+76. **Optional read-through cache layer** ([02](02-storage-and-indexing.md) §6). **Done.**
+    Page/search-result caching, keyed by `(workspace_id, page_id, version_id)` or `(workspace_id,
+    query_hash)` so a new page version or reindex naturally invalidates stale entries with no
+    explicit cache-busting logic. "Not required for correctness — purely a latency optimization,"
+    per `02` §6's own wording; closes the "cache hit rate: `None`, no cache layer exists" accepted
+    gap `monitoring.py` (step 44) documented rather than faked. Scoped to **search results only**,
+    confirmed via AskUserQuestion: page caching has a real authz-leak risk (`GET /pages/{id}`'s
+    `links` field is caller-specific via `_resolve_page_links`; caching the full response would leak
+    link visibility across principals) that search doesn't share (`search.search()` already takes
+    fully-resolved, caller-specific params as plain arguments) — page caching stays a documented,
+    not-yet-built follow-on. New `cache.py`: cache key hashes the FULL resolved retrieval-parameter
+    set, not just `(workspace_id, query_hash)` (02 §6's own wording is a simplification — omitting
+    any one param, e.g. `include_drafts`, could let two callers collide on the same cached entry).
+    Wraps only the raw `search.search()`/`dedicated_index.search()` calls in `api.run_search` —
+    never the step-70 page_type post-filter or the `query_log` write, both unconditional on every
+    call (skipping `query_log` on a hit would silently break the feedback loop and usage analytics).
+    Off by default (`config.CACHE_ENABLED`), reuses the existing Celery-broker Redis instance, TTL-
+    only invalidation (`config.CACHE_TTL_SECONDS`, default 60s) — consistent with this system's
+    already-accepted eventual-consistency window for the Full-Text Index. `cache_hit_rate` merged
+    in at the API layer in `search_performance_metrics`, the same split `queue_depths()` already
+    established, so `monitoring.search_performance` stays pure-DB and testable without Redis. 836
+    tests green (17 new). Live-verified against the real dev stack (no migration, no new task —
+    rebuilt only `gateway`; cache enabled temporarily via a `docker-compose.override.yml`, removed
+    afterward): a real second search against an identical query, after a new matching page was
+    indexed in between, correctly still returned only the first page (a genuine cache hit); the
+    live `GET /metrics/search-performance` then reported a real `cache_hit_rate: 0.5` matching the
+    one real hit and one real miss. See [09](09-implementation-notes.md) §80 for the full writeup.
 
 77. **Backup & disaster recovery procedures.** Periodic snapshots of the Metadata DB and object
     store, with a documented point-in-time restore; scoped per-workspace given the storage

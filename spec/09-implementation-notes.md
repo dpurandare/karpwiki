@@ -4562,4 +4562,98 @@ Cleaned up all seeded rows afterward, each `DELETE` as its own separate `psql -c
 applied through machinery step 59 already built and tested rather than a new, parallel apply path.
 
 ---
+
+## 80. Optional Read-Through Cache Layer (Phase 3 Step 76)
+
+`02` §6: "A read-through cache for (a) frequently-read published wiki pages and (b) recent search
+result sets... keyed by `(workspace_id, page_id, version_id)` or `(workspace_id, query_hash)` so a
+new page version or re-index naturally invalidates stale entries without explicit cache-busting
+logic. Not required for correctness — purely a latency optimization." Closes the `cache_hit_rate:
+None` accepted gap `monitoring.py` has carried since step 44.
+
+**Real design fork, confirmed via `AskUserQuestion`**: cache both named things, or search results
+only? Page caching has a real correctness trap the spec's own simplified wording doesn't surface:
+`GET /pages/{id}`'s response includes `_resolve_page_links`'s output, which is CALLER-specific (a
+reader without access to a linked draft page gets a shorter `links` list than an admin would) —
+caching the full response naively would leak link visibility across principals doing the identical
+lookup. Search has no equivalent trap: `search.search()`/`dedicated_index.search()` already receive
+fully-resolved, caller-specific parameters (the caller's own accessible `workspace_ids`,
+`include_drafts`, `page_types`) as plain arguments, so a cache keyed on the FULL resolved parameter
+set is safe by construction. Confirmed: **search results only**. Page caching stays a documented,
+not-yet-built follow-on — the correctness work it would need (cache only the page body, never the
+resolved links; still re-run the authz check on every request even for a body cache hit) is real,
+just meaningfully bigger than this "lighter-weight... explicitly optional" track's own framing
+calls for.
+
+**Cache key is the full resolved retrieval-parameter set, not just `(workspace_id, query_hash)`** —
+02 §6's own wording is a simplification. `new cache.search_key()` hashes `workspace_ids` (sorted),
+`query`, `limit`, `include_drafts`, `page_types`, `tags`, `date_from`, `date_to` together. Omitting
+any of these from the key would mean two callers who differ only in, say, `include_drafts` (a
+contributor vs. a reader on the identical accessible-workspace set) could collide on the same
+cached entry — a reader could receive a draft-inclusive result set cached by an earlier contributor
+call. Verified directly: a parametrized test asserts the key changes when ANY single resolved
+parameter differs, holding the rest constant.
+
+**Wraps only the raw retrieval call in `api.run_search`** — never the step-70 page_type-scope
+post-filter (`visible_by_workspace`, itself caller-specific for the same reason page-link
+resolution is) or the `query_log.record` write, both of which run unconditionally on every call
+regardless of a cache hit. Skipping `query_log` on a hit would silently break the search feedback
+loop (07 §4, step 68) and usage-analytics search volume (step 73), both of which depend on a real
+row existing per real search call — confirmed by a dedicated test asserting exactly 2 `query_log`
+rows after 2 identical calls (one miss, one cache hit).
+
+**Off by default** (`config.CACHE_ENABLED`, new) — "not required for correctness... purely a
+latency optimization" (02 §6's own wording) means a reference deployment shouldn't pay a Redis
+round trip on every search until an operator deliberately opts in. Reuses the same Redis instance
+the Celery broker already runs (`config.CELERY_BROKER_URL`) rather than standing up a second
+cache-only store — `ratelimit.py` already established this "reuse broker Redis for an unrelated
+purpose" shape. TTL-only invalidation (`config.CACHE_TTL_SECONDS`, default 60s) is 02 §6's own
+requirement ("naturally invalidates... without explicit cache-busting logic"), and the resulting
+bounded staleness window is consistent with this system's already-accepted eventual-consistency
+window for the Full-Text Index itself (02 §8: search already serves the previous version's lexical
+entries while a page is `stale` and reindexing).
+
+**`cache_hit_rate` merged in at the API layer**, not inside `monitoring.search_performance` itself
+— the exact same split `queue_depths()` already established: the DB-only dashboard function stays
+pure and testable without a live Redis connection, and `api.py`'s `search_performance_metrics`
+overrides the placeholder the same way `ingestion_pipeline_metrics` merges in `queue_depths()`.
+Global, not workspace-scoped (the hit/miss counters aren't split per workspace) — same "cross-
+cutting infra metric" reasoning. Still `None`, not `0.0`, when nothing has looked the cache up yet
+(disabled, or simply no traffic) — `0.0` would misleadingly claim measurement occurred and found
+zero hits.
+
+**Verification**: `tests/test_cache.py` (new, 12 tests): key stability and workspace-id-ordering
+independence, a parametrized test proving the key changes for every individual resolved parameter,
+get/set round-trips a real `SearchResult` list through JSON, hit/miss counters increment correctly,
+`hit_rate()` is `None` with no activity and a real ratio otherwise. `tests/test_search_cache.py`
+(new, 4 tests, an autouse fixture resets the global hit/miss counters per test since they aren't
+reset by the DB session fixture): cache disabled by default reflects a new page immediately; cache
+enabled serves a stale result within TTL (the direct proof caching is happening — a second matching
+page indexed between two identical calls isn't reflected in the cached response); `query_log` still
+gets a row on every call including a hit; two callers with different accessible workspaces (one a
+fresh principal granted only on `other_workspace`, since the shared `client` fixture's own `casey`
+already has access to both) never leak into each other's cached results. `tests/test_metrics_api.py`
+updated: the old "accepted gap" test renamed and now defensively resets the global counters first
+(the gap it named no longer exists, but the specific no-activity scenario it tests still legitimately
+returns `None`); a new test proves a real `0.5` hit rate reports correctly through the live endpoint
+shape. Full suite: 836 tests green (17 new).
+
+Live-verified against the real dev stack (no migration, no new task — rebuilt only `gateway`):
+temporarily enabled the cache for just the `gateway` container via a `docker-compose.override.yml`
+(`KARPWIKI_CACHE_ENABLED=true`, a 300s TTL), removed afterward — config vars are read once at
+process import, so toggling this for a real running server needs a real container restart, not an
+`exec` into the live process. Seeded a real throwaway workspace and page, ran a real search through
+the live gateway, indexed a second real matching page, re-ran the identical search — the response
+still showed only the first page (a genuine cache hit, not a coincidence: the same call against a
+disabled cache reflects a new page immediately, proven by the equivalent unit test). `GET /metrics/
+search-performance` then reported a real `cache_hit_rate: 0.5`, exactly matching the one real miss
+and one real hit that had just happened. Cleaned up all seeded rows afterward (each `DELETE` its own
+separate `psql -c` invocation), cleared the real hit/miss counters left in Redis, removed the
+override file, and restarted `gateway` once more to confirm it reverted to cache-disabled behavior.
+
+**Spec touch-point** (applied): `02` §6's optional cache layer is built, search-result half; `05`
+§8's Search Performance `cache_hit_rate` gap `monitoring.py` has carried since step 44 is resolved.
+Page caching remains a named, deliberate follow-on, not silently dropped.
+
+---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

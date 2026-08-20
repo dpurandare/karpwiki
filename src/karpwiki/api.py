@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from . import (
     analytics,
     bulk_move,
+    cache,
     classify,
     config,
     connectors,
@@ -1850,7 +1851,13 @@ def _register_routes(app: FastAPI) -> None:
         workspace_id: str | None = None,
     ):
         await _require_admin_scope(session, principal, workspace_id)
-        return await monitoring.search_performance(session, workspace_id=workspace_id)
+        result = await monitoring.search_performance(session, workspace_id=workspace_id)
+        # Global, not workspace-scoped (the cache's hit/miss counters aren't split per
+        # workspace, same "cross-cutting infra metric" reasoning queue_depths() already
+        # uses) — overrides monitoring.search_performance's own `cache_hit_rate: None`
+        # placeholder the same way ingestion_pipeline_metrics merges in queue_depths().
+        result["cache_hit_rate"] = await cache.hit_rate()
+        return result
 
     @app.get("/metrics/storage-utilization")
     async def storage_utilization_metrics(
@@ -1987,39 +1994,94 @@ async def run_search(
 
     unavailable: list[str] = []
 
+    # Optional read-through cache (02 §6, phase3-tasklist.md step 76) — wraps only the raw
+    # retrieval calls below, never the step-70 page_type post-filter or the query_log write
+    # further down, both of which stay unconditional on every call (cache.py's own
+    # docstring explains why: neither is safe or correct to skip on a cache hit).
+    cache_client = cache.client() if config.CACHE_ENABLED else None
     try:
-        shared_hits = await search.search(
-            session,
-            query=q,
-            workspace_ids=shared_ids,
-            limit=limit,
-            include_drafts=include_drafts,
-            page_types=page_type,
-            tags=tags,
-            date_from=date_from,
-            date_to=date_to,
+        shared_key = (
+            cache.search_key(
+                workspace_ids=shared_ids,
+                query=q,
+                limit=limit,
+                include_drafts=include_drafts,
+                page_types=page_type,
+                tags=tags,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            if cache_client is not None
+            else None
         )
-    except Exception:
-        logger.exception("shared index search failed for workspaces %s", shared_ids)
-        await session.rollback()
-        shared_hits = []
-        unavailable.extend(shared_ids)
+        shared_hits = (
+            await cache.get_search_results(cache_client, shared_key)
+            if shared_key is not None
+            else None
+        )
+        if shared_hits is None:
+            try:
+                shared_hits = await search.search(
+                    session,
+                    query=q,
+                    workspace_ids=shared_ids,
+                    limit=limit,
+                    include_drafts=include_drafts,
+                    page_types=page_type,
+                    tags=tags,
+                    date_from=date_from,
+                    date_to=date_to,
+                )
+            except Exception:
+                logger.exception("shared index search failed for workspaces %s", shared_ids)
+                await session.rollback()
+                shared_hits = []
+                unavailable.extend(shared_ids)
+            else:
+                if shared_key is not None:
+                    await cache.set_search_results(cache_client, shared_key, shared_hits)
 
-    try:
-        dedicated_hits = await dedicated_index.search(
-            query=q,
-            workspace_ids=list(dedicated_ids),
-            limit=limit,
-            include_drafts=include_drafts,
-            page_types=page_type,
-            tags=tags,
-            date_from=date_from,
-            date_to=date_to,
+        dedicated_key = (
+            cache.search_key(
+                workspace_ids=list(dedicated_ids),
+                query=q,
+                limit=limit,
+                include_drafts=include_drafts,
+                page_types=page_type,
+                tags=tags,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            if cache_client is not None
+            else None
         )
-    except Exception:
-        logger.exception("dedicated index search failed for workspaces %s", dedicated_ids)
-        dedicated_hits = []
-        unavailable.extend(dedicated_ids)
+        dedicated_hits = (
+            await cache.get_search_results(cache_client, dedicated_key)
+            if dedicated_key is not None
+            else None
+        )
+        if dedicated_hits is None:
+            try:
+                dedicated_hits = await dedicated_index.search(
+                    query=q,
+                    workspace_ids=list(dedicated_ids),
+                    limit=limit,
+                    include_drafts=include_drafts,
+                    page_types=page_type,
+                    tags=tags,
+                    date_from=date_from,
+                    date_to=date_to,
+                )
+            except Exception:
+                logger.exception("dedicated index search failed for workspaces %s", dedicated_ids)
+                dedicated_hits = []
+                unavailable.extend(dedicated_ids)
+            else:
+                if dedicated_key is not None:
+                    await cache.set_search_results(cache_client, dedicated_key, dedicated_hits)
+    finally:
+        if cache_client is not None:
+            await cache_client.aclose()
 
     # 04 §4: normalize the dedicated backend's scores, merge, sort, truncate to `limit`
     # only after the two pools are combined — taking `limit` from each independently

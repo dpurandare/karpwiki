@@ -187,3 +187,11 @@ BULK_MOVE_BATCH_SIZE = int(os.environ.get("KARPWIKI_BULK_MOVE_BATCH_SIZE", "100"
 STORAGE_SNAPSHOT_INTERVAL_HOURS = float(
     os.environ.get("KARPWIKI_STORAGE_SNAPSHOT_INTERVAL_HOURS", "24")
 )
+
+# Optional read-through search-result cache (02 §6, phase3-tasklist.md step 76) — off by
+# default: "not required for correctness — purely a latency optimization" (02 §6's own
+# wording), so a reference deployment shouldn't pay a Redis round trip on every search
+# until an operator deliberately opts in. Reuses the same Redis instance the Celery broker
+# already runs (CELERY_BROKER_URL) rather than standing up a second cache-only store.
+CACHE_ENABLED = os.environ.get("KARPWIKI_CACHE_ENABLED", "false").strip().lower() == "true"
+CACHE_TTL_SECONDS = int(os.environ.get("KARPWIKI_CACHE_TTL_SECONDS", "60"))
