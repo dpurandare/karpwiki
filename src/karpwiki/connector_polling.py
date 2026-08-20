@@ -84,7 +84,7 @@ async def poll_connector(
     *,
     connector: Connector,
     secret_resolver: secrets_manager.SecretResolver = secrets_manager.default_secret_resolver(),
-    notification_sink: notifications.NotificationSink = notifications.default_notification_sink(),
+    notification_sink: notifications.NotificationSink | None = None,
 ) -> list[uuid.UUID]:
     """One connector's scheduled run (09 §4). Always updates `last_run_at`/
     `last_run_detail`, whatever the outcome — a poll that finds nothing new is still a
@@ -92,10 +92,15 @@ async def poll_connector(
     created this run (empty unless the outcome is `"ok"`), for the caller to dispatch
     classification against after commit.
 
-    `secret_resolver`/`notification_sink` are real, callable defaults (mirrors
-    `ingestion.py`'s `call: ClassifierCall = call_model` pattern) — neither holds a
-    connection or client, so constructing them once at import time is safe, unlike the
-    OpenSearch/OIDC lesson about module-scope async clients (09 §29)."""
+    `secret_resolver` is a real, callable default (mirrors `ingestion.py`'s `call:
+    ClassifierCall = call_model` pattern) — `EnvSecretResolver` holds no connection or
+    client, so constructing it once at import time is safe. `notification_sink` is NOT a
+    bare default for the same reason anymore, since phase3-tasklist.md step 67: a real
+    `WebhookNotificationSink` holds an `httpx.AsyncClient` bound to whichever event loop is
+    running when it's built, and this function's own callers each run inside their own
+    fresh-per-call `asyncio.run()` loop (09 §34's cross-event-loop bug) — resolved fresh
+    inside the function body instead."""
+    sink = notification_sink or notifications.default_notification_sink()
     adapter = ADAPTERS.get(connector.type)
     if adapter is None:
         connector.last_run_at = datetime.now(UTC)
@@ -127,7 +132,7 @@ async def poll_connector(
         await session.flush()
         # 09 §13/step 55: surfaces via the Notification Service, alongside the Admin
         # Console operational-health signal `last_run_detail` above already is.
-        await notification_sink.notify_connector_auth_failure(connector, str(exc))
+        await sink.notify_connector_auth_failure(connector, str(exc))
         return []
     except Exception as exc:
         logger.warning("connector %s poll failed: %s", connector.connector_id, exc)

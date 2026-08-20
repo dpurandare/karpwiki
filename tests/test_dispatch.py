@@ -156,6 +156,25 @@ async def test_resolving_duplicate_reject_dispatches_nothing(client, session, wo
     assert dispatched["reindex"] == []
 
 
+async def test_resolving_duplicate_reject_notifies_the_submitter(client, session, workspace, caplog):
+    """Step 67 (07 §3): no injectable sink through the REST path — asserted via the real
+    default `LogNotificationSink` (no webhook configured in tests), same as
+    `KARPWIKI_NOTIFICATION_WEBHOOK_URL` being unset makes real everywhere else."""
+    import logging
+
+    await _grant_admin(session, workspace)
+    source, item, _ = await _near_duplicate_pending_review(session, workspace)
+
+    with caplog.at_level(logging.INFO):
+        resp = await client.post(
+            f"/review-items/{item.review_id}/resolve", headers=ADMIN, json={"action": "reject"}
+        )
+    assert resp.json()["pipeline_state"] == "rejected"
+    [record] = [r for r in caplog.records if "source rejected" in r.getMessage()]
+    assert "user:deepak" in record.getMessage()
+    assert str(source.source_id) in record.getMessage()
+
+
 async def test_resolving_duplicate_merge_dispatches_reindex_for_the_target_page(
     client, session, workspace, dispatched, monkeypatch
 ):
@@ -175,6 +194,33 @@ async def test_resolving_duplicate_merge_dispatches_reindex_for_the_target_page(
     assert resp.json()["pipeline_state"] == "ingested"
     assert dispatched["reindex"] == [str(target_page.page_id)]
     assert dispatched["curate_source"] == []
+
+
+async def test_resolving_duplicate_merge_notifies_the_submitter(
+    client, session, workspace, dispatched, monkeypatch, caplog
+):
+    """Step 67 (07 §3) — a distinct "merged" notification, not the generic "ingested" one
+    (that one only ever fires from `tasks._curate`, never reached by a synchronous merge)."""
+    import logging
+
+    await _grant_admin(session, workspace)
+    source, item, target_page = await _near_duplicate_pending_review(session, workspace)
+
+    async def _merge_call(**_kwargs):
+        return MergedPage(body="Merged body.", change_summary="Merged duplicate submission.")
+
+    import karpwiki.ingestion as ingestion_module
+
+    monkeypatch.setattr(ingestion_module, "call_merge_model", _merge_call)
+
+    with caplog.at_level(logging.INFO):
+        resp = await client.post(
+            f"/review-items/{item.review_id}/resolve", headers=ADMIN, json={"action": "merge"}
+        )
+    assert resp.json()["pipeline_state"] == "ingested"
+    [record] = [r for r in caplog.records if "source merged" in r.getMessage()]
+    assert "user:deepak" in record.getMessage()
+    assert target_page.path in record.getMessage()
 
 
 async def test_rollback_dispatches_reindex_for_the_page(client, session, workspace, dispatched):

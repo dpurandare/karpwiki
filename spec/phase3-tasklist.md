@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-66, 70, and 78 done, steps 67-69, 71-77, and 79 not started.**
+**Status (2026-08-20): steps 57-67, 70, and 78 done, steps 68-69, 71-77, and 79 not started.**
 Step 65 was resolved (not built as a standalone primitive) alongside step 70, both done together
 out of numeric sequence, per step 65's own text. Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
@@ -321,16 +321,36 @@ findings that don't need a roadmap step (tracked there instead).
 
 ## 3b — Notification Service, Feedback Loop, Content Quality ([07](07-additional-features-and-roadmap.md) §3-4)
 
-67. **Real Notification Service delivery.** Step 55 (Phase 2) already built the pluggable
-    `NotificationSink` interface and its one real hook (connector auth failure); this step adds a
-    second, real implementation (email and/or chat-platform webhook) swapped in via
-    `default_notification_sink()` with no change to any caller — the same swap-with-no-handler-
-    changes property `Authenticator`/`SecretResolver` already proved out. Two new trigger points
-    beyond the connector hook: admin notification on new/aging review items and SLA breaches
-    (`monitoring.py`'s already-computed `open_items_past_sla`/`p95_breaches_sla`, step 44 —
-    currently dashboard-only/pull-based; this step makes them push-based for the first time), and
-    submitter notification when their own document is ingested, rejected, or merged as a
-    duplicate.
+67. **Real Notification Service delivery.** **Done.** New `WebhookNotificationSink` (one JSON
+    `POST` per event) swapped in via `default_notification_sink()` the moment
+    `KARPWIKI_NOTIFICATION_WEBHOOK_URL` is set, no caller changes — the second real
+    `NotificationSink` implementation, alongside step 55's `LogNotificationSink`. Email is a
+    documented prerequisite gap, not built: no `Principal` anywhere in this schema has a stored
+    email address, confirmed with the user before choosing webhook-only over inventing a new
+    contact-info directory. One shared channel, not per-recipient delivery — every payload names
+    the relevant principal/workspace/source for whoever's watching the channel to read. Two new
+    trigger points: `tasks.notify_sla_breaches` (new hourly `notification-sla-sweep` beat entry)
+    re-reads `monitoring.py`'s already-computed `open_items_past_sla`/`p95_breaches_sla` and
+    pushes whatever's currently breaching — re-alerts every sweep while a breach holds, no
+    suppression (confirmed with the user: matches `monitoring.py`'s own live-snapshot dashboards);
+    and submitter notification on `ingested` (fires from `tasks._curate`, the normal path),
+    `rejected`/`merged` (fire from `api.run_resolve_review_item`'s own post-commit dispatch block,
+    a `duplicate` item's synchronous `reject`/`merge` resolution) — deliberately excluding the
+    Stuck-Pipeline Sweep Detector's batched `abort` (step 64), an operational action on a set of
+    sources, not a content judgment about one submitter's document. **A real, pre-existing latent
+    bug found and fixed along the way**: `connector_polling.poll_connector`'s `notification_sink`
+    default was a bare Python default-parameter expression, evaluated once at import time — safe
+    while the only possible sink was stateless, silently unsafe the moment a real
+    `WebhookNotificationSink` (holding an `httpx.AsyncClient` bound to whichever event loop
+    happened to be running at that moment) could be returned instead; the exact cross-event-loop
+    bug `09` §34 already documents for a different client. Fixed by resolving the sink fresh
+    inside the function body everywhere it's used. 714 tests green (18 new). Live-verified against
+    the real dev stack: stood up a real local webhook receiver, confirmed real container-to-host
+    delivery, ran the real SLA sweep — it correctly posted for a real seeded breach *and* two
+    genuinely pre-existing breaching items from earlier live-verify sessions it found on its own;
+    ran a real connector poll with a bad credential and confirmed the fixed sink posted a real
+    `connector_auth_failure` payload from the actual worker process. See
+    [09](09-implementation-notes.md) §72 for the full writeup.
 
 68. **Search result feedback loop** ([04](04-search-and-retrieval.md) §3-4,
     [09](09-implementation-notes.md) §10). Thumbs-up/down (or similar) per search result, recorded

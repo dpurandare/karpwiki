@@ -121,6 +121,20 @@ MAINTENANCE_STUCK_PIPELINE_INTERVAL_HOURS = float(
 # connectors actually poll, which varies per deployment.
 GIT_CLONE_TIMEOUT_SECONDS = int(os.environ.get("KARPWIKI_GIT_CLONE_TIMEOUT_SECONDS", "60"))
 
+# Real Notification Service delivery (notifications.py, phase3-tasklist.md step 67). Unset
+# (the default) keeps `default_notification_sink()` on `LogNotificationSink`, same swap-on-
+# presence shape `config.OIDC_ISSUER`/`_AUDIENCE` already use for `OidcAuthenticator` — a
+# deployment that sets this gets a real HTTP POST per event with no handler changes anywhere.
+NOTIFICATION_WEBHOOK_URL = os.environ.get("KARPWIKI_NOTIFICATION_WEBHOOK_URL") or None
+NOTIFICATION_WEBHOOK_TIMEOUT_SECONDS = float(
+    os.environ.get("KARPWIKI_NOTIFICATION_WEBHOOK_TIMEOUT_SECONDS", "5.0")
+)
+# SLA-breach admin alert sweep — same "well within an hour, not a day" reasoning as the
+# Stuck-Pipeline Sweep Detector above, not the daily/weekly maintenance-detector cadence.
+NOTIFICATION_SLA_SWEEP_INTERVAL_HOURS = float(
+    os.environ.get("KARPWIKI_NOTIFICATION_SLA_SWEEP_INTERVAL_HOURS", "1")
+)
+
 # Staleness popularity tiering (05 §2, `09` §6's SCHEMA.md `high_traffic_days`/
 # `low_traffic_days` illustrative defaults) — env-overridable like the cadence settings
 # above, even though every other detector threshold in `advisor.py` stays a plain Python

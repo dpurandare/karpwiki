@@ -44,6 +44,7 @@ from . import (
     document_types,
     ingestion,
     monitoring,
+    notifications,
     pipeline,
     query_log,
     ratelimit,
@@ -1885,6 +1886,7 @@ async def run_resolve_review_item(
     review_id: uuid.UUID,
     action: str,
     note: str | None = None,
+    notification_sink: notifications.NotificationSink | None = None,
 ) -> dict[str, Any]:
     """Execute a resolution (06 §1, 05 §1) — the shared Common Gateway logic (01 §2) both
     `POST /review-items/{id}/resolve` and the MCP `wiki_resolve_review_item` tool
@@ -1952,6 +1954,21 @@ async def run_resolve_review_item(
                 merge_page_id = uuid.UUID(entry.detail["target_page_id"])
                 break
 
+    # Step 67 (07 §3): notify the submitter on the two single-source `duplicate` outcomes
+    # this handler completes directly — `reject` and `merge` (a fresh-submission/keep_both/
+    # supersede's own eventual `ingested` notification fires from `tasks._curate` instead,
+    # once that deferred task actually runs). Read here, before commit, so the source (and
+    # merge target) rows are still cheap to fetch off this same session.
+    notify_rejected_source: RawSource | None = None
+    notify_merged_source: RawSource | None = None
+    merge_target_path: str | None = None
+    if item.kind is ReviewKind.duplicate and action == "reject" and state is PipelineState.rejected:
+        notify_rejected_source = await session.get(RawSource, uuid.UUID(item.subject_ref))
+    elif merge_page_id is not None:
+        notify_merged_source = await session.get(RawSource, uuid.UUID(item.subject_ref))
+        target_page = await session.get(WikiPage, merge_page_id)
+        merge_target_path = target_page.path if target_page is not None else str(merge_page_id)
+
     # phase2-tasklist.md step 36: approving a Staleness Detector `reindex` item
     # dispatches reindex for exactly the pages it found (05 §3) — read from the item's
     # own `detail` (advisor.py), the same evidence the admin console would have shown.
@@ -1997,6 +2014,22 @@ async def run_resolve_review_item(
             tasks.classify_source.delay(source_entry["source_id"])
         else:
             tasks.curate_source.delay(source_entry["source_id"])
+    if notify_rejected_source is not None:
+        sink = notification_sink or notifications.default_notification_sink()
+        await sink.notify_source_rejected(
+            submitted_by=notify_rejected_source.submitted_by,
+            filename=notify_rejected_source.filename,
+            source_id=str(notify_rejected_source.source_id),
+            reason=note or "duplicate",
+        )
+    elif notify_merged_source is not None:
+        sink = notification_sink or notifications.default_notification_sink()
+        await sink.notify_source_merged(
+            submitted_by=notify_merged_source.submitted_by,
+            filename=notify_merged_source.filename,
+            source_id=str(notify_merged_source.source_id),
+            target_page_path=merge_target_path,
+        )
     return body
 
 

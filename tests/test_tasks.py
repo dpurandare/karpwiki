@@ -646,3 +646,114 @@ async def test_dispatch_connector_polls_skips_disabled_connectors(session, works
     await tasks._dispatch_connector_polls()
 
     assert dispatched["poll_connector"] == []
+
+
+# --- Real Notification Service delivery (phase3-tasklist.md step 67) ---------------------
+
+
+class _FakeSink:
+    def __init__(self):
+        self.calls = []
+
+    async def notify_review_sla_breach(self, **kwargs):
+        self.calls.append(("review_sla_breach", kwargs))
+
+    async def notify_search_latency_sla_breach(self, **kwargs):
+        self.calls.append(("search_latency_sla_breach", kwargs))
+
+    async def notify_source_ingested(self, **kwargs):
+        self.calls.append(("source_ingested", kwargs))
+
+    async def notify_source_rejected(self, **kwargs):
+        self.calls.append(("source_rejected", kwargs))
+
+    async def notify_source_merged(self, **kwargs):
+        self.calls.append(("source_merged", kwargs))
+
+    async def notify_connector_auth_failure(self, connector, message):
+        self.calls.append(("connector_auth_failure", {"message": message}))
+
+
+def test_maintenance_queue_registers_the_sla_breach_notifier():
+    assert tasks.app.tasks["karpwiki.maintenance.notify_sla_breaches"] is not None
+
+
+def test_beat_schedule_wires_the_sla_breach_notifier():
+    schedule = tasks.app.conf.beat_schedule
+    assert (
+        schedule["notification-sla-sweep"]["task"] == "karpwiki.maintenance.notify_sla_breaches"
+    )
+
+
+async def test_notify_sla_breaches_task_fires_a_review_sla_breach(session, workspace, task_db):
+    from datetime import UTC, datetime, timedelta
+
+    from karpwiki import review
+    from karpwiki.models import ReviewKind
+
+    item = await review.create(
+        session, kind=ReviewKind.duplicate, subject_ref="x", workspace_id=workspace.workspace_id
+    )
+    item.created_at = datetime.now(UTC) - timedelta(hours=10)
+    await session.commit()
+
+    sink = _FakeSink()
+    await tasks._notify_sla_breaches(notification_sink=sink)
+
+    [call] = [c for c in sink.calls if c[0] == "review_sla_breach"]
+    _, kwargs = call
+    assert kwargs["workspace_id"] == workspace.workspace_id
+    assert kwargs["kind"] == "duplicate"
+    assert kwargs["count"] == 1
+    assert kwargs["oldest_age_hours"] >= 10
+
+
+async def test_notify_sla_breaches_task_fires_nothing_when_nothing_breaches(session, workspace, task_db):
+    sink = _FakeSink()
+    await tasks._notify_sla_breaches(notification_sink=sink)
+    assert sink.calls == []
+
+
+async def test_curate_task_notifies_the_submitter_on_ingested(session, workspace, task_db):
+    from karpwiki import objectstore
+
+    source_id = uuid.uuid4()
+    key = f"/_inbox/{source_id}/f.md"
+    objectstore.write_bytes(key, b"runbook text")
+    source = RawSource(
+        source_id=source_id,
+        object_key=key,
+        filename="f.md",
+        content_hash="deadbeefcafe",
+        submitted_by="user:deepak",
+        pipeline_state=PipelineState.submitted,
+    )
+    session.add(source)
+    await session.flush()
+    await session.commit()
+
+    async def _classify_call(**_kwargs):
+        return ClassificationResult(summary="A runbook.", document_type="eng.runbook", confidence=0.9)
+
+    await tasks._classify(source_id, call=_classify_call)
+    await session.commit()
+
+    content = CuratedContent(
+        source_title="Runbook D",
+        source_description="About Runbook D.",
+        source_summary="Steps.",
+        source_key_points=["Steps."],
+        pages=[CuratedPage(page_type="concept", title="Runbook D", tags=["a", "b"], body="Steps.")],
+    )
+
+    async def _curate_call(**_kwargs):
+        return content
+
+    sink = _FakeSink()
+    await tasks._curate(source_id, call=_curate_call, notification_sink=sink)
+
+    [call] = [c for c in sink.calls if c[0] == "source_ingested"]
+    _, kwargs = call
+    assert kwargs["submitted_by"] == "user:deepak"
+    assert kwargs["filename"] == "f.md"
+    assert kwargs["source_id"] == str(source_id)

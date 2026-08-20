@@ -3873,5 +3873,97 @@ returned all rows. Cleaned up the throwaway `live66-ws` workspace afterward.
 these four (and `/search`, already documented) rather than silently falling short of it —
 resolves the gap `phase3-tasklist.md` step 66 named, per the option the spec itself left open.
 
+## 72. Real Notification Service Delivery (Phase 3 Step 67)
+
+Step 55 (Phase 2) built the pluggable `NotificationSink` interface and its one real trigger,
+connector auth failure — deliberately scoped narrowly then, since no tasklist step yet needed the
+other triggers `07` §3 names. This step adds them: a second, real delivery implementation, admin
+alerts on aging review items/SLA breaches, and submitter outcome notifications.
+
+**Delivery is webhook-only — email is a documented prerequisite gap, not built.** Checked before
+building: no `Principal` anywhere in this schema has a stored email address —
+`access_policy.principal` is an opaque string (`user:<id>`, `group:<id>`, `connector:<id>`) with
+no directory behind it. A `WebhookNotificationSink` (one JSON `POST` per event to a configured
+URL) is genuinely deliverable today; a real `SmtpNotificationSink` is not, without first adding an
+entirely new, unplanned contact-info concept. Confirmed with the user before building rather than
+faking an unaddressable send.
+
+**One shared channel, not per-recipient delivery — by necessity, not preference.** With nowhere to
+address a message to a specific principal, every event payload names the relevant
+principal/workspace/source so whoever's watching the receiving channel (a Slack incoming webhook,
+an internal ops endpoint) can read it, rather than pretending to route it to them directly. This
+is the same shape a real deployment's own "post to #wiki-ops" Slack integration would take.
+
+**A real, pre-existing latent bug found and fixed while building this**: `connector_polling.
+poll_connector`'s `notification_sink: NotificationSink = default_notification_sink()` was a bare
+Python default-parameter expression, evaluated once at function-definition time — safe when the
+only possible return was `LogNotificationSink` (genuinely stateless, confirmed via
+`EnvSecretResolver`'s own identical reasoning for `secret_resolver`), but silently unsafe the
+moment `default_notification_sink()` could return a `WebhookNotificationSink` holding a real
+`httpx.AsyncClient`. `09` §34's own documented cross-event-loop bug (`db.engine`'s pooled asyncpg
+connections breaking across each Celery task's fresh `asyncio.run()`) is exactly this failure
+class: a client built once, before any event loop existed, silently reused across every future
+task's own independent loop. Fixed by resolving `notification_sink` fresh *inside* the function
+body (`sink = notification_sink or default_notification_sink()`) in both `poll_connector` and the
+new `tasks._curate`/`tasks._notify_sla_breaches` call sites — never as a bare default again for
+this particular factory. `secret_resolver`'s own default is untouched and still safe;
+`EnvSecretResolver` holds no client.
+
+**Admin SLA-breach alerts re-fire every sweep while a breach is still open — no suppression.**
+Confirmed with the user directly: `monitoring.py`'s own dashboards are already live re-read
+snapshots (not one-shot events), and most real alerting systems behave the same way (a condition
+that's still true keeps firing). Building "already notified" suppression would need a new
+tracking table this step doesn't add. New `tasks._notify_sla_breaches`/`notify_sla_breaches` — a
+global sweep (own `notification-sla-sweep` beat entry, `KARPWIKI_NOTIFICATION_SLA_SWEEP_
+INTERVAL_HOURS`, default hourly, same "well within an hour, not a day" reasoning as the
+Stuck-Pipeline Sweep Detector, step 64) re-reading `monitoring.ingestion_pipeline`'s
+`open_items_past_sla` and `monitoring.search_performance`'s `p95_breaches_sla` — the exact same
+queries `05` §8's dashboards already run, now also pushed rather than only pulled.
+
+**Submitter notifications fire only for the direct, single-source paths a submitter would
+actually recognize as "their document."** A fresh submission (or an admin-resolved `keep_both`/
+`supersede`) reaching `ingested` fires from `tasks._curate`, right after `curate_source` succeeds
+— the natural "after commit" point already used for that task's own reindex dispatch. A
+`duplicate` item's `reject`/`merge` resolution completes synchronously inside
+`api.run_resolve_review_item` (never dispatched to `tasks._curate`), so its own distinct
+`notify_source_rejected`/`notify_source_merged` fire there instead, in the exact same post-commit
+dispatch block that already handles `reindex`/`retry` dispatch for other kinds. **The
+Stuck-Pipeline Sweep Detector's batched `abort` (step 64) deliberately does not fire a submitter
+notification** — named as a scope boundary, not a miss: it rejects a *set* of sources for an
+operational reason (a lost dispatch), not a content judgment about any one submitter's specific
+document, and wiring notifications into that batched, multi-source resolution would have meant
+threading per-source notification state through a different code shape than every other trigger
+here uses.
+
+**Verification**: `tests/test_notifications.py` (rewritten, +13 over the prior 2): every new
+`LogNotificationSink` method logs the right structured line; `WebhookNotificationSink` posts the
+exact right JSON per event via a real `httpx.MockTransport` (same technique `test_auth_oidc.py`
+already established for OIDC's JWKS fetch) for connector-auth-failure, review-SLA-breach,
+source-ingested, and source-merged; a failed delivery is logged and swallowed, never raised into
+the caller; `default_notification_sink()` swaps to `WebhookNotificationSink` the moment the config
+var is set. `tests/test_tasks.py` (+5): task/beat-schedule registration, the SLA sweep fires a
+real `review_sla_breach` call against a real backdated `ReviewItem` (and fires nothing when
+nothing breaches), and `_curate` notifies the submitter on a real ingested run. `tests/
+test_dispatch.py` (+2, through the real REST resolve endpoint, asserting against the real default
+`LogNotificationSink`'s log output — no webhook configured in tests, so no injected seam needed
+for these two): a duplicate reject and a duplicate merge each produce the right log line. Full
+suite: 714 tests green. Live-verified against the real dev stack (no migration — no schema
+changed): rebuilt/restarted the gateway, `worker-curation`, `worker-maintenance`,
+`worker-connector-polling`, and `celery-beat`; confirmed the new beat entry registered live. Stood
+up a real local HTTP server (not committed) as a webhook receiver, confirmed real container-to-
+host connectivity (`host.docker.internal`), then ran `tasks.notify_sla_breaches.apply()` for real
+inside `worker-maintenance` with the webhook env var injected for that one process — it correctly
+posted `review_sla_breach` for a real seeded duplicate item 10 hours old, *and* for two genuinely
+pre-existing open items from earlier live-verify sessions the sweep found on its own, unprompted
+(real evidence it's reading real, current data, not a canned fixture). Separately ran a real
+`poll_connector` against a real connector with an unresolvable `credential_ref` — confirmed the
+fixed, per-call-resolved sink correctly posted a real `connector_auth_failure` payload, proving
+the cross-event-loop fix works in the actual worker process, not just in isolated unit tests.
+Cleaned up the throwaway `live67-ws` workspace and the local receiver process afterward.
+
+**Spec touch-point** (applied): `07` §3's Notification Service (detailed) roadmap item is built —
+the webhook-delivery half; email is a named, documented prerequisite gap (no contact-info
+directory exists), not a silent omission.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

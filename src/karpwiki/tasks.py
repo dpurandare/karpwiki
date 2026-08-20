@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from celery import Celery
 from sqlalchemy import select
 
-from . import advisor, connector_polling, ingestion, pipeline, schema, search
+from . import advisor, connector_polling, ingestion, monitoring, notifications, pipeline, schema, search
 from . import connectors_git  # noqa: F401 — registers "git" into connector_polling.ADAPTERS (step 54)
 from .config import (
     CELERY_BROKER_URL,
@@ -29,6 +29,7 @@ from .config import (
     MAINTENANCE_CONTRADICTION_INTERVAL_HOURS,
     MAINTENANCE_INTERVAL_HOURS,
     MAINTENANCE_STUCK_PIPELINE_INTERVAL_HOURS,
+    NOTIFICATION_SLA_SWEEP_INTERVAL_HOURS,
 )
 from .db import engine, session_scope
 from .models import Connector, ConnectorState, PipelineState, RawSource, Workspace, WorkspaceStatus
@@ -98,6 +99,14 @@ app.conf.beat_schedule = {
         "task": "karpwiki.maintenance.detect_stuck_pipelines",
         "schedule": MAINTENANCE_STUCK_PIPELINE_INTERVAL_HOURS * 3600,
     },
+    # Step 67 (05 §8: "threshold breaches... feed the Notification Service") — re-reads the
+    # same live queries `monitoring.py`'s dashboards already run and pushes whatever's
+    # currently breaching, every run, rather than tracking "already notified" state (no
+    # such tracking exists; confirmed as the deliberate scope for this step, not a gap).
+    "notification-sla-sweep": {
+        "task": "karpwiki.maintenance.notify_sla_breaches",
+        "schedule": NOTIFICATION_SLA_SWEEP_INTERVAL_HOURS * 3600,
+    },
 }
 
 
@@ -139,7 +148,10 @@ async def _classification_summary(session, source_id: uuid.UUID) -> str:
 
 
 async def _curate(
-    source_id: uuid.UUID, *, call: ingestion.CuratorCall = ingestion.call_curator_model
+    source_id: uuid.UUID,
+    *,
+    call: ingestion.CuratorCall = ingestion.call_curator_model,
+    notification_sink: notifications.NotificationSink | None = None,
 ) -> None:
     """09 §21/§33/step 32: acceptance runs dedup, then curate only if dedup clears — one
     task, since both are cheap/synchronous steps of the same "a classified source becomes
@@ -152,8 +164,15 @@ async def _curate(
     `ingesting -> duplicate_check` transition (03 §1's edges don't allow it back out of
     `ingesting`) — curate runs directly instead.
 
-    `call` is the same test-only seam as `_classify`'s."""
+    `call` is the same test-only seam as `_classify`'s. `notification_sink` resolves to
+    `notifications.default_notification_sink()` *inside* the function body, not as a bare
+    default-parameter expression — a real webhook sink holds an `httpx.AsyncClient` bound to
+    whichever event loop is running when it's built, and this task's own `asyncio.run()` is a
+    fresh loop per call (09 §34's cross-event-loop bug, same failure class); a default
+    evaluated once at import time would silently reuse one client across every future loop."""
+    sink = notification_sink or notifications.default_notification_sink()
     page_ids: list[uuid.UUID] = []
+    notify_ingested = False
     async with session_scope() as session:
         source = await session.get(RawSource, source_id)
         if source is None:
@@ -192,8 +211,19 @@ async def _curate(
             # currently pending/stale within this same transaction, so `reindex` (which
             # requires that state) has something real to do for each one.
             page_ids = await search.pending_pages(session, workspace_id=source.workspace_id)
+            # Step 67 (07 §3): the normal "fresh submission" and admin-resolved
+            # keep_both/supersede paths both funnel through here and end at `ingested` —
+            # `merge` is the one duplicate resolution that completes synchronously inside
+            # `api.run_resolve_review_item` instead (never dispatched here), so it fires its
+            # own, distinct "merged" notification there rather than this generic one.
+            notify_ingested = source.pipeline_state is PipelineState.ingested
+        submitted_by, filename = source.submitted_by, source.filename
     for page_id in page_ids:
         reindex.delay(str(page_id))
+    if notify_ingested:
+        await sink.notify_source_ingested(
+            submitted_by=submitted_by, filename=filename, source_id=str(source_id)
+        )
 
 
 async def _reindex(page_id: uuid.UUID) -> None:
@@ -299,6 +329,44 @@ async def _detect_stuck_pipelines() -> None:
     assumes every detector it calls takes one."""
     async with session_scope() as session:
         await advisor.run_stuck_pipeline_detector(session)
+
+
+async def _notify_sla_breaches(
+    notification_sink: notifications.NotificationSink | None = None,
+) -> None:
+    """Phase 3 step 67 (05 §8: "threshold breaches... feed the Notification Service").
+    Re-reads `monitoring.ingestion_pipeline`/`search_performance`'s own already-computed
+    dashboard data (global, `workspace_id=None` — a global sweep, not per-workspace, same
+    reasoning as `_detect_stuck_pipelines` above: one pass over already-aggregated data is
+    simpler than fanning out per workspace for numbers `monitoring.py` already aggregates in
+    one query) and pushes a real notification for whatever's currently breaching — nothing
+    tracks "already notified," so a breach that's still open the next time this runs alerts
+    again (confirmed as this step's deliberate scope, not a gap: `monitoring.py`'s own
+    dashboards are already live re-read snapshots, not one-shot events).
+
+    `notification_sink` resolves fresh inside the body, not as a bare default — same
+    cross-event-loop reasoning `tasks._curate`'s own docstring explains."""
+    sink = notification_sink or notifications.default_notification_sink()
+    async with session_scope() as session:
+        pipeline_health = await monitoring.ingestion_pipeline(session)
+        search_health = await monitoring.search_performance(session)
+
+    breaches_by_group: dict[tuple[str | None, str], list[float]] = {}
+    for entry in pipeline_health["open_items_past_sla"]:
+        breaches_by_group.setdefault((entry["workspace_id"], entry["kind"]), []).append(
+            entry["age_hours"]
+        )
+    for (workspace_id, kind), ages in breaches_by_group.items():
+        await sink.notify_review_sla_breach(
+            workspace_id=workspace_id, kind=kind, count=len(ages), oldest_age_hours=max(ages)
+        )
+
+    if search_health["p95_breaches_sla"]:
+        await sink.notify_search_latency_sla_breach(
+            workspace_id=None,
+            p95_ms=search_health["p95_ms"],
+            sla_ms=search_health["p95_sla_ms"],
+        )
 
 
 async def _active_workspace_ids(session) -> list[str]:
@@ -450,6 +518,11 @@ def detect_staleness_tiered(workspace_id: str) -> None:
 @app.task(name="karpwiki.maintenance.detect_stuck_pipelines")
 def detect_stuck_pipelines() -> None:
     asyncio.run(_run_and_release(_detect_stuck_pipelines()))
+
+
+@app.task(name="karpwiki.maintenance.notify_sla_breaches")
+def notify_sla_breaches() -> None:
+    asyncio.run(_run_and_release(_notify_sla_breaches()))
 
 
 @app.task(name="karpwiki.maintenance.dispatch_daily_detectors")
