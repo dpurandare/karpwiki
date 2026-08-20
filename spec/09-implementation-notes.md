@@ -4229,4 +4229,73 @@ list gains the scan as its fourth step, `03` §5's review-item table and `05` §
 table both gain a `pii_review` row.
 
 ---
+
+## 76. Storage/Usage Trend Data (Phase 3 Step 72)
+
+`05` §8's Storage Utilization dashboard row lists "Object store volume, Metadata DB size, FTS
+index size — per workspace, with trend." Step 44 (phase2-tasklist.md) built the three live
+figures but left `trend: None` as an accepted gap, documented then as "no metrics-history/
+time-series mechanism exists anywhere in this codebase." This step builds that mechanism.
+
+**Design.** A new table, `StorageSnapshot` — one row per workspace per periodic recording run,
+not a global row: `workspace_id`, the same three byte figures `storage_utilization` already
+computes live, and `created_at`. A new beat-scheduled task,
+`karpwiki.maintenance.record_storage_snapshots` (default daily —
+`KARPWIKI_STORAGE_SNAPSHOT_INTERVAL_HOURS`, `config.py`; storage moves slowly day-to-day, unlike
+the hourly stuck-pipeline/SLA sweeps), sweeps every active workspace (`_active_workspace_ids`,
+the same shape `_dispatch_daily_detectors` already uses) and records one snapshot each, then
+purges snapshots older than `DEFAULT_STORAGE_SNAPSHOT_RETENTION_DAYS` (90, same retention-hygiene
+shape as `query_log.RETENTION_DAYS`, no privacy motive here — just unbounded row growth) in the
+same task run rather than a second beat entry, mirroring `purge_older_than`'s own reasoning.
+
+`storage_utilization()`'s live figures and `record_storage_snapshot`'s persisted figures now
+share one `_current_storage_bytes` helper, so the two computations can't drift apart. `trend` is
+a real, ascending-by-date list within `DEFAULT_STORAGE_TREND_DAYS` (30 — longer than the other
+dashboards' `DEFAULT_WINDOW_DAYS` of 7, since a week is too short a window for a slow-moving
+figure like storage to show a meaningful trend): workspace-scoped rows read straight off
+`StorageSnapshot` when `workspace_id` is given; the `workspace_id=None` aggregate case
+date-buckets (`date_trunc('day', created_at)`) and sums across every workspace's own rows at read
+time, rather than ever writing a "global" snapshot row — consistent with `storage_utilization`'s
+own existing optional-scope shape (`document_types.py`'s list functions use the same pattern).
+`trend` is `[]`, not `None`, once the mechanism exists but nothing has been recorded yet — `None`
+used to mean "the mechanism doesn't exist"; conflating "exists, empty" with "doesn't exist" would
+have been a regression. No new REST query param on `GET /metrics/storage-utilization`: `trend_days`
+stays an internal default, matching every other `window_days`-style tuning parameter already kept
+off these endpoints.
+
+No genuine design fork was identified for this step — every choice above follows directly from
+precedent already established elsewhere in this codebase (the per-workspace-per-run snapshot
+shape mirrors `QueryLog`'s row-per-event pattern; the paired record+purge-in-one-task shape
+mirrors step 67's sink-resolution reasoning combined with `query_log.purge_older_than`'s "ride
+along with an existing cadence" note), so this was implemented without an `AskUserQuestion`.
+
+**A pre-existing test needed updating, not just new coverage**: `test_metrics_api.py`'s
+`test_storage_utilization_endpoint_reports_accepted_trend_gap` asserted the old `trend is None`
+gap directly — renamed to `test_storage_utilization_endpoint_reports_empty_trend_before_any_
+snapshot` and updated to assert `trend == []`, since the gap it documented no longer exists.
+
+**Verification**: `tests/test_monitoring.py` (+7): the pre-existing snapshot test updated for
+`trend == []`; empty-before-any-snapshot; `record_storage_snapshot` persists figures matching a
+subsequently-read trend entry; trend is workspace-scoped (a second workspace's snapshot doesn't
+leak in); the aggregate (`workspace_id=None`) case sums across workspaces; a snapshot outside
+`trend_days` is excluded; `purge_storage_snapshots_older_than` removes only expired rows.
+`tests/test_tasks.py` (+4): task registration, beat-schedule wiring, the task body records one
+row per active workspace, and purges expired rows in the same run. Full suite: 772 tests green
+(one pre-existing test above updated for the now-real `trend` field, not a regression).
+
+Live-verified against the real dev stack: applied migration `f406281acc9e` to dev Postgres
+(clean upgrade→downgrade→upgrade round trip — no enum type this time, so none of the earlier
+double-`CREATE TYPE` footgun applies). Rebuilt/restarted `gateway`, `worker-maintenance`, and
+`celery-beat`. Seeded two real throwaway workspaces (`live72-a`, `live72-b`) and ran
+`tasks.record_storage_snapshots.apply()` directly in the live `worker-maintenance` container —
+confirmed one real `storage_snapshot` row per workspace via `psql`. Confirmed the live
+`GET /metrics/storage-utilization?workspace_id=live72-a` endpoint returns a real, non-empty
+`trend` list reflecting the recorded row; confirmed the aggregate (`workspace_id=None`) call
+correctly date-buckets and sums across both workspaces into one entry. Cleaned up all seeded
+throwaway workspace/access-policy/snapshot rows afterward.
+
+**Spec touch-point** (applied): `05` §8's Storage Utilization "trend" column is now real; the
+`trend: None` gap step 44 (phase2-tasklist.md) and its own decision-log entry named is resolved.
+
+---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

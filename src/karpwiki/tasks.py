@@ -30,6 +30,7 @@ from .config import (
     MAINTENANCE_INTERVAL_HOURS,
     MAINTENANCE_STUCK_PIPELINE_INTERVAL_HOURS,
     NOTIFICATION_SLA_SWEEP_INTERVAL_HOURS,
+    STORAGE_SNAPSHOT_INTERVAL_HOURS,
 )
 from .db import engine, session_scope
 from .models import Connector, ConnectorState, PipelineState, RawSource, Workspace, WorkspaceStatus
@@ -106,6 +107,14 @@ app.conf.beat_schedule = {
     "notification-sla-sweep": {
         "task": "karpwiki.maintenance.notify_sla_breaches",
         "schedule": NOTIFICATION_SLA_SWEEP_INTERVAL_HOURS * 3600,
+    },
+    # Step 72 (05 §8's Storage Utilization "trend") — records one snapshot per active
+    # workspace, then purges expired ones in the same run (monitoring.py's
+    # `purge_storage_snapshots_older_than` docstring explains why retention rides along
+    # here rather than getting its own beat entry).
+    "storage-snapshot-recording": {
+        "task": "karpwiki.maintenance.record_storage_snapshots",
+        "schedule": STORAGE_SNAPSHOT_INTERVAL_HOURS * 3600,
     },
 }
 
@@ -403,6 +412,18 @@ async def _active_workspace_ids(session) -> list[str]:
     )
 
 
+async def _record_storage_snapshots() -> None:
+    """Step 72 — global sweep over active workspaces (same `_active_workspace_ids` shape as
+    `_dispatch_daily_detectors` below), recording one `StorageSnapshot` row per workspace
+    per run, then purging expired rows once at the end of the same task rather than a
+    second beat entry."""
+    async with session_scope() as session:
+        workspace_ids = await _active_workspace_ids(session)
+        for workspace_id in workspace_ids:
+            await monitoring.record_storage_snapshot(session, workspace_id=workspace_id)
+        await monitoring.purge_storage_snapshots_older_than(session)
+
+
 async def _dispatch_daily_detectors() -> None:
     """Fired by `KARPWIKI_MAINTENANCE_INTERVAL_HOURS` (default 24h, `config.py`) — the four
     detectors with no LLM cost at detection time. Enumerates active workspaces at fire
@@ -545,6 +566,11 @@ def detect_stuck_pipelines() -> None:
 @app.task(name="karpwiki.maintenance.notify_sla_breaches")
 def notify_sla_breaches() -> None:
     asyncio.run(_run_and_release(_notify_sla_breaches()))
+
+
+@app.task(name="karpwiki.maintenance.record_storage_snapshots")
+def record_storage_snapshots() -> None:
+    asyncio.run(_run_and_release(_record_storage_snapshots()))
 
 
 @app.task(name="karpwiki.maintenance.dispatch_daily_detectors")

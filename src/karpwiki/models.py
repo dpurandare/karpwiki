@@ -13,6 +13,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     ARRAY,
+    BigInteger,
     DateTime,
     Enum,
     Float,
@@ -433,6 +434,30 @@ class LintLog(Base):
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspace.workspace_id"), index=True)
     kind: Mapped[str] = mapped_column(String(64))
     detail: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.clock_timestamp(), index=True
+    )
+
+
+class StorageSnapshot(Base):
+    """Storage/usage trend data (05 §8, phase3-tasklist.md step 72) — the time-series
+    mechanism `monitoring.storage_utilization` was missing since step 44 (`09` §47's own
+    accepted-gap note: "no time-series mechanism exists anywhere in this codebase").
+
+    One row per workspace per periodic run (`tasks.record_storage_snapshots`, new
+    beat-scheduled task) — the same three figures `storage_utilization` already computes
+    live, captured at a point in time so a later query can show how they've moved.
+    `BigInteger`, not `Integer`: a workspace at `06` §6's own upper target (50,000 pages)
+    can plausibly exceed a 32-bit byte count.
+    """
+
+    __tablename__ = "storage_snapshot"
+
+    snapshot_id: Mapped[uuid.UUID] = _uuid_pk()
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspace.workspace_id"), index=True)
+    object_store_bytes: Mapped[int] = mapped_column(BigInteger)
+    metadata_db_bytes_approx: Mapped[int] = mapped_column(BigInteger)
+    fts_index_bytes_approx: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.clock_timestamp(), index=True
     )

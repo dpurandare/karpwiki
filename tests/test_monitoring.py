@@ -217,7 +217,67 @@ async def test_storage_utilization_reports_snapshot(session, workspace):
     assert result["metadata_db_bytes_approx"] > 0
     assert result["fts_index_bytes_approx"] > 0
     assert result["object_store_bytes"] > 0
-    assert result["trend"] is None
+    assert result["trend"] == []
+
+
+async def test_storage_utilization_trend_empty_before_any_snapshot(session, workspace):
+    """Empty, not `None` — `None` used to mean the mechanism didn't exist at all
+    (phase3-tasklist.md step 72); now it means the mechanism exists but no scheduled run
+    has recorded anything yet."""
+    result = await monitoring.storage_utilization(session, workspace_id=workspace.workspace_id)
+    assert result["trend"] == []
+
+
+async def test_record_storage_snapshot_persists_current_figures(session, workspace):
+    await _page(session, workspace, title="Snap Page", body="y" * 300, indexed=True)
+
+    snapshot = await monitoring.record_storage_snapshot(session, workspace_id=workspace.workspace_id)
+    assert snapshot.workspace_id == workspace.workspace_id
+    assert snapshot.metadata_db_bytes_approx > 0
+    assert snapshot.object_store_bytes >= 0
+
+    result = await monitoring.storage_utilization(session, workspace_id=workspace.workspace_id)
+    [entry] = result["trend"]
+    assert entry["metadata_db_bytes_approx"] == snapshot.metadata_db_bytes_approx
+
+
+async def test_storage_utilization_trend_scoped_by_workspace(session, workspace, other_workspace):
+    await monitoring.record_storage_snapshot(session, workspace_id=workspace.workspace_id)
+    await monitoring.record_storage_snapshot(session, workspace_id=other_workspace.workspace_id)
+
+    result = await monitoring.storage_utilization(session, workspace_id=workspace.workspace_id)
+    assert len(result["trend"]) == 1
+
+
+async def test_storage_utilization_trend_aggregates_across_workspaces(session, workspace, other_workspace):
+    await monitoring.record_storage_snapshot(session, workspace_id=workspace.workspace_id)
+    await monitoring.record_storage_snapshot(session, workspace_id=other_workspace.workspace_id)
+
+    result = await monitoring.storage_utilization(session)
+    assert len(result["trend"]) == 1
+    assert result["trend"][0]["object_store_bytes"] >= 0
+
+
+async def test_storage_utilization_trend_excludes_snapshots_outside_window(session, workspace):
+    snapshot = await monitoring.record_storage_snapshot(session, workspace_id=workspace.workspace_id)
+    snapshot.created_at = datetime.now(UTC) - timedelta(days=monitoring.DEFAULT_STORAGE_TREND_DAYS + 1)
+    await session.flush()
+
+    result = await monitoring.storage_utilization(session, workspace_id=workspace.workspace_id)
+    assert result["trend"] == []
+
+
+async def test_purge_storage_snapshots_older_than_removes_expired_rows(session, workspace):
+    old = await monitoring.record_storage_snapshot(session, workspace_id=workspace.workspace_id)
+    old.created_at = datetime.now(UTC) - timedelta(days=200)
+    recent = await monitoring.record_storage_snapshot(session, workspace_id=workspace.workspace_id)
+    await session.flush()
+
+    purged = await monitoring.purge_storage_snapshots_older_than(session, days=90)
+    assert purged == 1
+
+    result = await monitoring.storage_utilization(session, workspace_id=workspace.workspace_id, trend_days=365)
+    assert [e["object_store_bytes"] for e in result["trend"]] == [recent.object_store_bytes]
 
 
 # --- review_queue_health ----------------------------------------------------------------------

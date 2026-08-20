@@ -85,7 +85,11 @@ async def test_search_performance_endpoint_reports_accepted_cache_gap(client, se
     assert r.json()["cache_hit_rate"] is None
 
 
-async def test_storage_utilization_endpoint_reports_accepted_trend_gap(client, session, workspace):
+async def test_storage_utilization_endpoint_reports_empty_trend_before_any_snapshot(
+    client, session, workspace
+):
+    """Step 72 replaced the `trend: None` gap with a real (if still-empty, until the first
+    scheduled snapshot run) list — see monitoring.py's module docstring."""
     session.add(AccessPolicy(workspace_id=workspace.workspace_id, principal="avery", role=Role.admin))
     await session.commit()
 
@@ -93,4 +97,4 @@ async def test_storage_utilization_endpoint_reports_accepted_trend_gap(client, s
         "/metrics/storage-utilization", headers=ADMIN, params={"workspace_id": workspace.workspace_id}
     )
     assert r.status_code == 200
-    assert r.json()["trend"] is None
+    assert r.json()["trend"] == []

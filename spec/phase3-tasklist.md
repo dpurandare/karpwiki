@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-71 and 78 done, steps 72-77 and 79 not started.**
+**Status (2026-08-20): steps 57-72 and 78 done, steps 73-77 and 79 not started.**
 Step 65 was resolved (not built as a standalone primitive) alongside step 70, both done together
 out of numeric sequence, per step 65's own text. Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
@@ -470,12 +470,29 @@ findings that don't need a roadmap step (tracked there instead).
 
 ## 3d — Platform Operations: Analytics, Bulk Import/Export, Templates ([07](07-additional-features-and-roadmap.md) §5)
 
-72. **Storage/usage trend data** ([05](05-admin-backend-and-maintenance.md) §8). A time-series
-    mechanism for the "with trend" half of the Storage Utilization dashboard `monitoring.py`
-    already built (step 44) but left `None` for lack of one — "no time-series mechanism exists
-    anywhere in this codebase," `09` §47's own accepted-gap note, documented rather than faked at
-    the time. The minimal real prerequisite for step 73 to have actual historical data to show,
-    not just a point-in-time snapshot re-labeled as a trend.
+72. **Storage/usage trend data** ([05](05-admin-backend-and-maintenance.md) §8). **Done.** A
+    time-series mechanism for the "with trend" half of the Storage Utilization dashboard
+    `monitoring.py` already built (step 44) but left `None` for lack of one — "no time-series
+    mechanism exists anywhere in this codebase," `09` §47's own accepted-gap note, documented
+    rather than faked at the time. New `StorageSnapshot` table (migration `f406281acc9e`, no enum
+    — no double-`CREATE TYPE` footgun to worry about this time): one row per workspace per
+    recording run, never a global row. New beat-scheduled `record_storage_snapshots` task
+    (default daily, `KARPWIKI_STORAGE_SNAPSHOT_INTERVAL_HOURS`) sweeps active workspaces, records
+    a snapshot each, then purges rows past 90 days' retention in the same run. `storage_
+    utilization()`'s live figures and the recorded snapshot now share one `_current_storage_bytes`
+    helper, so they can't drift apart; `trend` is a real ascending-by-date list — workspace-scoped
+    rows read directly, the `workspace_id=None` case date-buckets and sums across every
+    workspace's own rows at read time rather than ever writing a "global" row. `trend` is `[]`,
+    not `None`, once the mechanism exists but nothing's been recorded yet. No genuine design fork
+    identified — every choice follows established precedent (`QueryLog`'s row-per-event shape,
+    step 67's paired record+purge-in-one-task reasoning), so no `AskUserQuestion` was needed this
+    step. 772 tests green (11 new; one pre-existing test updated for the now-real `trend` field).
+    Live-verified against the real dev stack: applied the migration with a clean upgrade→
+    downgrade→upgrade round trip, ran the real task in the live `worker-maintenance` container
+    against two real throwaway workspaces, confirmed real `storage_snapshot` rows via `psql`, and
+    confirmed the live `GET /metrics/storage-utilization` endpoint returns a real non-empty
+    `trend` both workspace-scoped and aggregated across workspaces. See
+    [09](09-implementation-notes.md) §76 for the full writeup.
 
 73. **Analytics dashboards.** Usage trends over time (search volume, submission volume, active
     workspaces) — building on step 72's trend data and the feedback signal from step 68.

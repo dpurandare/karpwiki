@@ -3,27 +3,33 @@ the Admin Console. `00` §1 scopes this repo to "admin console scope, not pixel-
 design," so this module (and its `GET /metrics/*` endpoints in `api.py`) is the backend
 data a real dashboard would render, not a UI.
 
-Two accepted gaps, documented here rather than silently missing:
+One accepted gap, documented here rather than silently missing:
 
 - **Cache hit rate** (05 §8's Search Performance row): `02` §6's optional cache layer was
   never built in this implementation — flagged roadmap-only since phase2-tasklist.md step
   34's writeup. `search_performance()` reports `cache_hit_rate: None` rather than a fake
   number.
-- **Storage trend** (05 §8's Storage Utilization row): no metrics-history/time-series
-  mechanism exists anywhere in this codebase. `storage_utilization()` reports a current
-  snapshot only.
 
-`index_health`/`ingestion_pipeline`/`search_performance`/`review_queue_health` all accept
-an optional `workspace_id` — scoped to one workspace when given, aggregated across every
-workspace otherwise, the same optional-scope shape `document_types.py`'s list functions
-already use. `queue_depths()` is the one exception: a Celery queue mixes every workspace's
-work, so per-workspace depth isn't a coherent concept — it's reported globally.
+**Storage trend** (05 §8's Storage Utilization row) was the same shape of gap — "no
+metrics-history/time-series mechanism exists anywhere in this codebase" — until
+phase3-tasklist.md step 72 built one: `StorageSnapshot` (a new table),
+`record_storage_snapshot`/`purge_storage_snapshots_older_than` below, and a new
+beat-scheduled `tasks.record_storage_snapshots` task. `storage_utilization()`'s `trend`
+field is real now — an ascending-by-date list of past snapshots, empty (not `None`) until
+the first scheduled run has actually recorded one.
+
+`index_health`/`ingestion_pipeline`/`search_performance`/`review_queue_health`/
+`storage_utilization` all accept an optional `workspace_id` — scoped to one workspace when
+given, aggregated across every workspace otherwise, the same optional-scope shape
+`document_types.py`'s list functions already use. `queue_depths()` is the one exception: a
+Celery queue mixes every workspace's work, so per-workspace depth isn't a coherent concept
+— it's reported globally.
 """
 
 from datetime import UTC, datetime, timedelta
 
 import redis.asyncio as redis
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import objectstore
@@ -37,6 +43,7 @@ from .models import (
     ReviewItem,
     ReviewKind,
     ReviewStatus,
+    StorageSnapshot,
     WikiPage,
 )
 
@@ -47,6 +54,14 @@ DEFAULT_REVIEW_SLA_HOURS = 4
 DEFAULT_SEARCH_LATENCY_SLA_MS = 1000  # 06 §1: p95 < 1s
 DEFAULT_STUCK_THRESHOLD_HOURS = 24
 DEFAULT_WINDOW_DAYS = 7
+# Storage changes slowly day-to-day — a week (DEFAULT_WINDOW_DAYS, tuned for the faster-
+# moving ingestion/search dashboards) is too short a window to show a meaningful trend.
+DEFAULT_STORAGE_TREND_DAYS = 30
+# Same retention-hygiene shape as query_log.RETENTION_DAYS (02 §5, 09 §8) — no privacy
+# motive here (just aggregate byte counts), but unbounded growth of a row-per-workspace-
+# per-run table isn't free either, and 90 days comfortably covers this module's own trend
+# window above.
+DEFAULT_STORAGE_SNAPSHOT_RETENTION_DAYS = 90
 
 
 async def queue_depths() -> dict[str, int]:
@@ -231,13 +246,19 @@ async def search_performance(
     }
 
 
-async def storage_utilization(session: AsyncSession, *, workspace_id: str | None = None) -> dict:
-    """05 §8's Storage Utilization dashboard — a current snapshot only (this module's
-    docstring names the trend gap). Metadata DB size and FTS index size are *content-byte*
-    approximations (`octet_length`/`pg_column_size` sums over the relevant columns), not
-    real Postgres storage accounting (which also counts indexes, TOAST, WAL, free space) —
-    an exact per-workspace breakdown of that isn't possible, since Postgres sizes whole
-    tables, not workspace-filtered row subsets."""
+async def _current_storage_bytes(
+    session: AsyncSession, *, workspace_id: str | None = None
+) -> tuple[int, int, int]:
+    """The same three content-byte approximations `storage_utilization` reports live —
+    shared with `record_storage_snapshot` (phase3-tasklist.md step 72) so both read the
+    identical computation rather than risking two copies drifting apart. Metadata DB size
+    and FTS index size are *content-byte* approximations (`octet_length`/`pg_column_size`
+    sums over the relevant columns), not real Postgres storage accounting (which also
+    counts indexes, TOAST, WAL, free space) — an exact per-workspace breakdown of that
+    isn't possible, since Postgres sizes whole tables, not workspace-filtered row subsets.
+
+    Returns `(object_store_bytes, metadata_db_bytes_approx, fts_index_bytes_approx)`.
+    """
     ws_filter = "WHERE p.workspace_id = :workspace_id" if workspace_id else ""
     params = {"workspace_id": workspace_id} if workspace_id else {}
 
@@ -262,12 +283,109 @@ async def storage_utilization(session: AsyncSession, *, workspace_id: str | None
         )
     ).scalar_one()
     object_store_bytes = objectstore.size_bytes(f"/{workspace_id}" if workspace_id else "/")
+    return object_store_bytes, db_bytes, fts_bytes
+
+
+async def record_storage_snapshot(session: AsyncSession, *, workspace_id: str) -> StorageSnapshot:
+    """One point-in-time row for the trend `storage_utilization` reads back
+    (phase3-tasklist.md step 72) — always workspace-scoped, never a "global" row.
+    `tasks.record_storage_snapshots` calls this once per active workspace on a recurring
+    schedule; a global aggregate trend (`storage_utilization(workspace_id=None)`) is
+    computed by date-bucketing across every workspace's own rows at read time instead of
+    ever writing one."""
+    object_store_bytes, db_bytes, fts_bytes = await _current_storage_bytes(
+        session, workspace_id=workspace_id
+    )
+    snapshot = StorageSnapshot(
+        workspace_id=workspace_id,
+        object_store_bytes=object_store_bytes,
+        metadata_db_bytes_approx=db_bytes,
+        fts_index_bytes_approx=fts_bytes,
+    )
+    session.add(snapshot)
+    await session.flush()
+    return snapshot
+
+
+async def purge_storage_snapshots_older_than(
+    session: AsyncSession, *, days: int = DEFAULT_STORAGE_SNAPSHOT_RETENTION_DAYS
+) -> int:
+    """Called from `tasks.record_storage_snapshots` itself rather than getting its own
+    beat entry — a small housekeeping step riding along with the task that already runs on
+    the right cadence, same reasoning `query_log.purge_older_than`'s own docstring gives
+    for why nothing schedules it separately."""
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    result = await session.execute(delete(StorageSnapshot).where(StorageSnapshot.created_at < cutoff))
+    await session.flush()
+    return result.rowcount or 0
+
+
+async def storage_utilization(
+    session: AsyncSession, *, workspace_id: str | None = None, trend_days: int = DEFAULT_STORAGE_TREND_DAYS
+) -> dict:
+    """05 §8's Storage Utilization dashboard. `trend` is a real, ascending-by-date list of
+    past `StorageSnapshot` rows within `trend_days` — workspace-scoped when `workspace_id`
+    is given, date-bucketed sums across every workspace otherwise (the same scoped/
+    aggregate shape every other dashboard here already has, applied to the trend query
+    too). Empty, not `None`, until the first scheduled snapshot run has actually recorded
+    one — `None` meant "the mechanism doesn't exist"; an empty list correctly means "it
+    exists, nothing recorded yet"."""
+    object_store_bytes, db_bytes, fts_bytes = await _current_storage_bytes(
+        session, workspace_id=workspace_id
+    )
+    cutoff = datetime.now(UTC) - timedelta(days=trend_days)
+
+    if workspace_id:
+        rows = (
+            await session.execute(
+                select(
+                    StorageSnapshot.created_at,
+                    StorageSnapshot.object_store_bytes,
+                    StorageSnapshot.metadata_db_bytes_approx,
+                    StorageSnapshot.fts_index_bytes_approx,
+                )
+                .where(StorageSnapshot.workspace_id == workspace_id, StorageSnapshot.created_at >= cutoff)
+                .order_by(StorageSnapshot.created_at)
+            )
+        ).all()
+        trend = [
+            {
+                "date": created_at.date().isoformat(),
+                "object_store_bytes": obj,
+                "metadata_db_bytes_approx": db,
+                "fts_index_bytes_approx": fts,
+            }
+            for created_at, obj, db, fts in rows
+        ]
+    else:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT date_trunc('day', created_at) AS day, "
+                    "       SUM(object_store_bytes) AS object_store_bytes, "
+                    "       SUM(metadata_db_bytes_approx) AS metadata_db_bytes_approx, "
+                    "       SUM(fts_index_bytes_approx) AS fts_index_bytes_approx "
+                    "FROM storage_snapshot WHERE created_at >= :cutoff "
+                    "GROUP BY day ORDER BY day"
+                ),
+                {"cutoff": cutoff},
+            )
+        ).all()
+        trend = [
+            {
+                "date": r.day.date().isoformat(),
+                "object_store_bytes": r.object_store_bytes,
+                "metadata_db_bytes_approx": r.metadata_db_bytes_approx,
+                "fts_index_bytes_approx": r.fts_index_bytes_approx,
+            }
+            for r in rows
+        ]
 
     return {
         "object_store_bytes": object_store_bytes,
         "metadata_db_bytes_approx": db_bytes,
         "fts_index_bytes_approx": fts_bytes,
-        "trend": None,
+        "trend": trend,
     }
 
 

@@ -714,6 +714,53 @@ async def test_notify_sla_breaches_task_fires_nothing_when_nothing_breaches(sess
     assert sink.calls == []
 
 
+def test_maintenance_queue_registers_the_storage_snapshot_recorder():
+    assert tasks.app.tasks["karpwiki.maintenance.record_storage_snapshots"] is not None
+
+
+def test_beat_schedule_wires_the_storage_snapshot_recorder():
+    schedule = tasks.app.conf.beat_schedule
+    assert (
+        schedule["storage-snapshot-recording"]["task"]
+        == "karpwiki.maintenance.record_storage_snapshots"
+    )
+
+
+async def test_record_storage_snapshots_task_records_one_row_per_active_workspace(
+    session, workspace, other_workspace, task_db
+):
+    from sqlalchemy import select
+
+    from karpwiki.models import StorageSnapshot
+
+    await session.commit()
+
+    await tasks._record_storage_snapshots()
+
+    rows = (await session.execute(select(StorageSnapshot))).scalars().all()
+    assert {r.workspace_id for r in rows} == {workspace.workspace_id, other_workspace.workspace_id}
+
+
+async def test_record_storage_snapshots_task_purges_expired_rows(session, workspace, task_db):
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
+
+    from karpwiki import monitoring
+    from karpwiki.models import StorageSnapshot
+
+    await session.commit()
+
+    stale = await monitoring.record_storage_snapshot(session, workspace_id=workspace.workspace_id)
+    stale.created_at = datetime.now(UTC) - timedelta(days=200)
+    await session.commit()
+
+    await tasks._record_storage_snapshots()
+
+    rows = (await session.execute(select(StorageSnapshot))).scalars().all()
+    assert stale.snapshot_id not in {r.snapshot_id for r in rows}
+
+
 async def test_curate_task_notifies_the_submitter_on_ingested(session, workspace, task_db):
     from karpwiki import objectstore
 

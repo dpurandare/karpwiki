@@ -179,3 +179,11 @@ RATE_LIMIT_GENERAL_PER_WORKSPACE = int(os.environ.get("KARPWIKI_RATE_LIMIT_GENER
 # Taxonomy bulk-move batch size (bulk_move.py, 09 §11/§30) — larger batches finish an
 # admin's move faster but hold a longer-running transaction per batch; deployment-tunable.
 BULK_MOVE_BATCH_SIZE = int(os.environ.get("KARPWIKI_BULK_MOVE_BATCH_SIZE", "100"))
+
+# Storage snapshot recording (monitoring.py/tasks.py, phase3-tasklist.md step 72) — same
+# "well within a day" cadence category as the daily/weekly maintenance detectors, not the
+# hourly stuck-pipeline/SLA sweeps above: storage changes slowly, so a daily snapshot is
+# plenty to build a meaningful trend.
+STORAGE_SNAPSHOT_INTERVAL_HOURS = float(
+    os.environ.get("KARPWIKI_STORAGE_SNAPSHOT_INTERVAL_HOURS", "24")
+)
