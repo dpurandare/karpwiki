@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-70 and 78 done, steps 71-77 and 79 not started.**
+**Status (2026-08-20): steps 57-71 and 78 done, steps 72-77 and 79 not started.**
 Step 65 was resolved (not built as a standalone primitive) alongside step 70, both done together
 out of numeric sequence, per step 65's own text. Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
@@ -442,10 +442,31 @@ findings that don't need a roadmap step (tracked there instead).
     per this step's own instruction — see that step's own entry. See
     [09](09-implementation-notes.md) §70 for the full writeup.
 
-71. **PII detection at ingestion.** Classifier (or a dedicated scanner) flags sources containing
-    PII; a new `pii_review` review-item kind blocks ingestion until an admin clears it, mirroring
-    the existing `duplicate`/`classification` review-item shapes (`03` §3-4) rather than inventing
-    a new resolution model.
+71. **PII detection at ingestion.** **Done.** A dedicated regex scanner (new `pii.py`, pure — no
+    I/O), not the Classifier's LLM call — same mechanical-signal-over-model-call reasoning as
+    step 69, plus a real second benefit: flagged content is never sent to a third-party model.
+    Category scope confirmed with the user: `ssn`, `credit_card` (Luhn-validated), `credential`
+    (password/passwd/pwd-labeled), `secret_key` (known provider formats, PEM headers, or a
+    labeled api_key/secret_key/access_token) — email/phone deliberately excluded, too common in
+    ordinary business writing to be a useful hard-block signal from a bare regex. New
+    `ReviewKind.pii_review` (migration `f27a7aa73ce2`), resolved `acknowledge`/`reject` — mirrors
+    `classification`/`duplicate`'s existing action shape, no new resolution model. Fits the
+    existing state machine with zero `pipeline.py` changes: the scan runs inside
+    `classify_source`, in the exact pre-step position `03` §3 already had room for, blocking via
+    the same `classifying -> pending_review` edge the confidence gate already uses.
+    **Two real bugs found and fixed** by actually re-running the resolved flow, not assumed
+    working: (1) pre-transitioning to `classifying` in the resolver collided with
+    `classify_source`'s own unconditional opening transition on re-dispatch (`classifying ->
+    classifying` isn't legal) — fixed by making no transition there and having `api.py`'s
+    dispatch check kind/action directly; (2) re-running classification against the *same*
+    PII-containing payload would otherwise re-detect and re-block forever — fixed with
+    `_pii_already_acknowledged`, skipping the scan once this exact source has a resolved
+    `acknowledge` on record. 762 tests green (19 new). Live-verified against the real dev stack:
+    a real submission with a credential pattern blocked *before* reaching the Classifier, real
+    `acknowledge` through the live REST API re-dispatched classification in the real worker and
+    the source reached `classified` against the identical content with no re-block; a real SSN
+    submission was flagged and `reject`ed for real; an ordinary submission classified through
+    unaffected. See [09](09-implementation-notes.md) §75 for the full writeup.
 
 ## 3d — Platform Operations: Analytics, Bulk Import/Export, Templates ([07](07-additional-features-and-roadmap.md) §5)
 

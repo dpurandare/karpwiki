@@ -2082,6 +2082,14 @@ async def run_resolve_review_item(
     await session.commit()
     if state in (PipelineState.classified, PipelineState.ingesting):
         tasks.curate_source.delay(item.subject_ref)
+    elif item.kind is ReviewKind.pii_review and action == "acknowledge":
+        # Step 71 (07 §2): the source stays at `pending_review` (`resolve_pii_review`
+        # makes no transition of its own — see its own docstring for why) — re-dispatching
+        # here is what actually moves it, via `classify_source`'s own `pending_review ->
+        # classifying` first line, the same "admin retries a failed classification" shape
+        # 03 §1's own state diagram already names. Checked by kind/action, not `state`
+        # (which is still `pending_review` at this point, correctly).
+        tasks.classify_source.delay(item.subject_ref)
     elif merge_page_id is not None:
         tasks.reindex.delay(str(merge_page_id))
     for page_id in reindex_page_ids:

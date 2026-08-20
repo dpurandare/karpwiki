@@ -117,6 +117,11 @@ yields a second, independent routing signal for free.
    central taxonomy's labels and keywords ([01](01-architecture-and-data-model.md) §3) — the same
    static-table lookup the query path uses in [04](04-search-and-retrieval.md) §4, applied at
    ingest. Cheap, provider-neutral, and may return no match.
+4. Scan for **PII** ([07](07-additional-features-and-roadmap.md) §2: `ssn`, `credit_card`,
+   `credential`, `secret_key` — a dedicated pattern-based scanner, not the LLM). If found, skip the
+   Classifier call entirely — never send flagged content to a third-party model, and never spend
+   the call on a source that's about to block anyway — and go straight to `pending_review` with a
+   `kind=pii_review` item (§5 below).
 
 **Classifier (LLM-based, async worker):**
 
@@ -223,6 +228,7 @@ wrong before `ingesting` completes, and — once classification has run — to s
 | `submission` | Every new `raw_source` | No | `acknowledge` (informational) |
 | `classification` | Classifier confidence below threshold | Yes (`pending_review`) | None — admin must choose a type |
 | `duplicate` | Exact/near/version-supersede match found (§4) | Yes (`pending_review`) | None — admin must choose an action (`supersede` pre-filled for version-supersede) |
+| `pii_review` | Dedicated scanner flags PII/credential content (§3 step 4, [07](07-additional-features-and-roadmap.md) §2) | Yes (`pending_review`) | None — admin chooses `acknowledge` (re-enters classification) or `reject` |
 
 ## 6. Ingestion ("Ingest" Operation)
 

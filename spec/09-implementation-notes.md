@@ -4143,5 +4143,90 @@ maintenance worker, correctly ordered the worse one first in the raised review i
 **Spec touch-point** (applied): `07` §4's Content quality scoring roadmap item is built; `02` §5's
 `lint_log` row is no longer named-but-unbuilt — this section records it as closed.
 
+## 75. PII Detection at Ingestion (Phase 3 Step 71)
+
+`07` §2 offers "Classifier (or a dedicated scanner)" as interchangeable detection mechanisms, and
+names a new `pii_review` review-item kind blocking ingestion "rather than inventing a new
+resolution model." Neither the specific PII categories nor the resolution actions were named —
+both were real, consequential choices, confirmed with the user before building.
+
+**A dedicated regex scanner, not the Classifier's LLM call** — same reasoning `curate.
+score_content_quality` (step 69) already used: a mechanical signal answers the question reliably
+without spending a model call, and here it has a second real benefit — PII/credential content is
+never sent to a third-party model in the first place, since the scan runs before the Classifier's
+own LLM call.
+
+**Category scope, confirmed with the user rather than the first-proposed default**: `ssn`,
+`credit_card` (Luhn-validated — a bare 13-19-digit shape alone false-positives on phone numbers,
+tracking numbers, and order ids far too often to mean anything), `credential` (a
+`password`/`passwd`/`pwd`-labeled assignment), `secret_key` (a well-known provider key format —
+AWS, GitHub, Slack — a PEM private-key header, or an `api_key`/`secret_key`/`access_token`-labeled
+assignment). Email and phone are a deliberate, documented exclusion in every version of this
+question — both are ubiquitous in ordinary business writing (signatures, on-call contact info) and
+would false-positive block routine documents far too often from a bare regex to be a useful
+hard-block signal. New `pii.py` module — pure, no I/O, `classify.py`/`dedup.py`'s own convention.
+
+**Resolution mirrors `classification`/`duplicate`'s existing two-action shape**: `acknowledge`
+(the flagged content is expected/acceptable — proceed) or `reject` (decline the source outright,
+reusing `reject_source` unchanged) — not a new redaction/content-editing feature, which the step's
+own "rather than inventing a new resolution model" text explicitly discourages.
+
+**Fits the existing state machine with zero `pipeline.py` changes** — the scan runs inside
+`classify_source`, in the exact position `03` §3's own pre-step list already has room for (a
+fourth deterministic check alongside `content_shape`/`artifact_identity`/lexical match), and
+blocks via the *same* `classifying -> pending_review` edge the confidence/lexical-mismatch gate
+already uses just below it. `acknowledge` resumes via `pending_review -> classifying` — already
+legal (`03` §1's "admin retries a failed classification" edge) — rather than resuming into
+`classified` directly, since the scan blocks *before* the Classifier ever ran, so no
+`document_type`/workspace exists yet to resume into.
+
+**Two real bugs found and fixed by actually re-running the resolved flow, not assumed working
+from the design.** (1) `resolve_pii_review`'s first draft transitioned the source to
+`classifying` itself before re-dispatching `classify_source` — but `classify_source`'s own first
+line unconditionally transitions `-> classifying` too, and `classifying -> classifying` is not a
+legal self-edge (`pipeline.TRANSITIONS`). `_RESUME_FROM_REVIEW`'s `pending_review -> classifying`
+edge was itself dormant/never-exercised before this step (the same finding step 64 made about
+its sibling edges) — this is the first code to actually walk it, and doing so surfaced the
+double-transition bug immediately. Fixed by having `resolve_pii_review` make *no* transition of
+its own for `acknowledge` (the source stays `pending_review`); `api.run_resolve_review_item`'s
+dispatch now checks `item.kind`/`action` directly (matching the style its own duplicate-merge
+branch already uses) rather than relying on the returned `PipelineState`, which correctly stays
+`pending_review` at that point. (2) With that fixed, re-running `classify_source` on the *same*
+PII-containing payload immediately re-detected the same content and re-blocked — an unbreakable
+acknowledge → reclassify → reblock loop that would have made `acknowledge` unable to ever actually
+let a genuinely PII-containing document through. Fixed with `_pii_already_acknowledged`: the scan
+is skipped once this exact source already has a *resolved* `pii_review` item with
+`resolved_action=acknowledge` on record — reusing the resolved `ReviewItem` itself as the audit
+trail for "an admin reviewed this and accepted the risk," rather than adding new state to track
+it. Checked per-source, confirmed not to leak across sources.
+
+**A related, pre-existing gap noticed but not fixed here**: `05` §1's Review Queue table still
+doesn't list `stuck` (step 64) either — this step's own `pii_review` row was added alongside it,
+but `stuck`'s own gap predates this step and is a separate, small drive-by fix left for whoever
+next touches that table, not silently bundled into this one.
+
+**Verification**: `tests/test_pii.py` (new, 11 tests): each category detected, Luhn validation
+both directions, email/phone deliberately not detected, multiple categories reported together
+sorted. `tests/test_placeholder.py` (+6): the scanner blocks *without* calling the Classifier
+(a call that raises if invoked proves this), `pii_review`'s `workspace_id` stays unset,
+`acknowledge` genuinely lets re-classification complete against the *same* payload (the regression
+test for bug #2), `reject` works, wrong-kind/wrong-action are rejected, and acknowledgment doesn't
+leak across a second source with the same content. `tests/test_dispatch.py` (+2): `acknowledge`
+dispatches `classify_source` (checked through the real REST endpoint, not a direct call), `reject`
+dispatches nothing. Full suite: 762 tests green. Live-verified against the real dev stack: a real
+submission containing `password: hunter2` through the live gateway landed at `pending_review` with
+a real `pii_review` item (`categories: ["credential"]`) and `workspace_id: null`, *without* ever
+reaching the Classifier; resolved `acknowledge` through the real REST endpoint — the real
+`worker-classification` container picked up the re-dispatch and the source progressed all the way
+to `classified` against the identical content, with no second `pii_review` item raised (confirming
+the acknowledgment-skip works for real, not just in an isolated test). A second real submission
+containing a real SSN was flagged and `reject`ed through the live endpoint, landing `rejected` for
+real. A third, ordinary submission with no PII classified through completely unaffected. Cleaned
+up the throwaway `live71-ws` workspace and its rows afterward.
+
+**Spec touch-point** (applied): `07` §2's PII detection roadmap item is built; `03` §3's pre-step
+list gains the scan as its fourth step, `03` §5's review-item table and `05` §1's Review Queue
+table both gain a `pii_review` row.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

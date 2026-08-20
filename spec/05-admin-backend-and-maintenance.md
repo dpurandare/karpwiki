@@ -37,6 +37,7 @@ filterable by `workspace_id`, `kind`, `status`, and severity:
 | `duplicate` | Dedup check (at ingest) or Maintenance Advisor (existing content, §5 below) | [03](03-ingestion-and-review-workflows.md) §4, §5 below |
 | `reindex` | Maintenance Advisor | §3 below |
 | `prune` | Maintenance Advisor | §4 below |
+| `pii_review` | Dedicated scanner (at ingest, pre-Classifier) | [03](03-ingestion-and-review-workflows.md) §3, [07](07-additional-features-and-roadmap.md) §2 |
 
 Each item shows: subject (page/source reference), proposed action, supporting evidence (e.g.
 "last queried 247 days ago, 0 inbound references"), and the available resolution actions for that

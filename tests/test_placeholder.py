@@ -16,6 +16,9 @@ from karpwiki.models import (
     PipelineState,
     RawSource,
     RawSourceStatus,
+    ReviewItem,
+    ReviewKind,
+    ReviewStatus,
     WikiPage,
 )
 
@@ -54,6 +57,10 @@ def _classifies_as(label="eng.runbook", confidence=0.9):
         return ClassificationResult(summary="A runbook.", document_type=label, confidence=confidence)
 
     return _call
+
+
+async def _call_that_must_not_run(**_kwargs):
+    raise AssertionError("the Classifier must not be called when PII is found")
 
 
 async def _source_page(session, workspace, source):
@@ -214,3 +221,131 @@ async def test_rejecting_before_classification_resolved_does_not_crash(session, 
     await session.commit()
     assert state is PipelineState.rejected
     assert source.status is RawSourceStatus.rejected
+
+
+# --- PII detection at ingestion (07 §2, phase3-tasklist.md step 71) ----------------------
+
+
+async def test_classify_source_blocks_on_pii_without_calling_the_classifier(session, workspace):
+    source = await _submitted(
+        session, payload=b"# Runbook\n\nOn-call contact SSN on file: 123-45-6789."
+    )
+
+    state = await ingestion.classify_source(session, source=source, call=_call_that_must_not_run)
+    await session.commit()
+
+    assert state is PipelineState.pending_review
+    assert source.pipeline_state is PipelineState.pending_review
+    assert source.workspace_id is None
+
+    item = (
+        await session.execute(
+            select(ReviewItem).where(ReviewItem.subject_ref == str(source.source_id))
+        )
+    ).scalar_one()
+    assert item.kind is ReviewKind.pii_review
+    assert item.workspace_id is None
+    assert item.status is ReviewStatus.open
+    assert item.detail["categories"] == ["ssn"]
+
+
+async def test_resolve_pii_review_acknowledge_reenters_classification(session, workspace):
+    """Two real bugs found and fixed here, not assumed: (1) `acknowledge` itself makes no
+    transition — the source stays `pending_review` until `classify_source` is re-dispatched
+    and performs the one legal `pending_review -> classifying` transition on its own;
+    transitioning to `classifying` in the resolver too, before the re-dispatch, made the
+    re-dispatched `classify_source`'s own unconditional opening transition collide with it
+    (`classifying -> classifying` isn't a legal self-edge). (2) Re-running `classify_source`
+    with the *same* PII-containing payload (below) must NOT re-block — `_pii_already_
+    acknowledged` is what makes that true; without it this test would loop back to
+    `pending_review` a second time instead of reaching `classified`."""
+    source = await _submitted(session, payload=b"password: hunter2")
+    await ingestion.classify_source(session, source=source, call=_call_that_must_not_run)
+    item = (
+        await session.execute(
+            select(ReviewItem).where(ReviewItem.subject_ref == str(source.source_id))
+        )
+    ).scalar_one()
+    await session.commit()
+
+    state = await ingestion.resolve_pii_review(
+        session, item=item, source=source, action="acknowledge", actor="user:admin"
+    )
+    await session.commit()
+
+    assert state is PipelineState.pending_review
+    assert source.pipeline_state is PipelineState.pending_review
+    assert item.status is ReviewStatus.resolved
+
+    # The re-dispatched classify_source (api.py's own job in production) can now actually
+    # run to completion, performing the pending_review -> classifying transition itself.
+    state = await ingestion.classify_source(session, source=source, call=_classifies_as())
+    assert state is PipelineState.classified
+
+
+async def test_pii_acknowledgment_does_not_leak_across_sources(session, workspace):
+    """An acknowledged source's own re-check is skipped, but a *different* source with the
+    same kind of content must still block — the check is per-source, not global."""
+    acknowledged = await _submitted(
+        session, filename="a.md", payload=b"password: hunter2"
+    )
+    await ingestion.classify_source(session, source=acknowledged, call=_call_that_must_not_run)
+    item = (
+        await session.execute(
+            select(ReviewItem).where(ReviewItem.subject_ref == str(acknowledged.source_id))
+        )
+    ).scalar_one()
+    await ingestion.resolve_pii_review(
+        session, item=item, source=acknowledged, action="acknowledge", actor="user:admin"
+    )
+    await session.commit()
+
+    other = await _submitted(session, filename="b.md", payload=b"password: hunter2")
+    state = await ingestion.classify_source(session, source=other, call=_call_that_must_not_run)
+    assert state is PipelineState.pending_review
+
+
+async def test_resolve_pii_review_reject(session, workspace):
+    source = await _submitted(session, payload=b"password: hunter2")
+    await ingestion.classify_source(session, source=source, call=_call_that_must_not_run)
+    item = (
+        await session.execute(
+            select(ReviewItem).where(ReviewItem.subject_ref == str(source.source_id))
+        )
+    ).scalar_one()
+    await session.commit()
+
+    state = await ingestion.resolve_pii_review(
+        session, item=item, source=source, action="reject", actor="user:admin", note="policy"
+    )
+    await session.commit()
+
+    assert state is PipelineState.rejected
+    assert source.status is RawSourceStatus.rejected
+
+
+async def test_resolve_pii_review_rejects_the_wrong_kind(session, workspace):
+    source = await _submitted(session)
+    item = ReviewItem(kind=ReviewKind.classification, subject_ref=str(source.source_id))
+    session.add(item)
+    await session.flush()
+
+    with pytest.raises(ingestion.InvalidResolutionError):
+        await ingestion.resolve_pii_review(
+            session, item=item, source=source, action="acknowledge", actor="user:admin"
+        )
+
+
+async def test_resolve_pii_review_rejects_an_unsupported_action(session, workspace):
+    source = await _submitted(session, payload=b"password: hunter2")
+    await ingestion.classify_source(session, source=source, call=_call_that_must_not_run)
+    item = (
+        await session.execute(
+            select(ReviewItem).where(ReviewItem.subject_ref == str(source.source_id))
+        )
+    ).scalar_one()
+
+    with pytest.raises(ingestion.InvalidResolutionError):
+        await ingestion.resolve_pii_review(
+            session, item=item, source=source, action="bogus", actor="user:admin"
+        )

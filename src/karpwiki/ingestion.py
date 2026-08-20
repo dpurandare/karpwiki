@@ -29,6 +29,7 @@ from . import (
     document_types,
     llm,
     objectstore,
+    pii,
     pipeline,
     review,
     schema,
@@ -48,6 +49,7 @@ from .models import (
     RawSourceStatus,
     ReviewItem,
     ReviewKind,
+    ReviewStatus,
     VersionTrigger,
     WikiPage,
     Workspace,
@@ -163,6 +165,21 @@ async def call_model(
     return result.output
 
 
+async def _pii_already_acknowledged(session: AsyncSession, *, source_id: uuid.UUID) -> bool:
+    """07 §2, phase3-tasklist.md step 71 — has an admin already resolved a `pii_review`
+    item for this exact source with `acknowledge`? The resolved item is itself the audit
+    record of that decision, so this reuses it rather than tracking new state."""
+    result = await session.execute(
+        select(ReviewItem.review_id).where(
+            ReviewItem.subject_ref == str(source_id),
+            ReviewItem.kind == ReviewKind.pii_review,
+            ReviewItem.status == ReviewStatus.resolved,
+            ReviewItem.resolved_action == "acknowledge",
+        )
+    )
+    return result.scalar_one_or_none() is not None
+
+
 async def classify_source(
     session: AsyncSession,
     *,
@@ -194,6 +211,36 @@ async def classify_source(
     # `store()` already rejected anything doc_extract.extract_text can't read before this
     # raw_source ever existed — `or ""` is a defensive fallback, not the real gate.
     text = doc_extract.extract_text(source.filename, payload) or ""
+
+    # PII detection (07 §2, phase3-tasklist.md step 71) — the pre-step's own deterministic
+    # position (03 §3), before the Classifier's LLM call, and deliberately blocking here
+    # rather than proceeding: never send PII/credential content to a third-party model,
+    # and never spend the call on a source about to be blocked anyway.
+    #
+    # Skipped once this exact source already has a resolved `acknowledge` on record — found
+    # live by a test that actually re-ran classification after acknowledging, not assumed:
+    # without this, a genuinely PII-containing source could never actually get past the
+    # gate at all — every re-dispatch re-detects the same content and re-blocks, an
+    # unbreakable acknowledge-reclassify-reblock loop. The resolved `ReviewItem` itself is
+    # the audit record of the admin decision to accept the risk, so this reuses it rather
+    # than adding new state to track "already acknowledged."
+    pii_categories = pii.detect_pii(text)
+    if pii_categories and not await _pii_already_acknowledged(session, source_id=source.source_id):
+        await pipeline.transition(
+            session,
+            source=source,
+            to_state=PipelineState.pending_review,
+            actor="system:pii_scanner",
+            detail={"reason": "pii_detected", "categories": pii_categories},
+        )
+        await review.create(
+            session,
+            kind=ReviewKind.pii_review,
+            subject_ref=str(source.source_id),
+            detail={"categories": pii_categories},
+        )
+        return PipelineState.pending_review
+
     types = [dt.type_code for dt in await document_types.list_active(session)]
     lexical = classify.lexical_match(f"{source.filename}\n{text}", types)
 
@@ -424,6 +471,42 @@ async def reject_source(
             status=PageStatus.draft,
         )
     return PipelineState.rejected
+
+
+async def resolve_pii_review(
+    session: AsyncSession, *, item: ReviewItem, source: RawSource, action: str, actor: str, note: str | None = None
+) -> PipelineState:
+    """Admin resolution of a `pii_review` item (07 §2, phase3-tasklist.md step 71):
+    `acknowledge` (the flagged content is expected/acceptable — proceed) or `reject`
+    (decline the source outright, reusing `reject_source` unchanged) — mirroring
+    `classification`/`duplicate`'s own action shape rather than inventing a new resolution
+    model, per this step's own text.
+
+    `acknowledge` makes no pipeline transition of its own — the source stays at
+    `pending_review`, exactly the resting state `pending_review -> classifying` (03 §1's
+    "admin retries a failed classification" edge) resumes from once `classify_source` is
+    re-dispatched (`api.run_resolve_review_item`, after commit, checking `item.kind`/
+    `action` directly rather than this function's return value). Transitioning to
+    `classifying` *here* was tried and found to be a real bug: `classify_source`'s own
+    first line unconditionally transitions `-> classifying` too, and `classifying ->
+    classifying` is not a legal self-edge — caught by a test that actually re-ran
+    classification after acknowledging, not assumed."""
+    if item.kind is not ReviewKind.pii_review:
+        raise InvalidResolutionError(f"review item {item.review_id} is not a pii_review item")
+    if source.pipeline_state is not PipelineState.pending_review:
+        raise InvalidResolutionError(f"source {source.source_id} is not pending_review")
+
+    if action == "acknowledge":
+        state = PipelineState.pending_review
+    elif action == "reject":
+        state = await reject_source(session, source=source, reason=note or "pii_review", actor=actor)
+    else:
+        raise InvalidResolutionError(f"{action!r} is not a valid pii_review resolution (acknowledge | reject)")
+
+    await review.resolve(
+        session, item=item, action=action, actor=actor, detail={"note": note} if note else None
+    )
+    return state
 
 
 async def resolve_ingestion_policy(
@@ -786,6 +869,11 @@ async def resolve_review_item(
             actor=actor,
             note=note,
             call=merge_call or call_merge_model,
+        )
+
+    if item.kind is ReviewKind.pii_review:
+        return await resolve_pii_review(
+            session, item=item, source=source, action=action, actor=actor, note=note
         )
 
     raise InvalidResolutionError(f"resolution for {item.kind.value} items is not implemented")

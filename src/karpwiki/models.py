@@ -122,6 +122,7 @@ class ReviewKind(enum.Enum):
     reindex = "reindex"
     prune = "prune"
     stuck = "stuck"
+    pii_review = "pii_review"
 
 
 class ReviewStatus(enum.Enum):

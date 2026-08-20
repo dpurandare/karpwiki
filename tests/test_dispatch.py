@@ -84,6 +84,41 @@ async def _classification_pending_review(session):
     return source, item
 
 
+async def _pii_pending_review(session):
+    """A source parked `pending_review` by the PII scanner (07 §2, phase3-tasklist.md step
+    71) — mirrors `_classification_pending_review`'s exact construction, a different reason
+    for the same resting state."""
+    source_id = uuid.uuid4()
+    key = f"/_inbox/{source_id}/f.md"
+    objectstore.write_bytes(key, b"password: hunter2")
+    source = RawSource(
+        source_id=source_id,
+        object_key=key,
+        filename="f.md",
+        content_hash="deadbeef",
+        submitted_by="user:deepak",
+        pipeline_state=PipelineState.submitted,
+    )
+    session.add(source)
+    await session.flush()
+    await pipeline.transition(
+        session, source=source, to_state=PipelineState.classifying, actor="system:classifier"
+    )
+    await pipeline.transition(
+        session,
+        source=source,
+        to_state=PipelineState.pending_review,
+        actor="system:pii_scanner",
+        detail={"reason": "pii_detected", "categories": ["credential"]},
+    )
+    item = await review.create(
+        session, kind=ReviewKind.pii_review, subject_ref=str(source.source_id),
+        detail={"categories": ["credential"]},
+    )
+    await session.commit()
+    return source, item
+
+
 async def _near_duplicate_pending_review(session, workspace):
     """Mirrors test_review_resolution.py's helper — a `classified` source parked
     `pending_review` by a near-duplicate verdict against an existing page."""
@@ -131,6 +166,34 @@ async def test_resolving_classification_dispatches_curate_source(client, session
     assert resp.json()["pipeline_state"] == "classified"
     assert dispatched["curate_source"] == [str(source.source_id)]
     assert dispatched["reindex"] == []
+
+
+async def test_resolving_pii_review_acknowledge_dispatches_classify_source(
+    client, session, workspace, dispatched
+):
+    """Step 71 (07 §2) — `acknowledge` re-dispatches `classify_source` (checked by kind/
+    action in api.py, not by the returned pipeline state, which stays `pending_review`)."""
+    await _grant_admin(session, workspace)
+    source, item = await _pii_pending_review(session)
+
+    resp = await client.post(
+        f"/review-items/{item.review_id}/resolve", headers=ADMIN, json={"action": "acknowledge"}
+    )
+    assert resp.json()["pipeline_state"] == "pending_review"
+    assert dispatched["classify_source"] == [str(source.source_id)]
+    assert dispatched["curate_source"] == []
+
+
+async def test_resolving_pii_review_reject_dispatches_nothing(client, session, workspace, dispatched):
+    await _grant_admin(session, workspace)
+    source, item = await _pii_pending_review(session)
+
+    resp = await client.post(
+        f"/review-items/{item.review_id}/resolve", headers=ADMIN, json={"action": "reject"}
+    )
+    assert resp.json()["pipeline_state"] == "rejected"
+    assert dispatched["classify_source"] == []
+    assert dispatched["curate_source"] == []
 
 
 async def test_resolving_duplicate_keep_both_dispatches_curate_source(client, session, workspace, dispatched):
