@@ -154,7 +154,12 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
                 if page.current_version_id
                 else None
             )
-            return api._page_body(page, version)
+            body = api._page_body(page, version)
+            # 01 §3, phase3-tasklist.md step 63 — same resolved/AuthZ-checked link
+            # treatment `GET /pages/{id}` gets, so an agent following a citation via MCP
+            # sees the same thing a REST client would.
+            body["links"] = await api._resolve_page_links(session, principal, page)
+            return body
 
     @mcp.tool()
     async def wiki_list_pages(

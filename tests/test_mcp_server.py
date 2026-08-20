@@ -182,6 +182,29 @@ async def test_wiki_get_page_draft_requires_contributor(client, session, workspa
     assert body["title"] == "Draft Page"
 
 
+async def test_wiki_get_page_resolves_links_the_same_way_the_rest_endpoint_does(
+    client, session, workspace, mcp_client_factory, monkeypatch
+):
+    """01 §3, phase3-tasklist.md step 63 — an agent following a citation via MCP sees the
+    same resolved/AuthZ-checked `links` field a REST client does."""
+    target = await _page(session, workspace, title="MCP Target")
+    linker = await _page(session, workspace, title="MCP Linker", body="See [t](concepts/mcp-target.md).")
+    await session.commit()
+    monkeypatch.setenv("KARPWIKI_MCP_USER", "casey")
+
+    async with mcp_client_factory() as mcp_client:
+        is_error, body = await _call(mcp_client, "wiki_get_page", page_id=str(linker.page_id))
+    assert not is_error
+    assert body["links"] == [
+        {
+            "page_id": str(target.page_id),
+            "workspace_id": workspace.workspace_id,
+            "path": "concepts/mcp-target.md",
+            "link_type": "cross_reference",
+        }
+    ]
+
+
 async def test_wiki_list_pages_filters_by_workspace(
     client, session, workspace, other_workspace, mcp_client_factory, monkeypatch
 ):

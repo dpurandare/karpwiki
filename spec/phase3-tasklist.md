@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-62 and 78 done, steps 63-77 and 79 not started.** Step 78 (track
+**Status (2026-08-20): steps 57-63 and 78 done, steps 64-77 and 79 not started.** Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
 not by either completeness audit pass; see its own entry for why. Phase 1 (steps 1–21) and Phase 2
 (steps 22–56) are both complete — see [`phase1-tasklist.md`](phase1-tasklist.md) and
@@ -237,6 +237,22 @@ findings that don't need a roadmap step (tracked there instead).
     link's *target* workspace before exposing it as resolved/clickable, which nothing does today.
     Flagged as "no caller exists yet" when `page_link` parsing itself landed (step 28); the caller
     now exists (step 43), so this step closes that flag rather than leaving it stale.
+
+    **Done** — new `api._resolve_page_links`: reads the already-parsed `page_link` rows for a page
+    (no markdown re-parsing at read time) and applies the exact same access check
+    `_reader_page` itself uses for a direct fetch of each target — `contributor` if the target is
+    still `draft`, not just a workspace-level check. A link that fails the check is simply
+    **omitted**, not included-but-flagged-inaccessible — `01` §3 says AuthZ is re-checked "before
+    resolving," so an unauthorized target's existence is never confirmed to the caller. Wired into
+    both `GET /pages/{id}` and the MCP `wiki_get_page` tool (new `"links"` response field on
+    both — an agent following a citation via MCP sees the same resolved, AuthZ-checked list a REST
+    client does), leaving the raw `content` field's embedded markdown link syntax untouched (the
+    stored document verbatim). Live-verified against real dev Postgres through the rebuilt
+    gateway: seeded two real workspaces with a real cross-workspace link where the caller
+    initially had no access to the target — confirmed a real `GET /pages/{id}` returned
+    `"links": []` while the raw content still showed the written link text, then granted real
+    `reader` access and confirmed the identical link resolved on the next real request, no
+    restart needed. See [09](09-implementation-notes.md) §68 for the full writeup.
 
 64. **Stuck-pipeline sweep detector** ([05](05-admin-backend-and-maintenance.md) §2-3). A source
     stuck mid-pipeline with genuinely no task ever redelivered for it (a broker message lost

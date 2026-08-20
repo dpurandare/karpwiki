@@ -68,6 +68,7 @@ from .models import (
     ConnectorState,
     DocumentType,
     IdempotencyRecord,
+    PageLink,
     PageStatus,
     PageVersion,
     PipelineState,
@@ -346,6 +347,50 @@ async def _reader_page(session: AsyncSession, principal: Principal, page_id: uui
     if not await has_role(session, principal=principal, workspace_id=page.workspace_id, required=required):
         raise ApiError(403, "forbidden", f"Viewing this page requires the {required.value} role.")
     return page
+
+
+async def _resolve_page_links(
+    session: AsyncSession, principal: Principal, page: WikiPage
+) -> list[dict[str, Any]]:
+    """01 §3: "Gateway re-checks the caller's AuthZ against the *target* workspace before
+    resolving a link... into another" — the read-time half `page_links.sync` (02 §3,
+    phase2-tasklist.md step 28) was explicitly built without yet, since no caller existed.
+
+    Reads the already-parsed `page_link` rows (no markdown re-parsing needed at read time)
+    and applies the exact same access check `_reader_page` uses for a direct fetch of that
+    target — same required role (`contributor` if the target is still `draft`, matching
+    `_reader_page`'s own "elevated scope" reasoning, not just a workspace-level check) —
+    inlined rather than calling `_reader_page` again since the target `WikiPage` row is
+    already in hand from the join below.
+
+    A link that fails the check is simply omitted, not included-but-flagged-inaccessible:
+    `01` §3 says AuthZ is re-checked "before resolving," so an unauthorized target's very
+    existence (id, path, even that a link once pointed there) is never confirmed to the
+    caller — same reasoning `07` §2's per-tag access control roadmap item will eventually
+    extend this to. Archived-workspace targets are never excluded on that basis alone (`01`
+    §3: "archived workspaces remain queryable") — only the same role check applies.
+    """
+    result = await session.execute(
+        select(PageLink, WikiPage)
+        .join(WikiPage, WikiPage.page_id == PageLink.to_page_id)
+        .where(PageLink.from_page_id == page.page_id)
+    )
+    links = []
+    for link, target in result.all():
+        required = Role.contributor if target.status is PageStatus.draft else Role.reader
+        if not await has_role(
+            session, principal=principal, workspace_id=target.workspace_id, required=required
+        ):
+            continue
+        links.append(
+            {
+                "page_id": str(target.page_id),
+                "workspace_id": target.workspace_id,
+                "path": target.path,
+                "link_type": link.link_type.value,
+            }
+        )
+    return links
 
 
 async def _admin_page(session: AsyncSession, principal: Principal, page_id: uuid.UUID) -> WikiPage:
@@ -850,7 +895,13 @@ def _register_routes(app: FastAPI) -> None:
             if page.current_version_id
             else None
         )
-        return _page_body(page, version)
+        body = _page_body(page, version)
+        # 01 §3, phase3-tasklist.md step 63: resolved, AuthZ-checked link targets — the
+        # raw `content` field's embedded markdown link syntax is unresolved on purpose
+        # (it's the stored document verbatim); this is the separate, structured field a
+        # renderer/agent actually follows.
+        body["links"] = await _resolve_page_links(session, principal, page)
+        return body
 
     @app.get("/pages/{page_id}/versions/diff")
     async def diff_page_versions(

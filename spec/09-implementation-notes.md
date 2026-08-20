@@ -3506,5 +3506,65 @@ cycle. Cleaned up the throwaway `live62s-*`/`live62d-*` workspaces afterward.
 **Spec touch-point** (applied): none required — `09` §14 already specifies this contract in full;
 this step closes the gap between that text and the code, not a deviation from it.
 
+## 68. Read-Time Link Resolution + Cross-Workspace AuthZ Re-Check (Phase 3 Step 63)
+
+§31 above named this exactly: "Read-time link resolution is out of scope — no caller exists yet
+... resolving them at read time is the future endpoint's job." `GET /pages/{id}` (Phase 2 step 43)
+is that endpoint, and it never got the follow-up. `01` §1's own Workspace Resolution table names
+the contract directly: "Gateway re-checks the caller's AuthZ against the *target* workspace before
+resolving a link from one workspace's page into another."
+
+**`api._resolve_page_links`** (new) reads the already-parsed `page_link` rows for a page — no
+markdown re-parsing needed at read time, since `page_links.sync` (step 28) already keeps them
+current on every version write — and applies the same access check `_reader_page` itself uses for
+a direct fetch of each target: `contributor` if the target is still `draft` (not just a
+workspace-level check), inlined rather than calling `_reader_page` again since the target
+`WikiPage` row is already in hand from the join. This closes a slightly stricter reading of `01`
+§3 than a workspace-only check would: a link pointing at a draft page needs the identical elevated
+scope a direct `GET /pages/{draft_id}` would require, treating "can this principal reach this
+target *page*" as the real question, not just "does this principal have any role in that
+*workspace*."
+
+**A link that fails the check is omitted, not included-but-flagged.** `01` §3 says AuthZ is
+re-checked "before resolving" — read literally, an unauthorized target's existence (its id, path,
+even that a link once pointed there) is never confirmed to the caller. This is a real design
+choice, not the only reasonable one (a flagged-inaccessible entry would also satisfy "re-checks
+AuthZ before resolving" in a looser reading), but omission is the more conservative, spec-literal
+choice and costs nothing extra to implement.
+
+**Archived-workspace targets are never excluded on that basis alone** (`01` §3: "Cross-workspace
+links... into an archived workspace continue to resolve normally") — `has_role` doesn't
+distinguish workspace status at all, so this falls out without any special-casing.
+
+**Wired into both `GET /pages/{id}` and the MCP `wiki_get_page` tool** — a new `"links"` field on
+each response, left alongside the unchanged raw `content` field (the stored document verbatim,
+embedded markdown link syntax un-rewritten) rather than replacing it. `wiki_get_page` duplicates
+the two-line call (matching this module's own established "eight thin tools duplicate REST logic
+directly" pattern, `mcp_server.py`'s own docstring) rather than routing through a shared
+`run_get_page` the way `wiki_search`/`wiki_resolve_review_item` do — `_page_body`'s only other
+caller was already `get_page_endpoint` alone, so introducing a shared wrapper here would be
+premature abstraction for two call sites that already look the same.
+
+**A stale docstring flag closed, not left stale**: `09` §31's own "no caller exists yet" note
+above is now accurate history rather than an open flag — this step is the caller.
+
+**Verification**: `tests/test_pages_sources_api.py` (+7): same-workspace resolution, cross-
+workspace resolution when the caller has real access, omission when the caller lacks it, omission
+of a link to a still-draft target for a mere reader (present for a contributor), a dangling link
+target produces no entry (already guaranteed by `page_links.sync` never writing a row for one),
+and a page with no links returns an empty list, not a missing key. `tests/test_mcp_server.py`
+(+1): `wiki_get_page` returns the identical resolved-link shape. Full suite: 639 tests green — no
+existing test needed updating, since nothing previously asserted an exact-dict equality on `GET
+/pages/{id}`'s response. Live-verified against real dev Postgres through the rebuilt `gateway`
+container: seeded two real workspaces with a real cross-workspace link, the caller initially
+holding no grant at all in the target workspace — confirmed a real request returned `"links": []`
+while the raw `content` field still showed the written link text verbatim; granted real `reader`
+access via a direct DB write and re-ran the identical request — the same link resolved this time,
+no gateway restart needed anywhere in the cycle. Cleaned up the throwaway `live63a-*`/`live63b-*`
+workspaces afterward.
+
+**Spec touch-point** (applied): none required — `01` §1's own table and `09` §31's own flag
+already specify this behavior in full; this step closes the gap, not a deviation from either.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

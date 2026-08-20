@@ -226,6 +226,107 @@ async def test_get_page_forbidden_with_no_access(client, session, other_workspac
     assert r.status_code == 403
 
 
+# --- Read-time link resolution + cross-workspace AuthZ re-check (01 §3,
+# phase3-tasklist.md step 63) -------------------------------------------------------------
+
+
+async def test_get_page_resolves_a_same_workspace_link(client, session, workspace):
+    target = await _page(session, workspace, title="Target Page")
+    linker = await _page(
+        session, workspace, title="Linker Page", body="See [target](concepts/target-page.md)."
+    )
+    await session.commit()
+
+    r = await client.get(f"/pages/{linker.page_id}", headers=READER)
+    assert r.status_code == 200
+    links = r.json()["links"]
+    assert len(links) == 1
+    assert links[0]["page_id"] == str(target.page_id)
+    assert links[0]["workspace_id"] == workspace.workspace_id
+    assert links[0]["path"] == "concepts/target-page.md"
+    assert links[0]["link_type"] == "cross_reference"
+
+
+async def test_get_page_resolves_a_cross_workspace_link_when_the_caller_has_access(
+    client, session, workspace, other_workspace
+):
+    """01 §3: the gateway re-checks AuthZ against the *target* workspace, independent of
+    the linking page's own workspace — `casey` needs reader in `other_workspace` too."""
+    target = await _page(session, other_workspace, title="Cross Target")
+    linker = await _page(
+        session,
+        workspace,
+        title="Cross Linker",
+        body=f"See [target](/{other_workspace.workspace_id}/concepts/cross-target.md).",
+    )
+    session.add(AccessPolicy(workspace_id=other_workspace.workspace_id, principal="casey", role=Role.reader))
+    await session.commit()
+
+    r = await client.get(f"/pages/{linker.page_id}", headers=READER)
+    assert r.status_code == 200
+    links = r.json()["links"]
+    assert len(links) == 1
+    assert links[0]["page_id"] == str(target.page_id)
+    assert links[0]["workspace_id"] == other_workspace.workspace_id
+    assert links[0]["link_type"] == "cross_workspace"
+
+
+async def test_get_page_omits_a_cross_workspace_link_the_caller_cannot_access(
+    client, session, workspace, other_workspace
+):
+    """01 §3: AuthZ is re-checked *before* resolving — an inaccessible target is simply
+    omitted, not included-but-flagged, so its existence is never confirmed to the caller."""
+    await _page(session, other_workspace, title="Hidden Target")
+    linker = await _page(
+        session,
+        workspace,
+        title="Hidden Linker",
+        body=f"See [target](/{other_workspace.workspace_id}/concepts/hidden-target.md).",
+    )
+    await session.commit()
+    # `casey` (READER) has no grant at all in other_workspace.
+
+    r = await client.get(f"/pages/{linker.page_id}", headers=READER)
+    assert r.status_code == 200
+    assert r.json()["links"] == []
+
+
+async def test_get_page_omits_a_link_to_a_draft_page_for_a_mere_reader(client, session, workspace):
+    """Same elevated-scope rule `_reader_page` itself applies to a direct fetch — a
+    resolved link to a still-draft target needs `contributor`, not just `reader`."""
+    draft_target = await _page(session, workspace, title="Draft Target", status=PageStatus.draft)
+    linker = await _page(
+        session, workspace, title="Draft Linker", body="See [target](concepts/draft-target.md)."
+    )
+    await session.commit()
+
+    reader_resp = await client.get(f"/pages/{linker.page_id}", headers=READER)
+    assert reader_resp.json()["links"] == []
+
+    contributor_resp = await client.get(f"/pages/{linker.page_id}", headers=CONTRIBUTOR)
+    links = contributor_resp.json()["links"]
+    assert len(links) == 1
+    assert links[0]["page_id"] == str(draft_target.page_id)
+
+
+async def test_get_page_a_dangling_link_target_produces_no_link_entry(client, session, workspace):
+    linker = await _page(
+        session, workspace, title="Dangling Linker", body="See [nowhere](concepts/does-not-exist.md)."
+    )
+    await session.commit()
+
+    r = await client.get(f"/pages/{linker.page_id}", headers=READER)
+    assert r.json()["links"] == []
+
+
+async def test_get_page_with_no_links_returns_an_empty_list(client, session, workspace):
+    page = await _page(session, workspace, title="Lonely Page")
+    await session.commit()
+
+    r = await client.get(f"/pages/{page.page_id}", headers=READER)
+    assert r.json()["links"] == []
+
+
 # --- GET /sources (admin Raw Source Browser) -----------------------------------------------
 
 
