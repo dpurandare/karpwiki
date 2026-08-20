@@ -24,7 +24,9 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-61 done, steps 62-78 not started.** Phase 1 (steps 1–21) and Phase 2
+**Status (2026-08-20): steps 57-61 and 78 done, steps 62-77 and 79 not started.** Step 78 (track
+3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
+not by either completeness audit pass; see its own entry for why. Phase 1 (steps 1–21) and Phase 2
 (steps 22–56) are both complete — see [`phase1-tasklist.md`](phase1-tasklist.md) and
 [`phase2-tasklist.md`](phase2-tasklist.md). See [`implementation-audit.md`](implementation-audit.md)
 for the full write-up of the two audit passes that shaped track 3a, including redundancy/dead-code
@@ -352,7 +354,41 @@ close without them.
     distinct from, Phase 4's full multi-region/DR topology — this is backup/restore procedure, not
     a second active region.
 
-78. **Verify**: Phase 3 exit criteria, matching `07` §6's own stated goal — "Admin staff can run
+## 3f — Ingestion Format Coverage
+
+78. **Binary document format ingestion (PDF, DOCX)** ([03](03-ingestion-and-review-workflows.md)
+    §3, [01](01-architecture-and-data-model.md) §6's PDF citation-page-number convention). Found
+    live during step 62 prep, in response to a direct question about the most common enterprise
+    document formats (DOCX, PDF, CSV, TXT) — not part of either completeness audit pass, since
+    nothing in `phase1-tasklist.md`/`phase2-tasklist.md`/`09-implementation-notes.md` had ever
+    flagged it as an accepted gap. CSV and TXT already worked (plain text, decode cleanly), but no
+    code anywhere extracted real text from PDF or DOCX: every text-producing call in the ingest
+    path used a bare `payload.decode("utf-8", errors="replace")`, which for a binary PDF/DOCX
+    never raises — it silently substitutes most of the file with placeholder characters and feeds
+    the garbled result to the Classifier/Curator LLM calls, rather than extracting real text or
+    failing loudly. `connectors_git.py` already had the right instinct for this exact class of
+    problem (skips a file that fails UTF-8 decode rather than submitting it) but that guard was
+    never applied to the direct `POST /sources` upload path.
+
+    **Done** — new [`doc_extract.py`](../src/karpwiki/doc_extract.py): content-based (magic-byte,
+    not just extension) PDF/DOCX detection and real text extraction (`pypdf`/`python-docx`),
+    explicitly scoped to modern DOCX only (legacy `.doc`'s OLE2/CFB binary format needs a
+    different library entirely and is not "the most common" format today — a documented
+    boundary, not a silent gap). `classify.detect_content_shape` and all three of
+    `ingestion.py`'s `payload.decode(...)` call sites now route through
+    `doc_extract.extract_text`. `ingestion.store` — the one shared entry point every submission
+    goes through — rejects content this can't read at all (`UnsupportedContentError`) before a
+    `raw_source` ever exists, extended to a real `400` in `api.py`'s `POST /sources` handler and a
+    skip-this-item-not-the-whole-run guard in `connector_polling.poll_connector` (defense in depth
+    for a future adapter type that, unlike `connectors_git.py`, doesn't already filter these out).
+    Live-verified against real dev Postgres and real `gpt-5-nano` through the rebuilt containers: a
+    real DOCX runbook and a real PDF both produced genuinely coherent, accurate classifier
+    summaries (proving clean extraction, not garbled placeholder text) and the DOCX ran the full
+    pipeline through to `ingested`; a real unsupported binary (PNG magic bytes) was correctly
+    rejected with a real `400` at the real REST API. See [09](09-implementation-notes.md) §66 for
+    the full writeup.
+
+79. **Verify**: Phase 3 exit criteria, matching `07` §6's own stated goal — "Admin staff can run
     the Platform without manual intervention outside the review queue." Demonstrate end to end: a
     real threshold breach fires a real notification (step 67) with no admin polling a dashboard
     for it; a real low-feedback page surfaces to the Maintenance Advisor (step 68) with no manual
@@ -376,6 +412,7 @@ run the Platform without manual intervention outside the review queue."
 | Analytics dashboards | Steps 72–73 |
 | Bulk import/export, workspace templates | Steps 74–75 |
 | Operational hardening (cache, backup/DR) | Steps 76–77 |
+| Binary document format ingestion (PDF, DOCX) | Step 78 |
 
 ---
 Previous: [phase2-tasklist.md](phase2-tasklist.md) · Back to: [00-overview.md](00-overview.md)

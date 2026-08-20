@@ -136,15 +136,38 @@ async def poll_connector(
         await session.flush()
         return []
 
-    sources = [
-        await ingestion.store(
-            session, item.content, item.filename, submitted_by=f"connector:{connector.connector_id}"
-        )
-        for item in items
-    ]
+    # `ingestion.store` now rejects content `doc_extract` can't read at all (found live
+    # during Phase 3 step 62 prep) — `connectors_git.py`'s own adapter already filters
+    # these out before they ever become a `DiscoveredItem`, but a future adapter type
+    # might not, so this run skips a rejected item rather than losing every other item
+    # discovered in the same poll to one bad file.
+    sources = []
+    skipped = 0
+    for item in items:
+        try:
+            sources.append(
+                await ingestion.store(
+                    session,
+                    item.content,
+                    item.filename,
+                    submitted_by=f"connector:{connector.connector_id}",
+                )
+            )
+        except ingestion.UnsupportedContentError:
+            logger.warning(
+                "connector %s: skipping %r, unsupported content",
+                connector.connector_id,
+                item.filename,
+            )
+            skipped += 1
 
     connector.last_sync_cursor = new_cursor
     connector.last_run_at = datetime.now(UTC)
-    connector.last_run_detail = {"outcome": "ok", "items_discovered": len(items), "message": None}
+    connector.last_run_detail = {
+        "outcome": "ok",
+        "items_discovered": len(items),
+        "items_skipped": skipped,
+        "message": None,
+    }
     await session.flush()
     return [source.source_id for source in sources]

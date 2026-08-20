@@ -55,6 +55,54 @@ async def test_submission_always_creates_a_review_item(client, session):
     assert item.proposed_action is None
 
 
+async def test_file_upload_extracts_and_stores_the_payload(client, session):
+    """A plain-text file upload — the `file=` multipart path, not `data={"text": ...}`."""
+    r = await client.post(
+        "/sources", headers=CONTRIBUTOR, files={"file": ("notes.txt", b"a plain text file", "text/plain")}
+    )
+    assert r.status_code == 202
+    source = await session.get(RawSource, uuid.UUID(r.json()["source_id"]))
+    assert objectstore.read_bytes(source.object_key) == b"a plain text file"
+
+
+async def test_a_real_docx_upload_is_accepted(client, session):
+    """phase3-tasklist.md step 62 prep gap: DOCX is a real binary format now, not
+    something the direct upload path silently garbles."""
+    import io
+
+    import docx
+
+    document = docx.Document()
+    document.add_paragraph("Real DOCX content for the upload test.")
+    buf = io.BytesIO()
+    document.save(buf)
+
+    r = await client.post(
+        "/sources",
+        headers=CONTRIBUTOR,
+        files={
+            "file": (
+                "report.docx",
+                buf.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert r.status_code == 202
+
+
+async def test_an_unsupported_binary_upload_is_rejected(client):
+    """A genuinely unsupported binary (not text, not PDF, not DOCX) is refused at
+    submission — never silently garbled into the pipeline (found live during Phase 3 step
+    62 prep)."""
+    png_like = b"\x89PNG\r\n\x1a\n\x00\x01\xff\xfe" * 4
+    r = await client.post(
+        "/sources", headers=CONTRIBUTOR, files={"file": ("photo.png", png_like, "image/png")}
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["type"] == "invalid_request"
+
+
 async def test_unauthenticated_requests_are_refused(client):
     r = await client.post("/sources", data={"text": "x"})
     assert r.status_code == 401

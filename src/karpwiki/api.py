@@ -652,7 +652,12 @@ def _register_routes(app: FastAPI) -> None:
         else:
             payload, filename = url.encode(), "submitted-url.txt"
 
-        source = await ingestion.store(session, payload, filename, submitted_by=f"user:{principal.id}")
+        try:
+            source = await ingestion.store(
+                session, payload, filename, submitted_by=f"user:{principal.id}"
+            )
+        except ingestion.UnsupportedContentError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
         body = {
             "source_id": str(source.source_id),
             "pipeline_state": source.pipeline_state.value,

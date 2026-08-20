@@ -76,8 +76,49 @@ async def test_poll_updates_cursor_and_last_run_detail_on_success(session, works
 
     assert connector.last_sync_cursor == {"sha": "xyz"}
     assert connector.last_run_at is not None
-    assert connector.last_run_detail == {"outcome": "ok", "items_discovered": 1, "message": None}
+    assert connector.last_run_detail == {
+        "outcome": "ok",
+        "items_discovered": 1,
+        "items_skipped": 0,
+        "message": None,
+    }
     assert connector.state is ConnectorState.enabled
+
+
+async def test_poll_skips_an_item_with_unsupported_content_not_the_whole_run(
+    session, workspace, registered_adapter
+):
+    """`ingestion.store` now rejects content it can't read at all (found live during Phase
+    3 step 62 prep) — a future adapter type that (unlike `connectors_git.py`) doesn't
+    already filter these out must not lose every other item in the same poll to one bad
+    file."""
+    png_like = b"\x89PNG\r\n\x1a\n\x00\x01\xff\xfe"
+    adapter = registered_adapter(
+        _StubAdapter(
+            items=[
+                DiscoveredItem(filename="good-a.md", content=b"Item A"),
+                DiscoveredItem(filename="bad.png", content=png_like),
+                DiscoveredItem(filename="good-b.md", content=b"Item B"),
+            ],
+            new_cursor={"sha": "abc123"},
+        )
+    )
+    connector = await _connector(session, workspace)
+    await session.commit()
+
+    source_ids = await connector_polling.poll_connector(session, connector=connector)
+    await session.commit()
+    await session.refresh(connector)
+
+    assert len(source_ids) == 2
+    sources = [await session.get(RawSource, sid) for sid in source_ids]
+    assert {s.filename for s in sources} == {"good-a.md", "good-b.md"}
+    assert connector.last_run_detail == {
+        "outcome": "ok",
+        "items_discovered": 3,
+        "items_skipped": 1,
+        "message": None,
+    }
 
 
 async def test_poll_passes_the_adapter_the_resolved_credential_not_the_ref(
@@ -228,5 +269,10 @@ async def test_poll_with_zero_items_still_records_a_completed_run(session, works
     await session.refresh(connector)
 
     assert source_ids == []
-    assert connector.last_run_detail == {"outcome": "ok", "items_discovered": 0, "message": None}
+    assert connector.last_run_detail == {
+        "outcome": "ok",
+        "items_discovered": 0,
+        "items_skipped": 0,
+        "message": None,
+    }
     assert connector.last_sync_cursor == {"sha": "same-as-before"}

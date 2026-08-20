@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import yaml
 from pydantic import BaseModel, Field
 
+from . import doc_extract
 from .models import ContentShape
 
 STRUCTURED_SUFFIXES = frozenset({".json", ".yaml", ".yml", ".csv", ".toml", ".xml"})
@@ -51,14 +52,19 @@ def detect_content_shape(filename: str, payload: bytes) -> ContentShape:
     """`narrative` or `structured_data` from extension and structural parse (03 §3 step 1).
 
     Mechanical on purpose: data either parses or it does not, so this needs no model.
+    Uses `doc_extract.extract_text` rather than a bare UTF-8 decode so a PDF/DOCX gets its
+    real extracted text run through the same structural check — in practice this almost
+    always lands `narrative` (a data-format document rendered as PDF/DOCX prose is rare),
+    but it's the same real text every other stage of the pipeline now sees, not a special
+    case. `ingestion.store` already rejects content this can't extract at all before a
+    `raw_source` ever exists, so the `None` fallback below is defensive, not the real gate.
     """
     suffix = filename[filename.rfind(".") :].lower() if "." in filename else ""
     if suffix in STRUCTURED_SUFFIXES:
         return ContentShape.structured_data
 
-    try:
-        text = payload.decode("utf-8")
-    except UnicodeDecodeError:
+    text = doc_extract.extract_text(filename, payload)
+    if text is None:
         return ContentShape.narrative
 
     if _parses_as_data(text):

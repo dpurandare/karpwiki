@@ -3378,5 +3378,78 @@ machinery. Cleaned up the throwaway `live61-*` workspace afterward.
 in full; the one-sentence intent-statement simplification is documented above as a reasoned
 implementation choice, not a spec change.
 
+## 66. Binary Document Format Ingestion — PDF, DOCX (Phase 3 Step 78)
+
+Found live, not by either completeness audit pass: Deepak asked directly whether DOCX/PDF/CSV/TXT
+ingestion had been considered. Checked rather than assumed — CSV and TXT already worked (plain
+text, decode cleanly), but PDF and DOCX did not: every text-producing call in the ingest path
+(`classify.detect_content_shape`, `ingestion.classify_source`/`curate_source`/the merge-resolution
+path) used a bare `payload.decode("utf-8", errors="replace")`. For a binary PDF/DOCX this never
+raises — it silently substitutes most of the file with U+FFFD placeholder characters and feeds the
+garbled result straight to the Classifier/Curator LLM calls, producing plausible-looking but
+meaningless output with no visible error anywhere. No spec section names PDF/DOCX support as in
+scope, deferred, or excluded — a genuine unaddressed gap, not a documented boundary the way (say)
+legacy `.doc` now is.
+
+**`doc_extract.py`** (new) — `detect_binary_format` sniffs real magic bytes (`%PDF-` for PDF; the
+ZIP local-file-header bytes plus a `.docx` extension for DOCX, since bare ZIP magic is shared by
+every Office Open XML format and plain `.zip`), and `extract_text` is the new canonical
+raw-bytes-to-text step for the whole ingest path: real extraction (`pypdf`/`python-docx`) for a
+recognized format, a plain UTF-8 decode otherwise, `None` when neither works. A corrupt/truncated
+file whose magic bytes matched but whose container doesn't actually parse gets the same `None`
+outcome as never recognizing the format at all — "couldn't extract," not a crash.
+
+**Explicitly scoped to modern DOCX only, not legacy `.doc`.** The pre-2007 `.doc` format is OLE2/
+CFB binary, not ZIP/XML — a materially different parsing problem with no maintained pure-Python
+reader, and not "the most common" format the direct question named. A `.doc` file is simply
+neither UTF-8-decodable nor PDF/DOCX-shaped, so it gets the same `None`/rejected outcome as any
+other genuinely unsupported binary — a real, stated boundary, not a silent one.
+
+**Every internal `payload.decode("utf-8", errors="replace")` call site now routes through
+`doc_extract.extract_text`** — `classify.detect_content_shape` (feeding the same
+`_parses_as_data` structural check real extracted text instead of a lossy decode), and all three
+of `ingestion.py`'s own decode sites (`classify_source`, the `merge` duplicate-resolution path,
+`curate_source`). Each keeps an `or ""` defensive fallback rather than trusting `extract_text`
+can never return `None` at this point — cheap insurance, not the real gate.
+
+**The real gate is `ingestion.store`** — "the one entry point every submission source goes
+through" (03 §2, its own existing docstring) — rejecting with a new `UnsupportedContentError`
+before a `raw_source`, an object-store write, or any DB row exists at all. This one change point
+covers every current and future submission path uniformly: `api.py`'s `POST /sources` catches it
+and returns a real `400`; `connector_polling.poll_connector`'s per-item loop now catches it
+per-item and skips just that one discovered item (recording `items_skipped` in
+`last_run_detail`, a new key added to that dict — two existing exact-dict-equality tests in
+`test_connector_polling.py` updated accordingly) rather than losing the whole poll run to one bad
+file — defense in depth, since `connectors_git.py`'s own adapter already filters undecodable
+files before they become a `DiscoveredItem`, but a future adapter type might not. MCP's
+`wiki_submit` needed no change: it only ever accepts pasted text (already documented as
+`stdio`'s own scope boundary), which is always valid UTF-8 by construction — it can't hit this
+gate at all.
+
+**Tracked in `phase3-tasklist.md` as step 78** (new track 3f, inserted before the Phase 3 closing
+verify — renumbered from 78 to 79, the only renumbering needed since nothing yet referenced "step
+78" by number) rather than left as an undocumented drive-by fix, matching this project's standing
+discipline for any real, non-trivial code change — even one found outside the two formal audit
+passes gets the same tracked-step treatment step 66 (the pagination gap) already established as
+precedent for a late-discovered finding.
+
+**Verification**: `tests/test_doc_extract.py` (new, 12 tests — real hand-built PDF bytes and a
+real in-memory `python-docx`-generated DOCX, not mocks; corrupt-container and legacy-`.doc`
+cases), `tests/test_store.py` (new, 3), `tests/test_api.py` (+3: a real DOCX upload accepted, a
+plain-text upload, a genuinely unsupported binary rejected with `400`), `tests/
+test_connector_polling.py` (+1, plus 2 existing tests' exact-dict assertions updated for the new
+`items_skipped` key). Full suite: 628 tests green. Live-verified against real dev Postgres and
+real `gpt-5-nano` through the rebuilt containers: a real DOCX runbook and a real PDF each produced
+a genuinely coherent, accurate classifier summary quoting real content back (proof of clean
+extraction, not garbled placeholder text) — the DOCX ran the complete pipeline through to
+`ingested` and searchable; a real PNG-header binary was correctly rejected with a real `400` at
+the real REST API, confirmed via `pip show` inside the rebuilt container that `pypdf`/
+`python-docx` were genuinely installed, not just declared in `pyproject.toml`. Cleaned up the
+throwaway `live62-*` workspace afterward.
+
+**Spec touch-point** (applied): none required — no spec section named PDF/DOCX support as in
+scope or excluded; this closes a real, previously-unaddressed gap rather than deviating from
+anything spec/ already said.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

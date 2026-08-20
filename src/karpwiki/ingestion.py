@@ -25,6 +25,7 @@ from . import (
     classify,
     curate,
     dedup,
+    doc_extract,
     document_types,
     llm,
     objectstore,
@@ -64,6 +65,15 @@ class InvalidResolutionError(ValueError):
     matched page recorded)."""
 
 
+class UnsupportedContentError(ValueError):
+    """The submitted content is neither decodable text nor a recognized binary format
+    (`doc_extract.py`) — found live during Phase 3 step 62 prep, not part of either
+    completeness audit. `connectors_git.py` already skips a file it can't decode rather
+    than submitting it; this closes the same gap for every other entry point by rejecting
+    at `store()`, before a `raw_source` (and the garbled-text classification/curation that
+    would otherwise follow) ever exists."""
+
+
 async def store(
     session: AsyncSession,
     payload: bytes,
@@ -83,6 +93,11 @@ async def store(
     `wiki_submit` tool's on-behalf-of path (09 §5, phase2-tasklist.md step 46) uses it, to
     record the calling agent's own identity for audit without a new core field ("no new
     core field required" is 09 §5's own wording)."""
+    if doc_extract.extract_text(filename, payload) is None:
+        raise UnsupportedContentError(
+            f"{filename!r} could not be read as text, PDF, or DOCX content"
+        )
+
     source_id = uuid.uuid4()
     # Staged outside any workspace prefix: 02 §2's /{workspace_id}/sources/... scheme
     # cannot apply yet because 03 §2 accepts the source before the workspace is known.
@@ -175,7 +190,9 @@ async def classify_source(
     source.artifact_identity = identity
     source.source_version = version
 
-    text = payload.decode("utf-8", errors="replace")
+    # `store()` already rejected anything doc_extract.extract_text can't read before this
+    # raw_source ever existed — `or ""` is a defensive fallback, not the real gate.
+    text = doc_extract.extract_text(source.filename, payload) or ""
     types = [dt.type_code for dt in await document_types.list_active(session)]
     lexical = classify.lexical_match(f"{source.filename}\n{text}", types)
 
@@ -637,7 +654,7 @@ async def _resolve_merge(
 
     try:
         payload = objectstore.read_bytes(source.object_key)
-        new_text = payload.decode("utf-8", errors="replace")
+        new_text = doc_extract.extract_text(source.filename, payload) or ""
         current_version = await session.get(PageVersion, target.current_version_id)
         _, existing_body = split_frontmatter(current_version.content)
         workspace_schema = await schema.load(session, workspace_id=source.workspace_id)
@@ -874,7 +891,7 @@ async def curate_source(
     """
     try:
         payload = objectstore.read_bytes(source.object_key)
-        text = payload.decode("utf-8", errors="replace")
+        text = doc_extract.extract_text(source.filename, payload) or ""
 
         existing = await _existing_concept_entity_pages(session, workspace.workspace_id)
         workspace_schema = await schema.load(session, workspace_id=workspace.workspace_id)
