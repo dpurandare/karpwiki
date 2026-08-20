@@ -17,7 +17,7 @@ import uuid
 from datetime import UTC, date, datetime
 from typing import Protocol
 
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import func, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import (
@@ -874,8 +874,9 @@ async def curate_source(
     try:
         await _refresh_overview(session, workspace_id=workspace.workspace_id)
         await refresh_log(session, workspace_id=workspace.workspace_id)
+        await refresh_index(session, workspace_id=workspace.workspace_id)
     except Exception:
-        logger.exception("failed to refresh overview.md/log.md for %s", source.source_id)
+        logger.exception("failed to refresh overview.md/log.md/index.md for %s", source.source_id)
 
     return PipelineState.ingested
 
@@ -1017,6 +1018,59 @@ async def refresh_log(session: AsyncSession, *, workspace_id: str) -> None:
         title=f"{workspace_id} Log",
         body=body,
     )
+
+
+async def refresh_index(session: AsyncSession, *, workspace_id: str) -> None:
+    """index.md: catalog of all pages, one-line summaries by category (01 §4,
+    phase3-tasklist.md step 60) — real content now, replacing the never-materialized page
+    `search.py`'s own tsvector weight-tier comment has flagged as an approximation since
+    Phase 1. Same refresh points as `refresh_log` (curate_source, rollback, bulk-move) —
+    any of those can change a page's title/description/workspace, all of which the catalog
+    must reflect."""
+    concepts = await _catalog_entries(session, PageType.concept, workspace_id=workspace_id)
+    entities = await _catalog_entries(session, PageType.entity, workspace_id=workspace_id)
+    sources = await _catalog_entries(session, PageType.source, workspace_id=workspace_id)
+    comparisons = await _catalog_entries(session, PageType.comparison, workspace_id=workspace_id)
+    body = curate.render_index_body(
+        concepts=concepts, entities=entities, sources=sources, comparisons=comparisons
+    )
+    await _upsert_singleton(
+        session,
+        workspace_id=workspace_id,
+        path="index.md",
+        page_type=PageType.index,
+        title=f"{workspace_id} Index",
+        body=body,
+    )
+
+
+async def _catalog_entries(
+    session: AsyncSession, page_type: PageType, *, workspace_id: str
+) -> list[tuple[str, str, str]]:
+    """(title, description, path) for every published page of `page_type`, alphabetical by
+    title — index.md's own catalog order (01 §4: "organized by category"). Raw `->>` text
+    extraction, matching `versioning.list_pages`/`search.search()`'s own established
+    convention for reading `frontmatter` fields, rather than the ORM-level JSONB comparator
+    no other query in this codebase uses."""
+    stmt = text(
+        "SELECT COALESCE(pv.frontmatter ->> 'title', '') AS title, "
+        "       COALESCE(pv.frontmatter ->> 'description', '') AS description, "
+        "       p.path AS path "
+        "FROM wiki_page p "
+        "JOIN page_version pv ON pv.version_id = p.current_version_id "
+        "WHERE p.workspace_id = :workspace_id AND p.page_type = :page_type "
+        "      AND p.status = :status "
+        "ORDER BY title"
+    )
+    rows = await session.execute(
+        stmt,
+        {
+            "workspace_id": workspace_id,
+            "page_type": page_type.value,
+            "status": PageStatus.published.value,
+        },
+    )
+    return [(r.title, r.description, r.path) for r in rows]
 
 
 async def _recent_admin_actions(

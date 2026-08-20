@@ -64,6 +64,28 @@ def test_overview_body_caps_at_the_recent_limit():
     assert body.count("- **Page") == curate.OVERVIEW_RECENT_LIMIT
 
 
+def test_index_body_lists_each_category_with_a_linked_entry():
+    body = curate.render_index_body(
+        concepts=[("Retry and Backoff", "How services retry.", "concepts/retry-backoff.md")],
+        entities=[("Payments Worker", "The worker service.", "entities/payments-worker.md")],
+        sources=[("Runbook", "A runbook.", "sources/abc.md")],
+        comparisons=[],
+    )
+    assert "## Concepts" in body
+    assert "[Retry and Backoff](concepts/retry-backoff.md) — How services retry." in body
+    assert "## Entities" in body
+    assert "[Payments Worker](entities/payments-worker.md) — The worker service." in body
+    assert "## Sources" in body
+    assert "[Runbook](sources/abc.md) — A runbook." in body
+    assert "## Comparisons" in body
+    assert "(none yet)" in body
+
+
+def test_index_body_handles_every_category_empty():
+    body = curate.render_index_body(concepts=[], entities=[], sources=[], comparisons=[])
+    assert body.count("(none yet)") == 4
+
+
 def test_log_body_renders_newest_first_as_given():
     now = datetime(2026, 8, 16, tzinfo=timezone.utc)
     body = curate.render_log_body([(now, "Ingested `runbook.md` → 4 page(s) touched")])

@@ -3249,5 +3249,77 @@ real search indexing before cleanup) afterward.
 everything built here; the three AskUserQuestion forks above fill in what those sections
 deliberately left open (exact API shape, rollback inclusion, gate ordering), not deviations.
 
+## 64. Real `index.md` Catalog Page and Catalog-Match Boost (Phase 3 Step 60)
+
+`search.py`'s own comment had flagged this as an accepted gap since Phase 1: `04` §3's
+catalog-match boost was approximated as a `tsvector` weight tier on `description` (baked into
+the same score `index_page` already computes), standing in for a real catalog page that never
+existed. This step builds both real halves: the page, and a real, separate boost step.
+
+**`curate.render_index_body`** (new, pure) — four sections (Concepts/Entities/Sources/
+Comparisons), each `[title](path) — description`, mirroring `render_overview_body`/
+`render_log_body`'s exact shape. `overview`/`index`/`log` are excluded — structural pages, not
+catalog members, the same distinction `curate.PAGE_DIRECTORY` and
+`advisor.ORPHAN_CANDIDATE_PAGE_TYPES` already draw.
+
+**`ingestion.refresh_index`** (new, public — called from `api.py`) queries each category's
+published pages via raw `->>` frontmatter extraction (`versioning.list_pages`/`search.search()`'s
+own established convention, not the ORM-level JSONB comparator no other query in this codebase
+uses), alphabetical by title, and upserts `index.md` via the existing `_upsert_singleton`. Wired
+at the same three refresh points `refresh_log` already has — `curate_source`, the rollback
+endpoint, and bulk-move (both workspaces) — since any of those can change a page's title,
+description, or workspace membership, all of which the catalog must reflect. No dedicated
+backfill for pre-existing workspaces, matching `overview.md`/`log.md`'s own precedent from
+Phase 1 (neither ever got one either) — a workspace only gets a real `index.md` once it next runs
+one of those three operations.
+
+**The real catalog-match boost** lives in `search.search()`'s own SQL, as a genuine second stage
+after the base `ts_rank_cd` score — matching `04` §3's mermaid diagram, which draws "matches an
+index.md catalog entry?" as a distinct step after retrieval, not folded into it (which is exactly
+what the old weight-tier approximation did). A candidate gets `CATALOG_MATCH_BOOST` (a
+multiplicative 1.3x, not additive — `ts_rank_cd`'s absolute scale varies with document
+length/term frequency, so a flat addend would be wrongly-scaled for some candidates; no specific
+magnitude is given anywhere in spec/, this is this implementation's default) only when BOTH hold,
+checked via a real `EXISTS` subquery: (1) a real `page_link` row from that workspace's `index.md`
+to the candidate — `page_links.sync` already creates this automatically the moment `index.md`'s
+real markdown links get written, so this is a genuine structural fact, not assumed or
+recomputed; and (2) the query's tsquery matches specifically *that candidate's own*
+title+description text (recomputed inline via `to_tsvector`, not a coarse "does the query match
+`index.md` *anywhere*" check) — real per-page precision. A coarse whole-document check was
+considered and rejected: since one workspace's `index.md` holds every page's catalog entry in a
+single document, a query matching any ONE entry would otherwise indiscriminately boost every
+catalogued page, not just the one whose entry actually matched.
+
+**Deliberately scoped to the shared Postgres index only.** `dedicated_index.py`'s OpenSearch path
+keeps its existing (pre-step-60, weight-tier-only) ranking — replicating the `page_link` join
+inside an OpenSearch query would mean denormalizing that relational data into the OpenSearch
+document itself, a materially bigger addition than this step takes on. Matches `04` §4's own
+existing precedent that a dedicated workspace's federated score is already an accepted
+approximation (min-max normalization at merge time, not true fusion) — one more acknowledged gap
+in the same category, not a new kind of shortcut.
+
+**Verification**: `tests/test_curate.py` (+2: `render_index_body`'s sections and empty-category
+handling), `tests/test_curate_orchestration.py` (+4: catalog contents after a real curate,
+structural-page exclusion, regeneration-not-appending, and a rollback's restored title/description
+reflected in the catalog), `tests/test_search.py` (+2, the most load-bearing: one proves the
+boost fires — two pages with byte-identical description text, only one linked from a real
+`index.md`, and the catalogued one's score is *exactly* `CATALOG_MATCH_BOOST` times the
+other's, not just "higher"; the other proves the boost does NOT fire on a merely-catalogued but
+non-matching page, by comparing its score against an identical control page in a second
+workspace with no `index.md` at all — equal scores confirms nothing leaked in). Also updated one
+pre-existing test's docstring (`test_description_weight_ranks_a_description_hit_over_a_body_only_hit`,
+renamed from `test_catalog_match_boosts_a_description_hit_over_a_body_only_hit`) to stop
+describing the now-superseded approximation as if it were still the catalog-boost mechanism —
+the test itself still passes unchanged (the weight tier is untouched, just no longer
+mislabeled). Full suite: 601 tests green. Live-verified against real dev Postgres, real MinIO,
+and real `gpt-5-nano` through the rebuilt `gateway`/worker containers: a real ingest produced a
+real `index.md` with real, alphabetized catalog entries across all four sections; confirmed
+6 real `page_link` rows from it directly against dev Postgres; a real `GET /search` query ranked
+the catalogued, matching page above its peers through the real ranking SQL. Cleaned up the
+throwaway `live60-*` workspace afterward.
+
+**Spec touch-point** (applied): `04` §3's mermaid diagram and prose already specify the two-stage
+shape this step builds to; no wording change needed.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

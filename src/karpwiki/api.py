@@ -927,8 +927,11 @@ def _register_routes(app: FastAPI) -> None:
         except ValueError as exc:
             raise ApiError(400, "invalid_request", str(exc)) from exc
 
-        # 05 §6: rollback is logged to log.md, not just admin_action_log (09 §23).
+        # 05 §6: rollback is logged to log.md, not just admin_action_log (09 §23); a
+        # rollback can also change the page's title/description, so its index.md catalog
+        # entry needs refreshing too (phase3-tasklist.md step 60).
         await ingestion.refresh_log(session, workspace_id=page.workspace_id)
+        await ingestion.refresh_index(session, workspace_id=page.workspace_id)
 
         body = _page_version_body(version)
         if idempotency_key:
@@ -1446,9 +1449,12 @@ def _register_routes(app: FastAPI) -> None:
                 tasks.reindex.delay(str(moved_page_id))
 
         # 05 §6: same as rollback, a bulk move is logged to log.md as well as
-        # admin_action_log (09 §23) — for both workspaces it touched.
+        # admin_action_log (09 §23) — for both workspaces it touched. Moved pages also
+        # leave one workspace's catalog and enter the other's (phase3-tasklist.md step 60).
         await ingestion.refresh_log(session, workspace_id=workspace_id)
         await ingestion.refresh_log(session, workspace_id=payload.target_workspace_id)
+        await ingestion.refresh_index(session, workspace_id=workspace_id)
+        await ingestion.refresh_index(session, workspace_id=payload.target_workspace_id)
         await session.commit()
 
         return {

@@ -45,6 +45,14 @@ CONFIG = "english"
 # otherwise produce a tsquery with thousands of terms, which is slow and no more accurate.
 MAX_SIMILARITY_TERMS = 60
 
+# 04 §3's catalog-match boost (phase3-tasklist.md step 60) — a relative, multiplicative
+# boost rather than an additive constant, since ts_rank_cd's absolute scale varies with
+# document length/term frequency and a flat addend would be wrongly-scaled for some
+# candidates. No specific magnitude is given anywhere in spec/; 30% is this
+# implementation's default — noticeable in ranking without letting a catalog match alone
+# outrank a much stronger body-text match.
+CATALOG_MATCH_BOOST = 1.3
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,12 +94,12 @@ async def index_page(session: AsyncSession, *, page: WikiPage, version: PageVers
             workspace_id=page.workspace_id,
             version_id=version.version_id,
             config=CONFIG,
-            # The title carries more signal than the body. `description` (01 §6's required
-            # one-line frontmatter summary — the same content an index.md catalog entry
-            # would hold, 01 §4) sits between the two: this is 04 §3's catalog-match boost,
-            # realized as a weight tier rather than a separate catalog page + join, since no
-            # code yet materializes an actual index.md page to match against (flagged in
-            # phase1-tasklist.md's accepted-gaps note).
+            # The title carries more signal than the body; description sits between the
+            # two. This is ordinary content-quality weighting on its own merits — the
+            # catalog-match boost 04 §3 actually specifies is a real, separate signal now
+            # (phase3-tasklist.md step 60, CATALOG_MATCH_BOOST below), not this weight tier
+            # standing in for it (the pre-step-60 approximation, `09` this file used to note
+            # here).
             title=str(version.frontmatter.get("title", "")),
             description=str(version.frontmatter.get("description", "")),
             body=version.content,
@@ -123,11 +131,27 @@ async def search(
     """Single-stage lexical retrieval with catalog-match boost and result provenance
     (04 §1, §3, §6, §7).
 
-    The boost is baked into `index_page`'s weighting (title > description > body), so
-    ranking here is a plain `ts_rank_cd` order — no separate boost step. No rerank, no
-    synthesis, no LLM. Filters (04 §6) apply before ranking; `page_type`/`tags`/`date`
-    read the frontmatter already stored on the indexed version, so no extra join or
-    denormalized column is needed for them.
+    The catalog-match boost (phase3-tasklist.md step 60) is a real, separate ranking step
+    over the base `ts_rank_cd` score — mirroring 04 §3's own mermaid diagram, which draws
+    "matches an index.md catalog entry?" as a distinct stage after lexical retrieval, not
+    folded into it. A candidate gets the boost only when BOTH hold: (1) a real `page_link`
+    from that workspace's `index.md` to the candidate exists (`page_links.sync` already
+    creates this row automatically whenever `ingestion.refresh_index`, step 60, writes
+    index.md's markdown links — so this is a genuine structural fact, not assumed), and
+    (2) the query matches that specific candidate's own title+description text — the exact
+    content its catalog entry holds, not a coarse "does the query match index.md
+    *anywhere*" check (which would indiscriminately boost every catalogued page whenever
+    *any* catalog entry matched). No rerank, no synthesis, no LLM — the boost is still a
+    single SQL expression, not a second retrieval stage. Filters (04 §6) apply before
+    ranking; `page_type`/`tags`/`date` read the frontmatter already stored on the indexed
+    version, so no extra join or denormalized column is needed for them.
+
+    Scoped to the shared Postgres index only — a dedicated OpenSearch workspace's own
+    `dedicated_index.search()` doesn't get this boost, matching 04 §4's own precedent that
+    a dedicated workspace's scoring is already an accepted approximation (min-max
+    normalization at merge time, not true fusion); replicating a Postgres-`page_link` join
+    inside an OpenSearch query would need denormalizing that data into the OpenSearch
+    document itself, a materially bigger addition this step doesn't take on.
     """
     limit = min(limit, MAX_SEARCH_LIMIT)
     if not workspace_ids or not query.strip():
@@ -144,6 +168,7 @@ async def search(
         "workspace_ids": workspace_ids,
         "statuses": statuses,
         "limit": limit,
+        "catalog_boost": CATALOG_MATCH_BOOST,
     }
     binds = [bindparam("workspace_ids", expanding=True), bindparam("statuses", expanding=True)]
 
@@ -168,7 +193,15 @@ async def search(
     stmt = text(
         "SELECT i.page_id, i.workspace_id, p.path, p.page_type, "
         "       COALESCE(pv.frontmatter ->> 'title', '') AS title, "
-        "       ts_rank_cd(i.tsv, q, 32) AS score, "
+        "       ts_rank_cd(i.tsv, q, 32) * (CASE WHEN EXISTS ( "
+        "           SELECT 1 FROM page_link pl "
+        "           JOIN wiki_page idx ON idx.page_id = pl.from_page_id "
+        "           WHERE pl.to_page_id = i.page_id AND idx.workspace_id = i.workspace_id "
+        "                 AND idx.path = 'index.md' "
+        "       ) AND to_tsvector(CAST(:config AS regconfig), "
+        "                 COALESCE(pv.frontmatter ->> 'title', '') || ' ' || "
+        "                 COALESCE(pv.frontmatter ->> 'description', '')) @@ q "
+        "       THEN :catalog_boost ELSE 1.0 END) AS score, "
         "       ts_headline(CAST(:config AS regconfig), pv.content, q, "
         "                   'MaxFragments=1, MinWords=15, MaxWords=35') AS excerpt, "
         "       pv.content AS content "

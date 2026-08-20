@@ -235,6 +235,104 @@ async def test_overview_is_regenerated_not_appended(session, workspace):
     assert version.content.count("Sources ingested:") == 1
 
 
+async def test_index_lists_the_curated_concept_and_source_pages(session, workspace):
+    source = await _classified(session, workspace)
+    content = _content(
+        pages=[CuratedPage(page_type="concept", title="Backoff", tags=["a", "b"], body="What backoff is.")]
+    )
+    await ingestion.curate_source(session, source=source, workspace=workspace, call=_returns(content))
+    await session.commit()
+
+    result = await session.execute(
+        select(WikiPage).where(WikiPage.workspace_id == workspace.workspace_id, WikiPage.path == "index.md")
+    )
+    index_page = result.scalar_one()
+    version = await session.get(PageVersion, index_page.current_version_id)
+    assert "## Concepts" in version.content
+    assert "[Backoff](concepts/backoff.md)" in version.content
+    assert "## Sources" in version.content
+    assert "Restarting Payments" in version.content
+
+
+async def test_index_excludes_structural_pages(session, workspace):
+    """overview/index/log are structural pages, not catalog members (01 §4's own
+    per-type cardinality distinction — "1 per workspace" vs "many")."""
+    source = await _classified(session, workspace)
+    await ingestion.curate_source(session, source=source, workspace=workspace, call=_returns(_content()))
+    await session.commit()
+
+    result = await session.execute(
+        select(WikiPage).where(WikiPage.workspace_id == workspace.workspace_id, WikiPage.path == "index.md")
+    )
+    version = await session.get(PageVersion, result.scalar_one().current_version_id)
+    assert "(overview.md)" not in version.content
+    assert "(log.md)" not in version.content
+    assert "(index.md)" not in version.content
+
+
+async def test_index_is_regenerated_not_appended(session, workspace):
+    for i in range(2):
+        source = await _classified(session, workspace, filename=f"doc-{i}.md", payload=f"body {i}".encode())
+        await ingestion.curate_source(
+            session, source=source, workspace=workspace, call=_returns(_content(title=f"Doc {i}"))
+        )
+    await session.commit()
+
+    result = await session.execute(
+        select(WikiPage).where(WikiPage.workspace_id == workspace.workspace_id, WikiPage.path == "index.md")
+    )
+    version = await session.get(PageVersion, result.scalar_one().current_version_id)
+    assert version.content.count("## Sources") == 1
+    assert "Doc 0" in version.content
+    assert "Doc 1" in version.content
+
+
+async def test_index_reflects_a_rollbacks_restored_title(session, workspace):
+    source = await _classified(session, workspace)
+    content = _content(
+        pages=[CuratedPage(page_type="concept", title="Backoff", tags=["a", "b"], body="v1")]
+    )
+    await ingestion.curate_source(session, source=source, workspace=workspace, call=_returns(content))
+    await session.commit()
+
+    result = await session.execute(
+        select(WikiPage).where(WikiPage.workspace_id == workspace.workspace_id, WikiPage.path == "concepts/backoff.md")
+    )
+    concept_page = result.scalar_one()
+    original_version_id = concept_page.current_version_id
+    await versioning.write_version(
+        session, page=concept_page, body="v2", author="user:deepak",
+        trigger=versioning.VersionTrigger.manual_edit,
+        frontmatter_updates={"description": "A new description."},
+    )
+    await ingestion.refresh_index(session, workspace_id=workspace.workspace_id)
+    await session.commit()
+
+    index_page = (
+        await session.execute(
+            select(WikiPage).where(WikiPage.workspace_id == workspace.workspace_id, WikiPage.path == "index.md")
+        )
+    ).scalar_one()
+    version = await session.get(PageVersion, index_page.current_version_id)
+    assert "A new description." in version.content
+
+    await versioning.rollback(
+        session, page=concept_page, target_version_id=original_version_id, author="user:admin"
+    )
+    await ingestion.refresh_index(session, workspace_id=workspace.workspace_id)
+    await session.commit()
+
+    version = await session.get(
+        PageVersion,
+        (
+            await session.execute(
+                select(WikiPage).where(WikiPage.workspace_id == workspace.workspace_id, WikiPage.path == "index.md")
+            )
+        ).scalar_one().current_version_id,
+    )
+    assert "A new description." not in version.content
+
+
 async def test_log_reflects_the_ingest_that_triggered_it(session, workspace):
     """log.md materializes ingestion_log, and the ingested transition is what creates the
     entry it needs to show — a naive ordering would refresh the log one ingest too early."""

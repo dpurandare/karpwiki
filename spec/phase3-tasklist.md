@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-59 done, steps 60-78 not started.** Phase 1 (steps 1–21) and Phase 2
+**Status (2026-08-20): steps 57-60 done, steps 61-78 not started.** Phase 1 (steps 1–21) and Phase 2
 (steps 22–56) are both complete — see [`phase1-tasklist.md`](phase1-tasklist.md) and
 [`phase2-tasklist.md`](phase2-tasklist.md). See [`implementation-audit.md`](implementation-audit.md)
 for the full write-up of the two audit passes that shaped track 3a, including redundancy/dead-code
@@ -154,6 +154,27 @@ findings that don't need a roadmap step (tracked there instead).
     real catalog page. Builds on step 57 — once a real markdown export exists, this is what
     populates its `index.md` file, and this step's own real join-based boost replaces the
     weight-tier approximation.
+
+    **Done** — new [`curate.render_index_body`](../src/karpwiki/curate.py) (pure renderer,
+    concepts/entities/sources/comparisons sections) and
+    [`ingestion.refresh_index`](../src/karpwiki/ingestion.py), called at the same three points
+    `refresh_log` already is (`curate_source`, rollback, bulk-move — anything that can change a
+    page's title/description/workspace). `index.md`'s real markdown links make
+    `page_links.sync` create real `page_link` rows automatically — the structural fact
+    [`search.search`](../src/karpwiki/search.py)'s new catalog-match boost joins against.
+    A candidate gets `CATALOG_MATCH_BOOST` (1.3x, this implementation's default — no magnitude is
+    specified anywhere in spec/) only when BOTH hold: a real `page_link` from that workspace's
+    index.md exists, AND the query matches *that specific candidate's* own title+description text
+    — real per-page precision, not a coarse "matches index.md anywhere" check (which would
+    indiscriminately boost every catalogued page whenever any one catalog entry matched).
+    Scoped to the shared Postgres index only; `dedicated_index.py`'s OpenSearch path keeps its
+    existing weight-tier-only ranking, matching 04 §4's own precedent that a dedicated
+    workspace's scoring is already an accepted approximation. Live-verified against real dev
+    Postgres, real MinIO, and real `gpt-5-nano` through the rebuilt containers: a real ingest
+    produced a real `index.md` with real catalog entries organized by category, real `page_link`
+    rows from it to every cataloged page (confirmed directly against dev Postgres), and a real
+    search query ranked the catalogued, matching page highest. See
+    [09](09-implementation-notes.md) §64 for the full writeup.
 
 61. **Structured-data Curator treatment** ([07](07-additional-features-and-roadmap.md) §1). Every
     source is curated as `narrative` today — `curate.py`'s own module docstring has deferred §1.3's

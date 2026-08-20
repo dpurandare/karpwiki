@@ -111,6 +111,38 @@ def render_overview_body(
     )
 
 
+def render_index_body(
+    *,
+    concepts: list[tuple[str, str, str]],
+    entities: list[tuple[str, str, str]],
+    sources: list[tuple[str, str, str]],
+    comparisons: list[tuple[str, str, str]],
+) -> str:
+    """Catalog of all pages, one-line summaries organized by category (01 §4,
+    phase3-tasklist.md step 60) — the literal file-based form of Karpathy's "LLM reads
+    index.md first" pattern (00 §2 Principle 8, 04 §3). Each category is a list of
+    (title, description, path) tuples, alphabetical by title (queried that way — see
+    `ingestion._refresh_index`); `overview`/`index`/`log` are structural pages, not
+    catalog members, matching `curate.PAGE_DIRECTORY`'s own concept/entity-only scope and
+    `advisor.ORPHAN_CANDIDATE_PAGE_TYPES`'s identical structural/content distinction.
+    """
+
+    def _section(name: str, items: list[tuple[str, str, str]]) -> str:
+        if not items:
+            return f"## {name}\n\n(none yet)"
+        lines = "\n".join(f"- [{title}]({path}) — {description}" for title, description, path in items)
+        return f"## {name}\n\n{lines}"
+
+    return "\n\n".join(
+        [
+            _section("Concepts", concepts),
+            _section("Entities", entities),
+            _section("Sources", sources),
+            _section("Comparisons", comparisons),
+        ]
+    )
+
+
 def render_log_body(entries: list[tuple[datetime, str]]) -> str:
     """`entries` is (timestamp, description), newest first, already merged from every
     source 02 §5 names for `log.md` — `ingestion_log` and `admin_action_log` (09 §23);

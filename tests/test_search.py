@@ -67,10 +67,11 @@ async def test_title_matches_outrank_body_matches(session, workspace):
     assert hits[0].score > hits[1].score
 
 
-async def test_catalog_match_boosts_a_description_hit_over_a_body_only_hit(session, workspace):
-    """04 §3: a query matching a page's one-line catalog summary (`description`, the same
-    content an index.md entry would hold) should rank that page above a page that only
-    mentions the term in passing in its body."""
+async def test_description_weight_ranks_a_description_hit_over_a_body_only_hit(session, workspace):
+    """Ordinary content-quality weighting (title > description > body,
+    `search.index_page`'s own tsvector) — independent of, and not to be confused with, the
+    real index.md catalog-match boost tested separately below
+    (phase3-tasklist.md step 60)."""
     described = await _page(
         session,
         workspace,
@@ -90,6 +91,102 @@ async def test_catalog_match_boosts_a_description_hit_over_a_body_only_hit(sessi
     assert len(hits) == 2
     assert hits[0].page_id == described.page_id
     assert hits[0].score > hits[1].score
+
+
+async def _index_md(session, workspace, *, body):
+    """A real index.md page — `versioning.create_page` runs `page_links.sync`, so any
+    markdown link in `body` becomes a real `page_link` row, the structural fact
+    `search.search`'s catalog-match boost joins against."""
+    return await _page(
+        session, workspace, title=f"{workspace.workspace_id} Index", path="index.md",
+        page_type=PageType.index, body=body, description="Workspace index page.",
+    )
+
+
+async def test_catalog_match_boost_ranks_a_catalogued_page_above_an_uncatalogued_one(
+    session, workspace
+):
+    """04 §3: "a query matching a page's catalog entry gets a ranking boost for that
+    page" — a real join against a real index.md `page_link`, not the description weight
+    tier tested above. Both candidate pages share identical body text (so their baseline
+    `ts_rank_cd` is the same); only the catalogued one's title+description embed the
+    query term, and only it is linked from a real index.md."""
+    catalogued = await _page(
+        session,
+        workspace,
+        title="Widget Alpha",
+        description="A special automated retry mechanism for widgets.",
+        body="Supporting detail.",
+    )
+    uncatalogued = await _page(
+        session,
+        workspace,
+        title="Widget Beta",
+        # Identical description text on purpose — isolates the catalog-match boost from
+        # the description-weight tier, which would otherwise inflate both hits equally.
+        description="A special automated retry mechanism for widgets.",
+        body="Supporting detail.",
+    )
+    await _index_md(
+        session,
+        workspace,
+        body=(
+            "## Concepts\n\n"
+            "- [Widget Alpha](concepts/widget-alpha.md) — A special automated retry mechanism "
+            "for widgets.\n"
+        ),
+    )
+
+    hits = await search.search(session, query="retry mechanism", workspace_ids=[workspace.workspace_id])
+    by_id = {h.page_id: h for h in hits}
+    assert catalogued.page_id in by_id
+    assert uncatalogued.page_id in by_id
+    assert by_id[catalogued.page_id].score > by_id[uncatalogued.page_id].score
+    # Identical description text on both, so the ratio between them isolates exactly
+    # CATALOG_MATCH_BOOST — not some other, unrelated score difference.
+    assert by_id[catalogued.page_id].score / by_id[uncatalogued.page_id].score == pytest.approx(
+        search.CATALOG_MATCH_BOOST
+    )
+
+
+async def test_catalog_match_boost_requires_the_query_to_match_that_pages_own_entry(
+    session, workspace, other_workspace
+):
+    """Being linked from index.md alone isn't enough — the query must also match *this*
+    page's own title+description (the text its catalog entry actually holds), not just
+    match index.md somewhere else. Otherwise every catalogued page in a workspace would be
+    boosted by any query that matched any one catalog entry. Proven by comparing the exact
+    same content catalogued (in `workspace`) against an identical control page with no
+    index.md at all (in `other_workspace`) — equal scores means no boost was applied."""
+    catalogued_but_not_matching = await _page(
+        session,
+        workspace,
+        title="Widget Gamma",
+        description="Nothing to do with the query term.",
+        body="This describes a mechanism in some depth with supporting detail.",
+    )
+    await _index_md(
+        session,
+        workspace,
+        body=(
+            "## Concepts\n\n"
+            "- [Widget Gamma](concepts/widget-gamma.md) — Nothing to do with the query term.\n"
+        ),
+    )
+    control = await _page(
+        session,
+        other_workspace,
+        title="Widget Gamma",
+        description="Nothing to do with the query term.",
+        body="This describes a mechanism in some depth with supporting detail.",
+    )
+
+    catalogued_hits = await search.search(session, query="mechanism", workspace_ids=[workspace.workspace_id])
+    control_hits = await search.search(session, query="mechanism", workspace_ids=[other_workspace.workspace_id])
+
+    catalogued_score = {h.page_id: h for h in catalogued_hits}[catalogued_but_not_matching.page_id].score
+    control_score = {h.page_id: h for h in control_hits}[control.page_id].score
+    assert catalogued_score == pytest.approx(control_score)
 
 
 async def test_search_is_workspace_scoped(session, workspace):
