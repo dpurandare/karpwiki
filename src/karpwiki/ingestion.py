@@ -729,6 +729,32 @@ async def resolve_review_item(
             raise InvalidResolutionError(str(exc)) from exc
         return None
 
+    if item.kind is ReviewKind.stuck:
+        # Same "not a source_id" shape as reindex/prune above: `subject_ref` here is a
+        # fixed sentinel, not a RawSource id, so this must also branch before the lookup
+        # below. `resolve_stuck` itself stays bookkeeping-only (advisor.py, same reason as
+        # resolve_reindex/resolve_prune); `abort`'s actual per-source `rejected` transition
+        # happens right here, since it's the one piece of kind-specific pipeline work this
+        # resolution needs and `advisor.py` can't reach `reject_source` without a circular
+        # import. `retry` needs no pipeline-side change at all here — re-dispatching the
+        # correct Celery task per source is `api.py`'s job, done after commit
+        # (`run_resolve_review_item`), the same way reindex's own dispatch is.
+        try:
+            await advisor.resolve_stuck(session, item=item, action=action, actor=actor)
+        except advisor.InvalidResolutionError as exc:
+            raise InvalidResolutionError(str(exc)) from exc
+        if action == "abort":
+            for entry in (item.detail or {}).get("sources", []):
+                stuck_source = await session.get(RawSource, uuid.UUID(entry["source_id"]))
+                if stuck_source is not None and stuck_source.pipeline_state in pipeline.ABORTABLE_IF_STUCK:
+                    await reject_source(
+                        session,
+                        source=stuck_source,
+                        reason="stuck pipeline sweep: aborted by admin",
+                        actor=actor,
+                    )
+        return None
+
     if item.kind is ReviewKind.duplicate and (item.detail or {}).get("raised_by") == "advisor":
         # `subject_ref` is a page_id here (phase2-tasklist.md step 38), not a source_id —
         # there is no RawSource behind an existing-content duplicate finding at all, so

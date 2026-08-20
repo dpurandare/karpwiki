@@ -13,11 +13,13 @@ from karpwiki.models import (
     IndexState,
     IndexStatus,
     IndexType,
+    IngestionLog,
     LinkType,
     PageLink,
     PageStatus,
     PageType,
     PageVersion,
+    PipelineState,
     QueryLog,
     RawSource,
     RawSourceStatus,
@@ -1010,3 +1012,147 @@ async def test_resolve_prune_contradicted_by_rejects_an_unsupported_action(sessi
 
     with pytest.raises(advisor.InvalidResolutionError):
         await advisor.resolve_prune(session, item=item, action="bogus", actor="user:admin")
+
+
+# --- Stuck-Pipeline Sweep Detector (phase3-tasklist.md step 64) --------------------------
+
+
+async def _stuck_source(
+    session,
+    *,
+    workspace=None,
+    filename="doc.md",
+    pipeline_state=PipelineState.submitted,
+    hours_ago=2,
+):
+    """Directly constructs a source resting in `pipeline_state`, with its `ingestion_log`
+    entry backdated `hours_ago` — mirrors `_superseded_source`'s direct-timestamp
+    construction above, since driving a real crash-mid-task isn't practical in a test."""
+    source_id = uuid.uuid4()
+    workspace_id = workspace.workspace_id if workspace is not None else None
+    key = f"/{workspace_id or '_inbox'}/{source_id}/{filename}"
+    payload = b"content"
+    objectstore.write_bytes(key, payload)
+    source = RawSource(
+        source_id=source_id,
+        workspace_id=workspace_id,
+        object_key=key,
+        filename=filename,
+        content_hash=hashlib.sha256(payload).hexdigest(),
+        submitted_by="user:deepak",
+        pipeline_state=pipeline_state,
+    )
+    session.add(source)
+    await session.flush()
+    session.add(
+        IngestionLog(
+            source_id=source_id,
+            workspace_id=workspace_id,
+            from_state=None,
+            to_state=pipeline_state,
+            actor="test",
+            created_at=datetime.now(UTC) - timedelta(hours=hours_ago),
+        )
+    )
+    await session.flush()
+    return source
+
+
+async def test_find_stuck_sources_finds_a_source_past_threshold(session, workspace):
+    stuck = await _stuck_source(session, hours_ago=2)
+    findings = await advisor.find_stuck_sources(session, threshold_hours=1)
+    assert [f.source_id for f in findings] == [stuck.source_id]
+    assert findings[0].pipeline_state is PipelineState.submitted
+
+
+async def test_find_stuck_sources_ignores_a_source_within_threshold(session, workspace):
+    await _stuck_source(session, hours_ago=0.1)
+    findings = await advisor.find_stuck_sources(session, threshold_hours=1)
+    assert findings == []
+
+
+async def test_find_stuck_sources_ignores_classifying_and_duplicate_check(session, workspace):
+    """These two only ever exist inside one atomic worker transaction (pipeline.py's
+    `ABORTABLE_IF_STUCK` docstring) — nothing genuinely rests there, so the detector must
+    not report them even if a row somehow did."""
+    await _stuck_source(session, pipeline_state=PipelineState.classifying, hours_ago=5)
+    await _stuck_source(session, pipeline_state=PipelineState.duplicate_check, hours_ago=5)
+    findings = await advisor.find_stuck_sources(session, threshold_hours=1)
+    assert findings == []
+
+
+async def test_find_stuck_sources_ignores_pending_review(session, workspace):
+    """A source parked at `pending_review` is legitimately awaiting a human, not stuck."""
+    await _stuck_source(session, pipeline_state=PipelineState.pending_review, hours_ago=5)
+    findings = await advisor.find_stuck_sources(session, threshold_hours=1)
+    assert findings == []
+
+
+async def test_find_stuck_sources_uses_the_config_default_when_unset(session, workspace):
+    await _stuck_source(session, hours_ago=advisor.config.STUCK_PIPELINE_THRESHOLD_HOURS + 1)
+    findings = await advisor.find_stuck_sources(session)
+    assert len(findings) == 1
+
+
+async def test_run_stuck_pipeline_detector_creates_a_workspace_less_item(session, workspace):
+    stuck = await _stuck_source(session, filename="a.md", hours_ago=2)
+
+    item = await advisor.run_stuck_pipeline_detector(session, threshold_hours=1)
+    await session.commit()
+
+    assert item is not None
+    assert item.kind is ReviewKind.stuck
+    assert item.workspace_id is None
+    assert item.proposed_action == "retry"
+    assert item.detail["source_count"] == 1
+    assert item.detail["sources"][0]["source_id"] == str(stuck.source_id)
+    assert item.detail["sources"][0]["pipeline_state"] == "submitted"
+
+
+async def test_run_stuck_pipeline_detector_no_findings_returns_none(session, workspace):
+    await _stuck_source(session, hours_ago=0.1)
+    item = await advisor.run_stuck_pipeline_detector(session, threshold_hours=1)
+    assert item is None
+
+
+async def test_run_stuck_pipeline_detector_skips_if_already_open(session, workspace):
+    await _stuck_source(session, filename="a.md", hours_ago=2)
+    first = await advisor.run_stuck_pipeline_detector(session, threshold_hours=1)
+    await session.commit()
+    assert first is not None
+
+    await _stuck_source(session, filename="b.md", hours_ago=2)
+    second = await advisor.run_stuck_pipeline_detector(session, threshold_hours=1)
+    assert second is None
+
+
+async def test_resolve_stuck_is_bookkeeping_only(session, workspace):
+    """`retry`/`abort` both need code advisor.py can't reach without a circular import
+    (`resolve_reindex`'s own docstring explains the same constraint) — this just closes the
+    item; `ingestion.resolve_review_item` is what does the actual pipeline-side work."""
+    stuck = await _stuck_source(session, hours_ago=2)
+    item = await advisor.run_stuck_pipeline_detector(session, threshold_hours=1)
+    await session.commit()
+
+    resolved = await advisor.resolve_stuck(session, item=item, action="retry", actor="user:admin")
+    await session.commit()
+
+    assert resolved.status is ReviewStatus.resolved
+    source = await session.get(RawSource, stuck.source_id)
+    await session.refresh(source)
+    assert source.pipeline_state is PipelineState.submitted
+
+
+async def test_resolve_stuck_rejects_the_wrong_kind(session, workspace):
+    item = await review.create(session, kind=ReviewKind.duplicate, subject_ref="x")
+    with pytest.raises(advisor.InvalidResolutionError):
+        await advisor.resolve_stuck(session, item=item, action="retry", actor="user:admin")
+
+
+async def test_resolve_stuck_rejects_an_unsupported_action(session, workspace):
+    await _stuck_source(session, hours_ago=2)
+    item = await advisor.run_stuck_pipeline_detector(session, threshold_hours=1)
+    await session.commit()
+
+    with pytest.raises(advisor.InvalidResolutionError):
+        await advisor.resolve_stuck(session, item=item, action="bogus", actor="user:admin")

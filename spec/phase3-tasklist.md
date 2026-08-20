@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-63 and 78 done, steps 64-77 and 79 not started.** Step 78 (track
+**Status (2026-08-20): steps 57-64 and 78 done, steps 65-77 and 79 not started.** Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
 not by either completeness audit pass; see its own entry for why. Phase 1 (steps 1–21) and Phase 2
 (steps 22–56) are both complete — see [`phase1-tasklist.md`](phase1-tasklist.md) and
@@ -254,13 +254,38 @@ findings that don't need a roadmap step (tracked there instead).
     `reader` access and confirmed the identical link resolved on the next real request, no
     restart needed. See [09](09-implementation-notes.md) §68 for the full writeup.
 
-64. **Stuck-pipeline sweep detector** ([05](05-admin-backend-and-maintenance.md) §2-3). A source
-    stuck mid-pipeline with genuinely no task ever redelivered for it (a broker message lost
-    before it was ever recorded unacked, or a permanent single-attempt exception that isn't a
-    transient LLM-call failure) has no detector today. Explicitly named "Maintenance Advisor
-    territory (track 2c), not this step's" when step 33 flagged it, but never built among the five
-    real track-2c detectors (steps 36–40) — the sixth one this step adds, same `reindex`-review-item
-    shape the existing five already establish.
+64. **Stuck-pipeline sweep detector** ([05](05-admin-backend-and-maintenance.md) §2-3). **Done.**
+    Only `submitted`/`classified`/`ingesting` can ever be observed persisted in a stuck resting
+    state — traced from the real transaction boundaries (`tasks._classify`/`_curate` each wrap
+    their whole unit of work in one `session_scope()`, so `classifying`/`duplicate_check` only
+    ever exist mid-transaction and a crash there always rolls back, confirming step 33's own live
+    kill-test finding). Retry needs zero new pipeline-transition edges — re-dispatching
+    `classify_source`/`curate_source` per source's own recorded state is always safe from these
+    three resting points. Abort needs exactly one new, precedented edge set: `pipeline.py`'s
+    `ABORTABLE_IF_STUCK` gives each of the three a direct `-> rejected` transition, folded in the
+    same loop pattern already used for `FAILABLE -> error`. New `ReviewKind.stuck` (migration
+    `7cc67060951f`); a global sweep, not per-workspace like the other five detectors — a
+    `submitted`-stuck source has no workspace yet, so `find_stuck_sources`/
+    `run_stuck_pipeline_detector`/`tasks.detect_stuck_pipelines` (own hourly beat entry,
+    `KARPWIKI_MAINTENANCE_STUCK_PIPELINE_INTERVAL_HOURS`) scan and raise one workspace-less item
+    per run, the same shape `submission`/`classification` items already use. Detection threshold
+    (`KARPWIKI_STUCK_PIPELINE_THRESHOLD_HOURS`, default 1h) sits ~6x above
+    `CELERY_VISIBILITY_TIMEOUT_SECONDS` so a genuine crash's own automatic redelivery gets first
+    chance to self-heal. `retry`/`abort`/`dismiss` resolution: `advisor.resolve_stuck` stays
+    bookkeeping-only (same circular-import reasoning as `resolve_reindex`/`resolve_prune`);
+    retry's re-dispatch happens in `api.run_resolve_review_item` post-commit; abort's real
+    transition happens in `ingestion.resolve_review_item`'s new branch, by reusing the existing
+    `reject_source` per stuck source rather than re-deriving its logic. Live-verified against the
+    real dev stack: applied the migration, rebuilt/restarted the gateway and all three affected
+    workers plus celery-beat, confirmed the new beat entry registered live; seeded a real
+    `submitted` source backdated 3 hours, ran the detector task in the live maintenance worker
+    (raised a real workspace-less review item), resolved it `retry` through the real gateway —
+    `worker-classification`'s own logs confirmed it genuinely picked up the re-dispatched task off
+    the real broker; seeded a second `classified` source in a real throwaway workspace, resolved
+    it `abort` through the same live endpoint — confirmed both status axes flipped to `rejected`
+    and the placeholder page was rewritten. See [09](09-implementation-notes.md) §69 for the full
+    writeup, including the widened `pipeline.py` transition and the rewritten
+    `test_placeholder.py` case it required.
 
 65. **Real cross-workspace / global-admin grant primitive, or an explicit decision not to build
     one** ([06](06-api-mcp-and-scaling.md) §3). `06` §3's own principal table names "global admin

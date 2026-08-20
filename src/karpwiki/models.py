@@ -120,6 +120,7 @@ class ReviewKind(enum.Enum):
     duplicate = "duplicate"
     reindex = "reindex"
     prune = "prune"
+    stuck = "stuck"
 
 
 class ReviewStatus(enum.Enum):

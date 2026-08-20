@@ -102,6 +102,21 @@ MAINTENANCE_CONTRADICTION_INTERVAL_HOURS = float(
 CONNECTOR_DISPATCH_INTERVAL_MINUTES = float(
     os.environ.get("KARPWIKI_CONNECTOR_DISPATCH_INTERVAL_MINUTES", "5")
 )
+
+# Stuck-Pipeline Sweep Detector (phase3-tasklist.md step 64) — deployment-wide operational
+# tuning, same category as the maintenance cadence above, not per-workspace content tuning.
+# Threshold sits well above `CELERY_VISIBILITY_TIMEOUT_SECONDS` (600s/10min default): that's
+# how long a genuine worker crash takes to self-heal via redelivery (09 §36), so this
+# detector should only fire for a source that's been resting well past what automatic
+# recovery would explain — a lost dispatch, not an in-progress crash recovery. The sweep
+# interval defaults to match the threshold rather than the daily/weekly detector cadence,
+# since an operational issue like this is worth surfacing within about an hour, not a day.
+STUCK_PIPELINE_THRESHOLD_HOURS = float(
+    os.environ.get("KARPWIKI_STUCK_PIPELINE_THRESHOLD_HOURS", "1")
+)
+MAINTENANCE_STUCK_PIPELINE_INTERVAL_HOURS = float(
+    os.environ.get("KARPWIKI_MAINTENANCE_STUCK_PIPELINE_INTERVAL_HOURS", "1")
+)
 # Git clone timeout (connectors_git.py, step 54) — scales with the repos a deployment's
 # connectors actually poll, which varies per deployment.
 GIT_CLONE_TIMEOUT_SECONDS = int(os.environ.get("KARPWIKI_GIT_CLONE_TIMEOUT_SECONDS", "60"))

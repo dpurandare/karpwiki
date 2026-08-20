@@ -14,18 +14,20 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import exists, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import config, curate, dedup, llm, review, schema, search, versioning
+from . import config, curate, dedup, llm, pipeline, review, schema, search, versioning
 from .frontmatter import split_frontmatter
 from .models import (
     IndexState,
     IndexStatus,
+    IngestionLog,
     PageLink,
     PageStatus,
     PageType,
     PageVersion,
+    PipelineState,
     QueryLog,
     RawSource,
     RawSourceStatus,
@@ -1048,3 +1050,130 @@ async def run_contradiction_detector(
         )
         items.append(item)
     return items
+
+
+# Only these three can ever be observed *persisted* in a stuck state (pipeline.py's
+# `ABORTABLE_IF_STUCK` — same set, imported from there rather than redefined here so the
+# detector and the abort transition can never drift apart).
+STUCK_PIPELINE_STATES = pipeline.ABORTABLE_IF_STUCK
+
+
+@dataclass(frozen=True)
+class StuckSourceFinding:
+    source_id: uuid.UUID
+    workspace_id: str | None
+    filename: str
+    pipeline_state: PipelineState
+    entered_state_at: datetime
+
+
+async def find_stuck_sources(
+    session: AsyncSession, *, threshold_hours: float | None = None
+) -> list[StuckSourceFinding]:
+    """A source sitting in `submitted`/`classified`/`ingesting` — each independently
+    committed, each waiting on a *separate* Celery dispatch that might have been lost
+    (broker message dropped, dispatch code never reached) — past `threshold_hours`
+    (deliberately well above `CELERY_VISIBILITY_TIMEOUT_SECONDS`, `config.py`, so a normal
+    crash-and-redeliver has time to self-heal first). "How long stuck" is measured off the
+    latest `ingestion_log` entry per source (`raw_source` itself has no per-state
+    timestamp), not `raw_source.created_at`, which only ever records submission time."""
+    threshold = (
+        config.STUCK_PIPELINE_THRESHOLD_HOURS if threshold_hours is None else threshold_hours
+    )
+    cutoff = datetime.now(UTC) - timedelta(hours=threshold)
+    entered_at = (
+        select(
+            IngestionLog.source_id, func.max(IngestionLog.created_at).label("entered_at")
+        )
+        .group_by(IngestionLog.source_id)
+        .subquery()
+    )
+    rows = (
+        await session.execute(
+            select(RawSource, entered_at.c.entered_at)
+            .join(entered_at, entered_at.c.source_id == RawSource.source_id)
+            .where(
+                RawSource.pipeline_state.in_(STUCK_PIPELINE_STATES),
+                entered_at.c.entered_at < cutoff,
+            )
+            .order_by(entered_at.c.entered_at)
+        )
+    ).all()
+    return [
+        StuckSourceFinding(
+            source_id=source.source_id,
+            workspace_id=source.workspace_id,
+            filename=source.filename,
+            pipeline_state=source.pipeline_state,
+            entered_state_at=entered_state_at,
+        )
+        for source, entered_state_at in rows
+    ]
+
+
+async def _open_stuck_item(session: AsyncSession) -> ReviewItem | None:
+    return (
+        await session.execute(
+            select(ReviewItem).where(
+                ReviewItem.kind == ReviewKind.stuck,
+                ReviewItem.status == ReviewStatus.open,
+            )
+        )
+    ).scalars().first()
+
+
+async def run_stuck_pipeline_detector(
+    session: AsyncSession, *, threshold_hours: float | None = None
+) -> ReviewItem | None:
+    """One batched review item per run, not per workspace like the other five detectors
+    (05 §2) — a `submitted`-stuck source has no `workspace_id` yet (03 §1), so this
+    detector can't fan out per workspace the way they do. `workspace_id=None` here is the
+    same shape `submission`/`classification` items already use for exactly this reason
+    (09 §22), not a gap."""
+    if await _open_stuck_item(session) is not None:
+        return None
+    findings = await find_stuck_sources(session, threshold_hours=threshold_hours)
+    if not findings:
+        return None
+
+    severity = "high" if len(findings) >= 10 else "medium" if len(findings) >= 3 else "low"
+    return await review.create(
+        session,
+        kind=ReviewKind.stuck,
+        subject_ref="stuck-pipeline-sweep",
+        workspace_id=None,
+        severity=severity,
+        proposed_action="retry",
+        detail={
+            "raised_by": "advisor",
+            "source_count": len(findings),
+            "sources": [
+                {
+                    "source_id": str(f.source_id),
+                    "workspace_id": f.workspace_id,
+                    "filename": f.filename,
+                    "pipeline_state": f.pipeline_state.value,
+                    "entered_state_at": f.entered_state_at.isoformat(),
+                }
+                for f in findings
+            ],
+        },
+    )
+
+
+async def resolve_stuck(
+    session: AsyncSession, *, item: ReviewItem, action: str, actor: str
+) -> ReviewItem:
+    """Admin resolution of a `stuck` review item (phase3-tasklist.md step 64). Bookkeeping
+    only — same "no dispatch/side effect here" shape as `resolve_reindex`/`resolve_prune`
+    above, for the same reason (`tasks.py` already imports `ingestion.py`): `retry`'s
+    re-dispatch and `abort`'s per-source `rejected` transition both need code only
+    `ingestion.py`/`api.py` can reach without a circular import, so `resolve_review_item`
+    (`ingestion.py`) does that work itself, right after calling this."""
+    if item.kind is not ReviewKind.stuck:
+        raise InvalidResolutionError(f"review item {item.review_id} is not a stuck item")
+    if action not in ("retry", "abort", "dismiss"):
+        raise InvalidResolutionError(
+            f"{action!r} is not a supported stuck resolution (retry | abort | dismiss)"
+        )
+    return await review.resolve(session, item=item, action=action, actor=actor)

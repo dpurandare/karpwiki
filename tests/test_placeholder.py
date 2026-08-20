@@ -144,10 +144,31 @@ async def test_retrying_classification_does_not_duplicate_the_placeholder(sessio
     assert pages[0].page_id == first.page_id
 
 
-async def test_reject_is_legal_only_from_pending_review(session, workspace):
+async def test_reject_is_illegal_from_a_state_nothing_ever_finds_a_source_resting_in(
+    session, workspace
+):
+    """`classifying` only ever exists inside one atomic worker transaction (pipeline.py's
+    `ABORTABLE_IF_STUCK` docstring, phase3-tasklist.md step 64) — nothing, review or
+    otherwise, ever legitimately finds a source resting there to reject."""
     source = await _submitted(session)
+    await pipeline.transition(
+        session, source=source, to_state=PipelineState.classifying, actor="user:admin"
+    )
     with pytest.raises(pipeline.IllegalTransition):
         await ingestion.reject_source(session, source=source, reason="not relevant")
+
+
+async def test_reject_is_legal_from_the_stuck_pipeline_abortable_states(session, workspace):
+    """Step 64 widened `reject_source`'s legal starting states beyond `pending_review` to
+    also cover `submitted`/`classified`/`ingesting` — the three a Stuck-Pipeline Sweep
+    abort can land on (`pipeline.ABORTABLE_IF_STUCK`)."""
+    source = await _submitted(session)
+    state = await ingestion.reject_source(
+        session, source=source, reason="stuck pipeline sweep: aborted by admin"
+    )
+    assert state is PipelineState.rejected
+    assert source.pipeline_state is PipelineState.rejected
+    assert source.status is RawSourceStatus.rejected
 
 
 async def test_reject_flips_both_pipeline_state_and_raw_source_status(session, workspace):

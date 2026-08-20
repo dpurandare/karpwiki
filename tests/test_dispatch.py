@@ -315,6 +315,138 @@ async def test_resolving_delete_superseded_source_archives_it_no_dispatch(
     assert source.status is RawSourceStatus.archived
 
 
+# --- Stuck-Pipeline Sweep (phase3-tasklist.md step 64) -----------------------------------
+
+
+async def _stuck_source(session, *, workspace=None, filename="doc.md", pipeline_state, hours_ago=2):
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    from karpwiki import objectstore
+    from karpwiki.models import IngestionLog
+
+    source_id = uuid.uuid4()
+    workspace_id = workspace.workspace_id if workspace is not None else None
+    key = f"/{workspace_id or '_inbox'}/{source_id}/{filename}"
+    payload = b"content"
+    objectstore.write_bytes(key, payload)
+    source = RawSource(
+        source_id=source_id,
+        workspace_id=workspace_id,
+        object_key=key,
+        filename=filename,
+        content_hash=hashlib.sha256(payload).hexdigest(),
+        submitted_by="user:deepak",
+        pipeline_state=pipeline_state,
+    )
+    session.add(source)
+    await session.flush()
+    session.add(
+        IngestionLog(
+            source_id=source_id,
+            workspace_id=workspace_id,
+            from_state=None,
+            to_state=pipeline_state,
+            actor="test",
+            created_at=datetime.now(UTC) - timedelta(hours=hours_ago),
+        )
+    )
+    await session.flush()
+    return source
+
+
+async def test_resolving_stuck_retry_dispatches_classify_source_for_a_submitted_source(
+    client, session, workspace, dispatched
+):
+    """A `submitted`-stuck source is the state a lost first dispatch would still be sitting
+    in — re-dispatching `classify_source` directly is safe, no transition needed."""
+    from karpwiki import advisor
+
+    await _grant_admin(session, workspace)
+    stuck = await _stuck_source(session, pipeline_state=PipelineState.submitted, hours_ago=2)
+    item = await advisor.run_stuck_pipeline_detector(session, threshold_hours=1)
+    await session.commit()
+
+    resp = await client.post(
+        f"/review-items/{item.review_id}/resolve", headers=ADMIN, json={"action": "retry"}
+    )
+    assert resp.status_code == 200
+    assert dispatched["classify_source"] == [str(stuck.source_id)]
+    assert dispatched["curate_source"] == []
+
+
+async def test_resolving_stuck_retry_dispatches_curate_source_for_a_classified_source(
+    client, session, workspace, dispatched
+):
+    """`classified`/`ingesting` are both already re-entrant by design (`tasks._curate`'s
+    own if/elif branching on `pipeline_state`) — re-dispatching `curate_source` directly is
+    safe, no transition needed."""
+    from karpwiki import advisor
+
+    await _grant_admin(session, workspace)
+    stuck = await _stuck_source(
+        session, workspace=workspace, pipeline_state=PipelineState.classified, hours_ago=2
+    )
+    item = await advisor.run_stuck_pipeline_detector(session, threshold_hours=1)
+    await session.commit()
+
+    resp = await client.post(
+        f"/review-items/{item.review_id}/resolve", headers=ADMIN, json={"action": "retry"}
+    )
+    assert resp.status_code == 200
+    assert dispatched["curate_source"] == [str(stuck.source_id)]
+    assert dispatched["classify_source"] == []
+
+
+async def test_resolving_stuck_abort_rejects_the_source_no_dispatch(
+    client, session, workspace, dispatched
+):
+    from karpwiki import advisor
+    from karpwiki.models import RawSourceStatus
+
+    await _grant_admin(session, workspace)
+    stuck = await _stuck_source(
+        session, workspace=workspace, pipeline_state=PipelineState.ingesting, hours_ago=2
+    )
+    item = await advisor.run_stuck_pipeline_detector(session, threshold_hours=1)
+    await session.commit()
+
+    resp = await client.post(
+        f"/review-items/{item.review_id}/resolve", headers=ADMIN, json={"action": "abort"}
+    )
+    assert resp.status_code == 200
+    assert dispatched["classify_source"] == []
+    assert dispatched["curate_source"] == []
+    assert dispatched["reindex"] == []
+
+    source = await session.get(RawSource, stuck.source_id)
+    await session.refresh(source)
+    assert source.pipeline_state is PipelineState.rejected
+    assert source.status is RawSourceStatus.rejected
+
+
+async def test_resolving_stuck_dismiss_leaves_the_source_untouched_no_dispatch(
+    client, session, workspace, dispatched
+):
+    from karpwiki import advisor
+
+    await _grant_admin(session, workspace)
+    stuck = await _stuck_source(session, pipeline_state=PipelineState.submitted, hours_ago=2)
+    item = await advisor.run_stuck_pipeline_detector(session, threshold_hours=1)
+    await session.commit()
+
+    resp = await client.post(
+        f"/review-items/{item.review_id}/resolve", headers=ADMIN, json={"action": "dismiss"}
+    )
+    assert resp.status_code == 200
+    assert dispatched["classify_source"] == []
+    assert dispatched["curate_source"] == []
+
+    source = await session.get(RawSource, stuck.source_id)
+    await session.refresh(source)
+    assert source.pipeline_state is PipelineState.submitted
+
+
 async def test_resolving_advisor_duplicate_merge_dispatches_reindex_for_the_primary_page(
     client, session, workspace, dispatched, monkeypatch
 ):

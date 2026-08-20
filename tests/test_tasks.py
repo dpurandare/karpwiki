@@ -358,6 +358,21 @@ def test_beat_schedule_wires_both_dispatch_tasks():
     assert schedule["maintenance-contradiction-detector"]["schedule"] >= schedule["maintenance-daily-detectors"]["schedule"]
 
 
+def test_maintenance_queue_registers_the_stuck_pipeline_detector():
+    """Step 64."""
+    assert tasks.app.tasks["karpwiki.maintenance.detect_stuck_pipelines"] is not None
+
+
+def test_beat_schedule_wires_the_stuck_pipeline_detector():
+    """Step 64 — its own entry, not folded into `maintenance-daily-detectors`: that
+    dispatcher fans out per workspace, which doesn't fit this detector's global sweep."""
+    schedule = tasks.app.conf.beat_schedule
+    assert (
+        schedule["maintenance-stuck-pipeline-detector"]["task"]
+        == "karpwiki.maintenance.detect_stuck_pipelines"
+    )
+
+
 async def test_detect_contradictions_task_raises_a_review_item(session, workspace, task_db):
     from datetime import date
 
@@ -406,6 +421,53 @@ async def test_detect_contradictions_task_raises_a_review_item(session, workspac
         )
     ).scalar_one()
     assert item.detail["reason"] == "contradicted_by"
+
+
+async def test_detect_stuck_pipelines_task_raises_a_workspace_less_review_item(
+    session, workspace, task_db
+):
+    """Step 64 — global sweep, no `workspace_id` argument (unlike every task above): a
+    `submitted`-stuck source has none of its own yet (03 §1)."""
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    from karpwiki import objectstore
+    from karpwiki.models import IngestionLog, ReviewItem, ReviewKind
+
+    source_id = uuid.uuid4()
+    key = f"/_inbox/{source_id}/lost.md"
+    objectstore.write_bytes(key, b"content")
+    source = RawSource(
+        source_id=source_id,
+        object_key=key,
+        filename="lost.md",
+        content_hash=hashlib.sha256(b"content").hexdigest(),
+        submitted_by="user:deepak",
+        pipeline_state=PipelineState.submitted,
+    )
+    session.add(source)
+    await session.flush()
+    session.add(
+        IngestionLog(
+            source_id=source_id,
+            from_state=None,
+            to_state=PipelineState.submitted,
+            actor="test",
+            created_at=datetime.now(UTC) - timedelta(hours=2),
+        )
+    )
+    await session.commit()
+
+    await tasks._detect_stuck_pipelines()
+
+    item = (
+        await session.execute(
+            select(ReviewItem).where(
+                ReviewItem.workspace_id.is_(None), ReviewItem.kind == ReviewKind.stuck
+            )
+        )
+    ).scalar_one()
+    assert item.detail["sources"][0]["source_id"] == str(source_id)
 
 
 async def test_detect_staleness_tiered_task_flags_a_high_traffic_page_at_the_short_bar(

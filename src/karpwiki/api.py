@@ -1867,6 +1867,17 @@ async def run_resolve_review_item(
     ):
         reindex_page_ids = [item.detail["primary_page_id"]]
 
+    # Step 64: approving a Stuck-Pipeline Sweep item's `retry` re-dispatches exactly the
+    # sources it found, from each one's own recorded state (advisor.py) — `classify_source`
+    # for a `submitted` source (safe to re-run: that's the state a lost first dispatch
+    # would still be sitting in, no transition needed) and `curate_source` for
+    # `classified`/`ingesting` (already re-entrant by design, `tasks._curate`'s own
+    # if/elif branching on `pipeline_state`). `abort`/`dismiss` need no dispatch here —
+    # `abort`'s pipeline-side work already happened inside `resolve_review_item` above.
+    retry_sources: list[dict] = []
+    if item.kind is ReviewKind.stuck and action == "retry":
+        retry_sources = (item.detail or {}).get("sources", [])
+
     body = {
         "review_id": str(item.review_id),
         "status": item.status.value,
@@ -1880,6 +1891,11 @@ async def run_resolve_review_item(
         tasks.reindex.delay(str(merge_page_id))
     for page_id in reindex_page_ids:
         tasks.reindex.delay(page_id)
+    for source_entry in retry_sources:
+        if source_entry["pipeline_state"] == PipelineState.submitted.value:
+            tasks.classify_source.delay(source_entry["source_id"])
+        else:
+            tasks.curate_source.delay(source_entry["source_id"])
     return body
 
 

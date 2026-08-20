@@ -3566,5 +3566,123 @@ workspaces afterward.
 **Spec touch-point** (applied): none required — `01` §1's own table and `09` §31's own flag
 already specify this behavior in full; this step closes the gap, not a deviation from either.
 
+## 69. Stuck-Pipeline Sweep Detector (Phase 3 Step 64)
+
+**Only three `PipelineState`s can ever be observed persisted in a "stuck" resting state:
+`submitted`, `classified`, `ingesting`.** Traced from the real transaction boundaries, not
+assumed off the state diagram: `tasks._classify`/`_curate` each wrap their entire unit of work in
+exactly one `db.session_scope()` (`async with session.begin(): yield session`), which commits only
+on successful exit and rolls back entirely on any exception. `classifying` and `duplicate_check`
+each exist only *inside* one of those transactions, alongside the exit transition that leaves
+them — a crash there always rolls back to whichever state existed before that task started, the
+same finding step 33's own live kill-test already recorded ("killed worker-classification
+mid-task... the source sat at `submitted` for minutes afterward," not `classifying`). There is
+nothing for this detector to find in either state, and nothing for an admin to abort there — `05`
+§2 names "a source stuck mid-pipeline" as a gap without specifying which states qualify; this is
+the concrete answer, derived rather than guessed.
+
+**Retry needs zero new pipeline-transition edges.** `submitted` is exactly the state a lost first
+dispatch leaves a source in — re-`classify_source.delay()`-ing it directly is safe. `classified`
+and `ingesting` are already re-entrant by design: `tasks._curate`'s own `if pipeline_state is
+classified: run check_duplicates / elif ingesting: call curate_source directly` branching exists
+for exactly this re-dispatch shape (an admin-resolved duplicate already lands a source at
+`ingesting` and re-enters this same task). Retry for all three is "call the right existing task
+again," nothing more.
+
+**Abort needs exactly one new, precedented edge set.** `pipeline.py`'s `ABORTABLE_IF_STUCK =
+{submitted, classified, ingesting}` — the identical three-state set `find_stuck_sources` scans —
+each gain a direct `-> rejected` transition, added via the same fold-in-a-loop pattern the module
+already uses for `FAILABLE -> error`. `rejected` was previously reachable only through
+`pending_review` (`_RESUME_FROM_REVIEW`, itself never exercised by any real code path — confirmed
+by grep, no caller transitions `pending_review -> classifying/duplicate_check` or `error ->
+pending_review` today); this widens where an admin can decline a source without touching that
+existing, still-dormant edge set at all.
+
+**A new `review_item.kind`: `ReviewKind.stuck`** (migration `7cc67060951f`, `ALTER TYPE
+review_kind ADD VALUE`). None of the five existing kinds fit "a source parked mid-pipeline" —
+`submission`/`classification`/`duplicate` are all per-source at the point a source *needs*
+attention, not per-batch after the fact; `reindex`/`prune` are the closest shape (batched,
+workspace-scoped) but carry their own kind-specific resolution vocabulary already. Confirmed with
+the user directly (a rejected first attempt at this question, then a clarifying "do we have abort
+and retry" that led to the transaction-boundary tracing above, then a second, simpler question)
+rather than assumed.
+
+**A global sweep, not per-workspace like the other five detectors.** `find_stuck_sources` scans
+across every workspace in one call, and `run_stuck_pipeline_detector`/its Celery wrapper
+(`tasks.detect_stuck_pipelines`, own `maintenance-stuck-pipeline-detector` beat entry, default
+hourly via `KARPWIKI_MAINTENANCE_STUCK_PIPELINE_INTERVAL_HOURS`) take no `workspace_id` at all —
+a `submitted`-stuck source has no workspace yet (`raw_source.workspace_id` is nullable exactly
+for this reason, `03` §1), so the existing `_dispatch_daily_detectors`'s per-workspace fan-out
+(which assumes every detector it calls takes one) cannot cover it. One batched item per *run*,
+`workspace_id=None` — the same shape `submission`/`classification` items already use (`09` §22),
+not a gap; resolution authorization already handles a `None`-workspace item via
+`any_workspace_with_role`, so no new AuthZ code was needed.
+
+**Detection threshold sits well above the crash-recovery window on purpose**:
+`KARPWIKI_STUCK_PIPELINE_THRESHOLD_HOURS` (default 1h) is ~6x
+`CELERY_VISIBILITY_TIMEOUT_SECONDS` (600s/10min default, `09` §36) — long enough that a genuine
+worker crash's own automatic redelivery has time to self-heal first, so this only fires for what
+that mechanism can't explain (a broker message genuinely dropped, dispatch code never reached).
+"How long stuck" is read off each source's latest `ingestion_log.created_at`, not
+`raw_source.created_at` (which only ever records original submission time, not time-in-current-
+state).
+
+**Resolution split mirrors `resolve_reindex`/`resolve_prune`'s existing circular-import
+avoidance, plus one new wrinkle.** `advisor.resolve_stuck` is bookkeeping-only (validates
+kind/action, calls `review.resolve`) for the same reason those two are: `tasks.py` already imports
+`ingestion.py`, so `advisor.py` can't dispatch Celery tasks itself. `retry`'s actual re-dispatch —
+reading each source's *recorded* state out of `item.detail["sources"]` and calling
+`classify_source.delay`/`curate_source.delay` accordingly — happens in `api.run_resolve_review_item`
+after commit, extending the same post-commit dispatch block `reindex`'s own page-list dispatch
+already uses. `abort`'s pipeline-side work — the actual `-> rejected` transition per source —
+happens one layer earlier than reindex/prune's pattern, inside `ingestion.resolve_review_item`'s
+new `stuck` branch, by calling the *existing* `ingestion.reject_source` (added step 13, unchanged)
+directly for each source still sitting in an abortable state at resolution time. Reusing it rather
+than re-deriving the same three lines (transition, `raw_source.status = rejected`, conditional
+placeholder-page rewrite) in advisor.py was deliberate: `advisor.py` can't import `ingestion.py`
+(the reverse import already exists), but `ingestion.py` calling its own function is free, and
+`reject_source`'s existing `if source.workspace_id is not None` guard already does exactly the
+right thing for a workspace-less `submitted`-stuck source (skips the placeholder rewrite, since
+none exists yet). A source that progressed past its recorded state before an admin got to it
+(finished on its own between detection and resolution) is silently skipped rather than forced
+backward — checked against the source's *current* `pipeline_state`, not the snapshot in
+`item.detail`.
+
+**`pipeline.py`'s state machine genuinely widened**: `submitted -> rejected` is now a legal
+`reject_source` transition where it previously raised `IllegalTransition` —
+`tests/test_placeholder.py`'s `test_reject_is_legal_only_from_pending_review` asserted the old,
+narrower behavior and was rewritten (`test_reject_is_legal_from_the_stuck_pipeline_abortable_states`
+covers the new positive case; `test_reject_is_illegal_from_a_state_nothing_ever_finds_a_source_
+resting_in` keeps the negative case alive, moved to `classifying` — a state that remains provably
+unreachable-at-rest either way).
+
+**Verification**: `tests/test_advisor.py` (+11): `find_stuck_sources` past/within threshold,
+ignores `classifying`/`duplicate_check`/`pending_review`, config-default threshold;
+`run_stuck_pipeline_detector` creates a workspace-less item, no-findings, skip-if-open;
+`resolve_stuck` bookkeeping-only, wrong-kind, unsupported-action. `tests/test_dispatch.py` (+4,
+through the real `POST /review-items/{id}/resolve` endpoint): retry dispatches `classify_source`
+for a `submitted` source and `curate_source` for a `classified` one, abort rejects with no
+dispatch, dismiss leaves the source untouched. `tests/test_tasks.py` (+3): task/beat-schedule
+registration, `_detect_stuck_pipelines` raises a workspace-less item against the real task
+database. `tests/test_placeholder.py`: 1 test rewritten into 2 (above). Full suite: 658 tests
+green. Live-verified against the real dev stack: applied migration `7cc67060951f` directly against
+dev Postgres, rebuilt and restarted `gateway`/all three affected workers/`celery-beat`; confirmed
+`maintenance-stuck-pipeline-detector` registered in the live beat process. Seeded a real
+`submitted` source with a `created_at`/`ingestion_log` entry backdated 3 hours, ran
+`tasks.detect_stuck_pipelines.apply()` in the live `worker-maintenance` container — it raised a
+real, workspace-less review item. Resolved it `retry` through the real gateway (`POST /review-
+items/{id}/resolve` via nginx on :8080) — `worker-classification`'s own logs show it genuinely
+picked up the re-dispatched `classify_source` task off the real Redis broker (it then failed on a
+`FileNotFoundError` against the object store, expected: the seeded row was a synthetic DB-only
+fixture with no real object body, not a defect in the dispatch path itself). Seeded a second
+source at `classified` in a real throwaway workspace, resolved it `abort` through the same live
+endpoint — confirmed both `raw_source.pipeline_state` and `.status` flipped to `rejected` and its
+placeholder page was rewritten to the rejected-page content, all through `reject_source`'s reuse
+path. Cleaned up all seeded rows and the throwaway workspace afterward.
+
+**Spec touch-point** (applied): `05` §2's named gap ("a source stuck mid-pipeline needs a sweep
+detector — not built yet") is closed. No deviation from `03` §1's transition table beyond the
+one documented, precedented widening above.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

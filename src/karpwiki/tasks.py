@@ -28,6 +28,7 @@ from .config import (
     CONNECTOR_DISPATCH_INTERVAL_MINUTES,
     MAINTENANCE_CONTRADICTION_INTERVAL_HOURS,
     MAINTENANCE_INTERVAL_HOURS,
+    MAINTENANCE_STUCK_PIPELINE_INTERVAL_HOURS,
 )
 from .db import engine, session_scope
 from .models import Connector, ConnectorState, PipelineState, RawSource, Workspace, WorkspaceStatus
@@ -87,6 +88,15 @@ app.conf.beat_schedule = {
     "connector-polling-dispatch": {
         "task": "karpwiki.connector_polling.dispatch_connector_polls",
         "schedule": CONNECTOR_DISPATCH_INTERVAL_MINUTES * 60,
+    },
+    # Step 64 — its own entry rather than folded into `maintenance-daily-detectors`: that
+    # dispatcher enumerates workspaces and calls each detector per-workspace (below), which
+    # doesn't fit a global sweep (a `submitted`-stuck source has no workspace yet). Interval
+    # matches the detection threshold by default (`config.py`) — an hourly cadence for an
+    # hourly threshold, not the four content detectors' daily one.
+    "maintenance-stuck-pipeline-detector": {
+        "task": "karpwiki.maintenance.detect_stuck_pipelines",
+        "schedule": MAINTENANCE_STUCK_PIPELINE_INTERVAL_HOURS * 3600,
     },
 }
 
@@ -282,6 +292,15 @@ async def _detect_staleness_tiered(workspace_id: str) -> None:
         )
 
 
+async def _detect_stuck_pipelines() -> None:
+    """Phase 3 step 64 — global sweep, not per-workspace like the four detectors in
+    `_dispatch_daily_detectors` below: a `submitted`-stuck source has no `workspace_id` yet
+    (03 §1), so it gets its own beat entry above instead of joining that dispatcher, which
+    assumes every detector it calls takes one."""
+    async with session_scope() as session:
+        await advisor.run_stuck_pipeline_detector(session)
+
+
 async def _active_workspace_ids(session) -> list[str]:
     return (
         (
@@ -426,6 +445,11 @@ def detect_contradictions(workspace_id: str) -> None:
 @app.task(name="karpwiki.maintenance.detect_staleness_tiered")
 def detect_staleness_tiered(workspace_id: str) -> None:
     asyncio.run(_run_and_release(_detect_staleness_tiered(workspace_id)))
+
+
+@app.task(name="karpwiki.maintenance.detect_stuck_pipelines")
+def detect_stuck_pipelines() -> None:
+    asyncio.run(_run_and_release(_detect_stuck_pipelines()))
 
 
 @app.task(name="karpwiki.maintenance.dispatch_daily_detectors")

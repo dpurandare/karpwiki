@@ -63,6 +63,20 @@ TRANSITIONS: dict[PipelineState, frozenset[PipelineState]] = {
 for _state in FAILABLE:
     TRANSITIONS[_state] = TRANSITIONS[_state] | {PipelineState.error}
 
+# The three states the Stuck-Pipeline Sweep Detector can find sitting past its threshold
+# (advisor.py, phase3-tasklist.md step 64): `submitted`/`classified`/`ingesting` each wait
+# on a *separate* Celery dispatch that might have been lost, and each independently commits
+# on entry, so each can genuinely persist as a resting "stuck" state. `classifying` and
+# `duplicate_check` are deliberately excluded — both live entirely inside one
+# `session_scope()`-wrapped task (`tasks._classify`/`_curate`) alongside their own exit
+# transition, so a crash there always rolls back to the state before that task started and
+# neither can ever be observed persisted; there is nothing for an admin to abort there.
+ABORTABLE_IF_STUCK = frozenset(
+    {PipelineState.submitted, PipelineState.classified, PipelineState.ingesting}
+)
+for _state in ABORTABLE_IF_STUCK:
+    TRANSITIONS[_state] = TRANSITIONS[_state] | {PipelineState.rejected}
+
 
 # 03 §1's UI-visibility column, explicitly distinct from the page frontmatter `status`
 # field (draft|published|archived) — these are presentation labels for the placeholder
