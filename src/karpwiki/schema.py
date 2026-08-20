@@ -77,11 +77,20 @@ class OrphanThresholds(BaseModel):
     query_log_lookback_days: int | None = None
 
 
+class FeedbackThresholds(BaseModel):
+    """Search result feedback loop (07 §4, phase3-tasklist.md step 68)."""
+
+    lookback_days: int | None = None
+    min_count: int | None = None
+    low_rating_threshold: float | None = None
+
+
 class Thresholds(BaseModel):
     staleness: StalenessThresholds = Field(default_factory=StalenessThresholds)
     classification: ClassificationThresholds = Field(default_factory=ClassificationThresholds)
     dedup: DedupThresholds = Field(default_factory=DedupThresholds)
     orphan: OrphanThresholds = Field(default_factory=OrphanThresholds)
+    feedback: FeedbackThresholds = Field(default_factory=FeedbackThresholds)
 
 
 class Retention(BaseModel):

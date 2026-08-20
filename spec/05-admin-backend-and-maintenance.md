@@ -93,7 +93,8 @@ actions.")*
 A `reindex` review item includes:
 
 - **Scope**: specific page(s), or a workspace-wide batch (e.g. "1,240 pages in `eng-docs`")
-- **Reason**: `stale_content`, `taxonomy_change`, `source_updated`, `post_lint_edit`
+- **Reason**: `stale_content`, `taxonomy_change`, `source_updated`, `post_lint_edit`,
+  `low_feedback` (persistently low-rated by the search result feedback loop, `07` §4)
 - **Estimated cost**: page count, approximate Curator re-summarization (LLM) call volume
 - **Proposed action**: `reindex now`, `schedule for off-peak`, `dismiss` (e.g. if the workspace is
   being archived anyway)

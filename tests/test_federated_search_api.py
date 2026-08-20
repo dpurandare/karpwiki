@@ -244,3 +244,66 @@ async def test_search_includes_a_restricted_result_for_the_scoped_reader(client,
     assert r.status_code == 200
     titles = {i["title"] for i in r.json()["items"]}
     assert titles == {"Restricted Entity"}
+
+
+# --- Search result feedback loop (07 §4, phase3-tasklist.md step 68) ---------------------
+
+
+async def test_search_response_carries_a_query_id(client, session, workspace):
+    await _page(session, workspace, title="A Page", body="findable term")
+    r = await client.get("/search", headers=CONTRIBUTOR, params={"q": "findable term"})
+    assert r.status_code == 200
+    assert r.json()["query_id"]
+
+
+async def test_submit_feedback_succeeds_for_the_querying_principal(client, session, workspace):
+    page = await _page(session, workspace, title="A Page", body="findable term")
+    r = await client.get("/search", headers=CONTRIBUTOR, params={"q": "findable term"})
+    query_id = r.json()["query_id"]
+
+    fb = await client.post(
+        f"/search/{query_id}/feedback",
+        headers=CONTRIBUTOR,
+        json={"page_id": str(page.page_id), "rating": "up"},
+    )
+    assert fb.status_code == 201
+    assert fb.json()["rating"] == "up"
+    assert fb.json()["query_id"] == query_id
+
+
+async def test_submit_feedback_forbidden_for_a_different_principal(client, session, workspace):
+    page = await _page(session, workspace, title="A Page", body="findable term")
+    r = await client.get("/search", headers=CONTRIBUTOR, params={"q": "findable term"})
+    query_id = r.json()["query_id"]
+
+    fb = await client.post(
+        f"/search/{query_id}/feedback",
+        headers=READER,
+        json={"page_id": str(page.page_id), "rating": "up"},
+    )
+    assert fb.status_code == 403
+
+
+async def test_submit_feedback_rejects_a_page_not_shown(client, session, workspace):
+    await _page(session, workspace, title="Shown", body="findable term")
+    other = await _page(session, workspace, title="Not Shown", body="unrelated")
+    r = await client.get("/search", headers=CONTRIBUTOR, params={"q": "findable term"})
+    query_id = r.json()["query_id"]
+
+    fb = await client.post(
+        f"/search/{query_id}/feedback",
+        headers=CONTRIBUTOR,
+        json={"page_id": str(other.page_id), "rating": "down"},
+    )
+    assert fb.status_code == 400
+
+
+async def test_submit_feedback_unknown_query_is_404(client, session, workspace):
+    import uuid
+
+    fb = await client.post(
+        f"/search/{uuid.uuid4()}/feedback",
+        headers=CONTRIBUTOR,
+        json={"page_id": str(uuid.uuid4()), "rating": "up"},
+    )
+    assert fb.status_code == 404

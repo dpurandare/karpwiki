@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-67, 70, and 78 done, steps 68-69, 71-77, and 79 not started.**
+**Status (2026-08-20): steps 57-68, 70, and 78 done, steps 69, 71-77, and 79 not started.**
 Step 65 was resolved (not built as a standalone primitive) alongside step 70, both done together
 out of numeric sequence, per step 65's own text. Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
@@ -353,13 +353,31 @@ findings that don't need a roadmap step (tracked there instead).
     [09](09-implementation-notes.md) §72 for the full writeup.
 
 68. **Search result feedback loop** ([04](04-search-and-retrieval.md) §3-4,
-    [09](09-implementation-notes.md) §10). Thumbs-up/down (or similar) per search result, recorded
-    alongside `query_log` (`02` §5). `09` §10 already designates this as the platform's
-    relevance-regression signal — the catalog-match boost's own magnitude (step 17, Phase 1) was
-    "tuned blind... an unspecified constant. Acceptable at this scale," per `phase1-tasklist.md`'s
-    own accepted-gap note, precisely because this signal didn't exist yet. Persistently low-rated
-    pages for a topic also feed the Maintenance Advisor's staleness/contradiction detectors
-    (`05` §2) with a real "this isn't serving readers" signal neither currently has.
+    [09](09-implementation-notes.md) §10). **Done.** New `query_feedback` table (migration
+    `a78315b565c9`, pure append like every other log stream here), `query_log.submit_feedback`,
+    new `POST /search/{query_id}/feedback` + MCP `wiki_submit_search_feedback` (an eleventh MCP
+    tool). `GET /search`'s response gained a `query_id` field — nothing before this step ever
+    needed the caller to see it, and without it no caller could reference a call to rate its
+    results against. Folded into the existing Staleness Detector as a third signal
+    (`advisor.find_low_feedback_pages`) rather than a new detector kind — `07` §4's own wording
+    ("become a signal FOR the... staleness... detector") reads as extending an existing signal set;
+    contradiction detection was deliberately left unconnected (no natural mapping from "down-voted"
+    onto "contradicts another specific page"). Low-feedback pages are marked `stale` too, same
+    reasoning Signal 2 already uses — `search.reindex` requires `pending`/`stale`, so a batched
+    "reindex now" approval would otherwise fail in the worker. SCHEMA.md gained
+    `thresholds.feedback` (`lookback_days`/`min_count`/`low_rating_threshold`), wired into both the
+    flat and tiered staleness paths equally (Signal 3 isn't tiered either way). **A real migration
+    bug found and fixed**: the first upgrade attempt failed with a misleading "type already exists"
+    — Alembic issuing its own duplicate `CREATE TYPE` when a `postgresql.ENUM` object is passed
+    into `create_table` without `create_type=False`, the same footgun family the `connector_state`
+    migration hit at step 51. Fixed and verified with a full upgrade→downgrade→upgrade round trip.
+    730 tests green (16 new). Live-verified against the real dev stack: ran three real searches
+    through the live gateway, submitted three real `down` ratings via the live REST endpoint, ran
+    the real staleness detector in the live maintenance worker — it raised a real review item with
+    `reason: "low_feedback"` and the page's index status genuinely flipped to `stale`; resolved it
+    through the real gateway and confirmed no `ValueError` in the worker (the exact failure the
+    stale-marking fix prevents), page settled back to `indexed`. See
+    [09](09-implementation-notes.md) §73 for the full writeup.
 
 69. **Content quality scoring.** Curator Agent lint-pass scoring (citation density,
     cross-reference completeness, freshness) on ingest; surfaced as a sortable Admin Console

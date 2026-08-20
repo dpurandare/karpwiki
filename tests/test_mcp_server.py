@@ -136,11 +136,14 @@ async def test_resolve_stdio_principal_prefers_token_when_set(monkeypatch):
 # --- tool registration ----------------------------------------------------------------------
 
 
-def test_all_ten_tools_are_registered():
+def test_all_eleven_tools_are_registered():
+    """The original ten (06 §2), plus `wiki_submit_search_feedback` (phase3-tasklist.md
+    step 68)."""
     srv = mcp_server.create_mcp_server()
     names = {t.name for t in srv._tool_manager.list_tools()}
     assert names == {
         "wiki_search",
+        "wiki_submit_search_feedback",
         "wiki_get_page",
         "wiki_list_pages",
         "wiki_list_workspaces",
@@ -173,6 +176,28 @@ async def test_wiki_search_finds_a_page(client, session, workspace, mcp_client_f
         is_error, body = await _call(mcp_client, "wiki_search", q="payments worker")
     assert not is_error
     assert any(i["path"] == "concepts/restarting-payments.md" for i in body["items"])
+
+
+async def test_wiki_submit_search_feedback(client, session, workspace, mcp_client_factory, monkeypatch):
+    """07 §4, phase3-tasklist.md step 68."""
+    page = await _page(session, workspace, title="Restarting Payments", body=DUPLICATE_BODY, indexed=True)
+    await session.commit()
+    monkeypatch.setenv("KARPWIKI_MCP_USER", "deepak")
+
+    async with mcp_client_factory() as mcp_client:
+        is_error, search_body = await _call(mcp_client, "wiki_search", q="payments worker")
+        assert not is_error
+        query_id = search_body["query_id"]
+
+        is_error, body = await _call(
+            mcp_client,
+            "wiki_submit_search_feedback",
+            query_id=query_id,
+            page_id=str(page.page_id),
+            rating="up",
+        )
+    assert not is_error
+    assert body["rating"] == "up"
 
 
 async def test_wiki_get_page_draft_requires_contributor(client, session, workspace, mcp_client_factory, monkeypatch):

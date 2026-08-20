@@ -156,7 +156,7 @@ Four logical streams, all append-only and partitioned by `workspace_id` + time:
 | Stream | Records | Consumed by |
 |---|---|---|
 | `ingestion_log` | Every state transition of every raw source through the ingestion pipeline ([03](03-ingestion-and-review-workflows.md) §1) | Admin Console, Maintenance Advisor |
-| `query_log` | Search requests (full detail, retained per policy below), latency, which pages were returned | Maintenance Advisor (orphan/low-traffic detection), analytics ([07](07-additional-features-and-roadmap.md)) |
+| `query_log` | Search requests (full detail, retained per policy below), latency, which pages were returned, plus per-result thumbs-up/down feedback (`query_feedback`, [07](07-additional-features-and-roadmap.md) §4) | Maintenance Advisor (orphan/low-traffic detection, staleness Signal 3), analytics ([07](07-additional-features-and-roadmap.md)) |
 | `admin_action_log` | Review item resolutions, rollbacks, manual edits, workspace/schema changes | Audit/compliance export |
 | `lint_log` | Curator Agent lint passes: contradictions found, cross-refs fixed, staleness flags raised | Maintenance Advisor, Admin Console |
 

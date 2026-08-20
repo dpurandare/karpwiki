@@ -10,6 +10,7 @@ from sqlalchemy import select
 from karpwiki import advisor, objectstore, review, search, versioning
 from karpwiki.curate import MergedPage
 from karpwiki.models import (
+    FeedbackRating,
     IndexState,
     IndexStatus,
     IndexType,
@@ -20,6 +21,7 @@ from karpwiki.models import (
     PageType,
     PageVersion,
     PipelineState,
+    QueryFeedback,
     QueryLog,
     RawSource,
     RawSourceStatus,
@@ -289,6 +291,90 @@ async def test_find_pages_citing_superseded_sources_ignores_active_sources(sessi
 
     findings = await advisor.find_pages_citing_superseded_sources(session, workspace_id=workspace.workspace_id)
     assert findings == []
+
+
+# --- find_low_feedback_pages (07 §4, phase3-tasklist.md step 68) ------------------------
+
+
+async def _feedback(session, page, *, rating: FeedbackRating, days_ago: int = 0, principal="user:x"):
+    query = QueryLog(
+        principal=principal,
+        query_text="q",
+        resolved_workspaces=[],
+        results=[{"page_id": str(page.page_id), "score": 1.0}],
+    )
+    session.add(query)
+    await session.flush()
+    entry = QueryFeedback(
+        query_id=query.query_id,
+        page_id=page.page_id,
+        principal=principal,
+        rating=rating,
+        created_at=datetime.now(UTC) - timedelta(days=days_ago),
+    )
+    session.add(entry)
+    await session.flush()
+    return entry
+
+
+async def test_find_low_feedback_pages_flags_a_persistently_down_rated_page(session, workspace):
+    page = await _indexed_page(session, workspace, title="Bad Page")
+    for _ in range(3):
+        await _feedback(session, page, rating=FeedbackRating.down)
+
+    findings = await advisor.find_low_feedback_pages(session, workspace_id=workspace.workspace_id)
+    assert [f.page_id for f in findings] == [page.page_id]
+    assert findings[0].reason == "low_feedback"
+
+
+async def test_find_low_feedback_pages_ignores_a_page_below_the_minimum_count(session, workspace):
+    page = await _indexed_page(session, workspace, title="Too Few Ratings")
+    await _feedback(session, page, rating=FeedbackRating.down)
+    await _feedback(session, page, rating=FeedbackRating.down)
+
+    findings = await advisor.find_low_feedback_pages(
+        session, workspace_id=workspace.workspace_id, min_feedback_count=3
+    )
+    assert findings == []
+
+
+async def test_find_low_feedback_pages_ignores_a_mostly_up_rated_page(session, workspace):
+    page = await _indexed_page(session, workspace, title="Good Page")
+    await _feedback(session, page, rating=FeedbackRating.up)
+    await _feedback(session, page, rating=FeedbackRating.up)
+    await _feedback(session, page, rating=FeedbackRating.down)
+
+    findings = await advisor.find_low_feedback_pages(session, workspace_id=workspace.workspace_id)
+    assert findings == []
+
+
+async def test_find_low_feedback_pages_ignores_ratings_outside_the_lookback_window(session, workspace):
+    page = await _indexed_page(session, workspace, title="Old Ratings")
+    for _ in range(3):
+        await _feedback(session, page, rating=FeedbackRating.down, days_ago=200)
+
+    findings = await advisor.find_low_feedback_pages(
+        session, workspace_id=workspace.workspace_id, lookback_days=90
+    )
+    assert findings == []
+
+
+async def test_run_staleness_detector_includes_low_feedback_pages_and_marks_them_stale(
+    session, workspace
+):
+    page = await _indexed_page(session, workspace, title="Persistently Downvoted")
+    for _ in range(3):
+        await _feedback(session, page, rating=FeedbackRating.down)
+
+    item = await advisor.run_staleness_detector(session, workspace_id=workspace.workspace_id)
+    await session.commit()
+
+    assert item is not None
+    found = {p["page_id"]: p["reason"] for p in item.detail["pages"]}
+    assert found[str(page.page_id)] == "low_feedback"
+
+    status = await session.get(IndexStatus, (page.page_id, IndexType.fts))
+    assert status.state is IndexState.stale
 
 
 # --- run_staleness_detector --------------------------------------------------------------

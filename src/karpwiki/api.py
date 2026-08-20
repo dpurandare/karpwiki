@@ -71,12 +71,15 @@ from .models import (
     Connector,
     ConnectorState,
     DocumentType,
+    FeedbackRating,
     IdempotencyRecord,
     PageLink,
     PageStatus,
     PageType,
     PageVersion,
     PipelineState,
+    QueryFeedback,
+    QueryLog,
     RawSource,
     ReviewItem,
     ReviewKind,
@@ -615,6 +618,13 @@ class BulkMoveRequest(BaseModel):
     target_workspace_id: str
     page_ids: list[uuid.UUID] = []
     source_ids: list[uuid.UUID] = []
+
+
+class SubmitFeedbackRequest(BaseModel):
+    """POST /search/{query_id}/feedback body (07 §4, phase3-tasklist.md step 68)."""
+
+    page_id: uuid.UUID
+    rating: FeedbackRating
 
 
 def _move_item_body(item: bulk_move.MoveItem) -> dict[str, Any]:
@@ -1635,6 +1645,20 @@ def _register_routes(app: FastAPI) -> None:
             limit=limit,
         )
 
+    @app.post("/search/{query_id}/feedback", status_code=201)
+    async def submit_search_feedback(
+        query_id: uuid.UUID,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        payload: SubmitFeedbackRequest,
+    ):
+        """07 §4, phase3-tasklist.md step 68: thumbs-up/down on one result of one search
+        call. Thin wrapper around `run_submit_search_feedback` below, the shared Common
+        Gateway logic the MCP `wiki_submit_search_feedback` tool also calls."""
+        return await run_submit_search_feedback(
+            session, principal, query_id=query_id, page_id=payload.page_id, rating=payload.rating
+        )
+
     async def _require_admin_scope(
         session: AsyncSession, principal: Principal, workspace_id: str | None
     ) -> None:
@@ -1862,7 +1886,7 @@ async def run_search(
             filtered_results.append(r)
     results = filtered_results
 
-    await query_log.record(
+    logged = await query_log.record(
         session,
         principal=principal.id,
         query_text=q,
@@ -1872,11 +1896,59 @@ async def run_search(
     )
     await session.commit()
 
-    body: dict[str, Any] = {"items": [_search_result_body(r) for r in results]}
+    # Step 68 (07 §4): the search result feedback loop needs a caller-visible handle on
+    # this specific call to rate its results against (`POST /search/{query_id}/feedback`)
+    # — nothing before this step ever needed the caller to see `query_log`'s own id.
+    body: dict[str, Any] = {
+        "query_id": str(logged.query_id),
+        "items": [_search_result_body(r) for r in results],
+    }
     if unavailable:
         body["partial"] = True
         body["unavailable"] = sorted(unavailable)  # deterministic — dedicated_ids is a set
     return body
+
+
+def _feedback_body(entry: QueryFeedback) -> dict[str, Any]:
+    return {
+        "feedback_id": str(entry.feedback_id),
+        "query_id": str(entry.query_id),
+        "page_id": str(entry.page_id),
+        "rating": entry.rating.value,
+        "created_at": entry.created_at.isoformat(),
+    }
+
+
+async def run_submit_search_feedback(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    query_id: uuid.UUID,
+    page_id: uuid.UUID,
+    rating: FeedbackRating,
+) -> dict[str, Any]:
+    """07 §4, phase3-tasklist.md step 68 — the shared Common Gateway logic both `POST
+    /search/{query_id}/feedback` and the MCP `wiki_submit_search_feedback` tool call.
+
+    Only the principal who ran the search may rate its own results — the same "you can
+    only act on what's yours" reasoning step 46's on-behalf-of scoping already
+    established; a stranger rating results they never saw would corrupt the very signal
+    this loop exists to produce."""
+    query = await session.get(QueryLog, query_id)
+    if query is None:
+        raise ApiError(404, "not_found", f"No search call {query_id}.")
+    if query.principal != principal.id:
+        raise ApiError(
+            403, "forbidden", "Only the principal who ran this search may rate its results."
+        )
+    try:
+        entry = await query_log.submit_feedback(
+            session, query_id=query_id, page_id=page_id, principal=principal.id, rating=rating
+        )
+    except query_log.InvalidFeedbackError as exc:
+        raise ApiError(400, "invalid_request", str(exc)) from exc
+    await session.commit()
+    return _feedback_body(entry)
 
 
 async def run_resolve_review_item(

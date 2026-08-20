@@ -156,6 +156,10 @@ thresholds:
     near_duplicate_score: 0.60  # lexeme containment, 0-1 (03 §4; see §17)
   orphan:
     query_log_lookback_days: 90 # zero appearances in this window -> prune candidate (05 §2)
+  feedback:
+    lookback_days: 90           # search feedback loop, Signal 3 of staleness (07 §4, §72 below)
+    min_count: 3                # ratings needed before a page's down-ratio means anything
+    low_rating_threshold: 0.6   # this fraction "down" within the window -> stale candidate
 
 retention:
   superseded_source_days: 180   # before Superseded-Source Detector proposes prune (05 §2)
@@ -3964,6 +3968,95 @@ Cleaned up the throwaway `live67-ws` workspace and the local receiver process af
 **Spec touch-point** (applied): `07` §3's Notification Service (detailed) roadmap item is built —
 the webhook-delivery half; email is a named, documented prerequisite gap (no contact-info
 directory exists), not a silent omission.
+
+## 73. Search Result Feedback Loop (Phase 3 Step 68)
+
+`07` §4 names two consumers for search-result feedback: the platform's relevance-regression
+signal (`09` §10, process-only — no code needed beyond the data existing) and a real input to the
+Maintenance Advisor's staleness/contradiction detectors. This step builds the recording half and
+wires the first of those two detector connections.
+
+**Fold into the existing Staleness Detector as a third signal, not a new detector kind.** `07` §4's
+own wording — persistently low-rated pages "become a signal FOR the... staleness/contradiction
+detectors" — reads as extending an existing signal set, not inventing a sixth kind. Contradiction
+detection was left unconnected: it specifically judges whether two SIMILAR-topic pages make
+conflicting claims (an LLM judgment over a page pair), and "this one page is down-voted" has no
+natural mapping onto "these two pages contradict each other" — forcing one would be arbitrary, not
+a real fit. New `advisor.find_low_feedback_pages` (Signal 3) joins `find_stale_pages`
+(Signal 1)/`find_pages_citing_superseded_sources` (Signal 2) inside `run_staleness_detector`,
+reusing the exact same `StaleFinding`/batched-`reindex`-review-item shape — `05` §3's own reason
+vocabulary gains `low_feedback` alongside its four existing values.
+
+**Signal 3's pages are marked `stale` too, for a concrete, checkable reason**: `search.reindex`
+raises `ValueError` unless a page is `pending`/`stale`, and an admin approving this item's
+`"reindex now"` dispatches `tasks.reindex` for every page in the batch — a low-feedback page
+included without first being marked stale would make that dispatch fail in the worker. This
+mirrors Signal 2's own identical treatment (superseded-source-citing pages), for the identical
+reason.
+
+**Schema**: new `query_feedback` table (migration `a78315b565c9`) — `query_id` (FK
+`query_log`), `page_id` (FK `wiki_page`), `principal`, `rating` (`up`/`down`), `created_at`. Pure
+append, no uniqueness constraint — the same shape every other log stream here already uses
+(`ingestion_log`, `admin_action_log`); a principal can rate the same (query, page) pair more than
+once over time, and the detector aggregates across all of them rather than only ever keeping "the
+latest." Lives in `query_log.py`, not a new module — a feedback row is meaningless without the
+`QueryLog` row it references.
+
+**A real migration bug, caught by this project's own round-trip discipline**: the first upgrade
+attempt failed with `type "feedback_rating" already exists`, even though a direct query confirmed
+the type genuinely didn't exist — the whole migration had rolled back. Root cause: passing the
+`postgresql.ENUM` object (default `create_type=True`) straight into `op.create_table`'s column
+list makes Alembic issue its own `CREATE TYPE` *in addition to* the explicit one on the line
+above, and the second one collides. The exact same footgun family the `connector_state` migration
+hit at step 51 (`09`'s own decision log), just the "double-create" variant rather than the
+"drop doesn't clean up" one. Fixed with `create_type=False` on the column's own ENUM instance;
+verified with a full upgrade → downgrade → upgrade round trip against real dev Postgres, not just
+a single forward apply.
+
+**API surface needed a real, necessary addition first**: `GET /search`'s response never exposed
+`query_log`'s own id — nothing before this step ever needed the caller to see it. Added
+`"query_id"` to `run_search`'s response body (no existing test asserted exact-dict-equality on it,
+so nothing broke); without it, no caller — REST or MCP — could ever reference a specific search
+call to rate its results against. New `POST /search/{query_id}/feedback` (`api.
+run_submit_search_feedback`, shared by the REST endpoint and the new MCP tool
+`wiki_submit_search_feedback`, an eleventh tool beyond `06` §2's original ten). Two checks, not
+one: `query_log.submit_feedback` enforces the data-integrity invariant (`page_id` must be one of
+that call's own recorded `results` — no rating a page nobody was shown); `run_submit_search_
+feedback` enforces the AuthZ-adjacent one (only the principal who ran the search may rate its
+results — the same "you can only act on what's yours" reasoning step 46's on-behalf-of scoping
+already established, since a stranger rating unseen results would corrupt the very signal this
+loop exists to produce).
+
+**SCHEMA.md threshold wiring, applied to both the flat and tiered staleness paths equally**: new
+`Thresholds.feedback` (`lookback_days`, `min_count`, `low_rating_threshold`) in `schema.py`, and a
+shared `tasks._feedback_threshold_kwargs` helper both `_detect_staleness` (flat, previously not
+schema-wired at all) and `_detect_staleness_tiered` (tiered, already schema-wired for its own
+`high_traffic_days`/`low_traffic_days`) now call — Signal 3 isn't tiered either way, so this
+particular threshold set doesn't share the flat/tiered asymmetry the rest of `_detect_staleness`'s
+own docstring explains.
+
+**Verification**: `tests/test_query_log.py` (new, 5 tests): record/purge unchanged, feedback
+creation, rejects an unknown query, rejects a page not in the results, allows more than one
+rating over time. `tests/test_advisor.py` (+5): `find_low_feedback_pages`'s count/ratio/lookback
+gates, and `run_staleness_detector` includes a low-feedback page and marks it stale. `tests/
+test_federated_search_api.py` (+5): search response carries `query_id`, feedback succeeds for the
+querying principal, 403 for a different one, 400 for a page not shown, 404 for an unknown query.
+`tests/test_mcp_server.py` (+2, one a rename: "all ten tools" → "all eleven tools"): the new tool
+round-trips through the real in-process MCP protocol. Full suite: 730 tests green. Live-verified
+against the real dev stack: applied the migration (verified the full upgrade/downgrade/upgrade
+round trip first), rebuilt/restarted `gateway`/`worker-maintenance`; created a real indexed page,
+ran three real searches through the live gateway and submitted three real `down` ratings via
+`POST /search/{query_id}/feedback` — confirmed each one recorded for real. Ran the real staleness
+detector in the live `worker-maintenance` container — it raised a real `reindex` review item
+naming the page with `reason: "low_feedback"`, and the page's own `index_status` had genuinely
+flipped to `stale`. Resolved the item `"reindex now"` through the real gateway — confirmed no
+`ValueError` in the worker (the exact failure the stale-marking fix prevents) and the page settled
+back to `indexed`. Cleaned up the throwaway `live68-ws` workspace and its rows afterward.
+
+**Spec touch-point** (applied): `07` §4's Search result feedback loop roadmap item is built — the
+staleness-detector connection; `02` §5's `query_log` stream row now mentions `query_feedback`;
+`05` §3's reason vocabulary gains `low_feedback`; `06` §1/§2 name the new REST resource and MCP
+tool.
 
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

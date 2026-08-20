@@ -234,11 +234,16 @@ async def _reindex(page_id: uuid.UUID) -> None:
 async def _detect_staleness(workspace_id: str) -> None:
     """Phase 2 step 36 — the maintenance queue's first real task. Nothing schedules this
     yet (step 41's Celery beat); dispatched manually per workspace until then. Not
-    schema-wired (unlike the tiered variant below): 09 §6's SCHEMA.md template only defines
-    tiered `high_traffic_days`/`low_traffic_days`, no flat `threshold_days` field this
-    plain, non-tiered path's own default could read instead."""
+    schema-wired for its own flat `threshold_days` (unlike the tiered variant below): 09 §6's
+    SCHEMA.md template only defines tiered `high_traffic_days`/`low_traffic_days`, no flat
+    field this plain, non-tiered path's own default could read instead. Feedback thresholds
+    (phase3-tasklist.md step 68) ARE wired here regardless — Signal 3 isn't tiered either
+    way (`run_staleness_detector`'s own docstring explains why), so this asymmetry doesn't
+    apply to it."""
     async with session_scope() as session:
-        await advisor.run_staleness_detector(session, workspace_id=workspace_id)
+        workspace_schema = await schema.load(session, workspace_id=workspace_id)
+        kwargs = _feedback_threshold_kwargs(workspace_schema)
+        await advisor.run_staleness_detector(session, workspace_id=workspace_id, **kwargs)
 
 
 async def _detect_superseded_sources(workspace_id: str) -> None:
@@ -299,6 +304,23 @@ async def _detect_contradictions(
         )
 
 
+def _feedback_threshold_kwargs(workspace_schema: schema.WorkspaceSchema | None) -> dict:
+    """Shared by `_detect_staleness`/`_detect_staleness_tiered` below — Signal 3's
+    thresholds (phase3-tasklist.md step 68) apply identically regardless of whether the
+    staleness signal itself is tiered."""
+    if workspace_schema is None:
+        return {}
+    kwargs = {}
+    feedback = workspace_schema.thresholds.feedback
+    if feedback.lookback_days is not None:
+        kwargs["feedback_lookback_days"] = feedback.lookback_days
+    if feedback.min_count is not None:
+        kwargs["min_feedback_count"] = feedback.min_count
+    if feedback.low_rating_threshold is not None:
+        kwargs["low_rating_threshold"] = feedback.low_rating_threshold
+    return kwargs
+
+
 async def _detect_staleness_tiered(workspace_id: str) -> None:
     """Phase 2 step 41 — the popularity-tiered variant of `_detect_staleness` above (05 §2),
     used only by the beat-scheduled dispatcher below. A separate task rather than a
@@ -307,7 +329,7 @@ async def _detect_staleness_tiered(workspace_id: str) -> None:
     exactly as it behaved before this step."""
     async with session_scope() as session:
         workspace_schema = await schema.load(session, workspace_id=workspace_id)
-        kwargs = {}
+        kwargs = _feedback_threshold_kwargs(workspace_schema)
         if workspace_schema is not None:
             if workspace_schema.thresholds.staleness.high_traffic_days is not None:
                 kwargs["high_traffic_days"] = workspace_schema.thresholds.staleness.high_traffic_days

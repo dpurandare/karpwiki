@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from . import config, curate, dedup, llm, pipeline, review, schema, search, versioning
 from .frontmatter import split_frontmatter
 from .models import (
+    FeedbackRating,
     IndexState,
     IndexStatus,
     IngestionLog,
@@ -28,6 +29,7 @@ from .models import (
     PageType,
     PageVersion,
     PipelineState,
+    QueryFeedback,
     QueryLog,
     RawSource,
     RawSourceStatus,
@@ -61,12 +63,23 @@ DEFAULT_ORPHAN_QUERY_LOG_LOOKBACK_DAYS = 90
 # 41 layers tiering on top via this same `threshold_days` parameter.
 DEFAULT_STALENESS_THRESHOLD_DAYS = 90
 
+# Search result feedback loop (07 §4, phase3-tasklist.md step 68) — same lookback window as
+# the Orphan/Low-Traffic Detector's own `query_log`-derived signal (`DEFAULT_ORPHAN_QUERY_
+# LOG_LOOKBACK_DAYS` above), for the same reason: it must fit inside `query_log`'s own
+# 90-day retention (09 §8) or "no recent ratings" would silently mean "the log was purged."
+DEFAULT_FEEDBACK_LOOKBACK_DAYS = 90
+# A page needs at least this many ratings before its down-ratio means anything — one or two
+# down-votes shouldn't flag a page.
+DEFAULT_MIN_FEEDBACK_COUNT = 3
+# Fraction of ratings that must be "down" within the lookback window to flag a page.
+DEFAULT_LOW_RATING_THRESHOLD = 0.6
+
 
 @dataclass(frozen=True)
 class StaleFinding:
     page_id: uuid.UUID
     path: str
-    reason: str  # 05 §3's vocabulary: "stale_content" | "source_updated"
+    reason: str  # 05 §3's vocabulary: "stale_content" | "source_updated" | "low_feedback"
 
 
 async def find_stale_pages(
@@ -185,6 +198,45 @@ async def find_pages_citing_superseded_sources(
     return [StaleFinding(page_id=pid, path=path, reason="source_updated") for pid, path in rows]
 
 
+async def find_low_feedback_pages(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    lookback_days: int = DEFAULT_FEEDBACK_LOOKBACK_DAYS,
+    min_feedback_count: int = DEFAULT_MIN_FEEDBACK_COUNT,
+    low_rating_threshold: float = DEFAULT_LOW_RATING_THRESHOLD,
+) -> list[StaleFinding]:
+    """Signal 3 (07 §4, phase3-tasklist.md step 68): a page whose search-result feedback,
+    within the lookback window, is at least `min_feedback_count` ratings and at least
+    `low_rating_threshold` of them "down" — "this isn't serving readers," a signal neither
+    of the first two staleness signals has. Aggregated in Python rather than SQL
+    `GROUP BY`/`HAVING`: feedback volume per page is small (this is a per-page rating
+    count, not a row-count-in-the-millions table), and the ratio math reads more plainly
+    this way than as a single SQL expression."""
+    cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
+    rows = (
+        await session.execute(
+            select(QueryFeedback.page_id, QueryFeedback.rating, WikiPage.path)
+            .join(WikiPage, WikiPage.page_id == QueryFeedback.page_id)
+            .where(WikiPage.workspace_id == workspace_id, QueryFeedback.created_at >= cutoff)
+        )
+    ).all()
+
+    ratings_by_page: dict[uuid.UUID, tuple[str, list[FeedbackRating]]] = {}
+    for page_id, rating, path in rows:
+        _, ratings = ratings_by_page.setdefault(page_id, (path, []))
+        ratings.append(rating)
+
+    findings = []
+    for page_id, (path, ratings) in ratings_by_page.items():
+        if len(ratings) < min_feedback_count:
+            continue
+        down = sum(1 for r in ratings if r is FeedbackRating.down)
+        if down / len(ratings) >= low_rating_threshold:
+            findings.append(StaleFinding(page_id=page_id, path=path, reason="low_feedback"))
+    return findings
+
+
 async def _open_reindex_item(session: AsyncSession, *, workspace_id: str) -> ReviewItem | None:
     return (
         await session.execute(
@@ -206,18 +258,28 @@ async def run_staleness_detector(
     high_traffic_days: int | None = None,
     low_traffic_days: int | None = None,
     traffic_lookback_days: int = DEFAULT_ORPHAN_QUERY_LOG_LOOKBACK_DAYS,
+    feedback_lookback_days: int = DEFAULT_FEEDBACK_LOOKBACK_DAYS,
+    min_feedback_count: int = DEFAULT_MIN_FEEDBACK_COUNT,
+    low_rating_threshold: float = DEFAULT_LOW_RATING_THRESHOLD,
 ) -> ReviewItem | None:
-    """05 §3: one batched `reindex` review item per workspace per run. Signal 2's pages are
-    marked `stale` here (nothing else would ever do it — a superseded source doesn't itself
-    trigger a page write) so approving the item can dispatch `reindex` the same way any
-    other stale page's does (02 §7).
+    """05 §3: one batched `reindex` review item per workspace per run. Signal 2's and
+    Signal 3's pages are marked `stale` here (nothing else would ever do it for either —
+    a superseded source doesn't itself trigger a page write, and neither does a search
+    rating) so approving the item can dispatch `reindex` the same way any other stale
+    page's does (02 §7); `search.reindex` itself requires `pending`/`stale`, so a
+    low-feedback page batched into this item without this would fail that call.
 
     `tiered=False` (the default, unchanged from before step 41) uses `threshold_days` as a
     single flat cutoff via `find_stale_pages`, same as every direct/manual call site and
     every existing test. `tiered=True` — what step 41's beat-scheduled dispatch actually
     uses — ignores `threshold_days` and calls `find_stale_pages_tiered` instead (05 §2's
     popularity-tiered refresh); `threshold_days` stays a plain parameter rather than being
-    removed so a manual single-value check is still available either way."""
+    removed so a manual single-value check is still available either way.
+
+    Signal 3 (07 §4, phase3-tasklist.md step 68) — persistently low-rated pages — is added
+    unconditionally to both the flat and tiered paths, since it has no duration to tier
+    against either (same reasoning `find_stale_pages_tiered`'s own docstring already gives
+    for why Signal 2 isn't tiered)."""
     if await _open_reindex_item(session, workspace_id=workspace_id) is not None:
         return None
 
@@ -234,8 +296,17 @@ async def run_staleness_detector(
     superseded = await find_pages_citing_superseded_sources(session, workspace_id=workspace_id)
     for finding in superseded:
         await search.mark_stale(session, finding.page_id)
+    low_feedback = await find_low_feedback_pages(
+        session,
+        workspace_id=workspace_id,
+        lookback_days=feedback_lookback_days,
+        min_feedback_count=min_feedback_count,
+        low_rating_threshold=low_rating_threshold,
+    )
+    for finding in low_feedback:
+        await search.mark_stale(session, finding.page_id)
 
-    findings = stale + superseded
+    findings = stale + superseded + low_feedback
     if not findings:
         return None
 

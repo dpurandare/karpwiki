@@ -452,6 +452,32 @@ class QueryLog(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer)
 
 
+class FeedbackRating(enum.Enum):
+    up = "up"
+    down = "down"
+
+
+class QueryFeedback(Base):
+    """Search result feedback loop (07 §4, phase3-tasklist.md step 68) — thumbs-up/down on
+    one result of one search call, recorded alongside `query_log` (02 §5). Pure append, no
+    uniqueness constraint: same shape as every other log stream here (`ingestion_log`,
+    `admin_action_log`) — a principal can submit more than one rating over time for the
+    same (query, page) pair, and the Maintenance Advisor's low-feedback signal aggregates
+    across all of them rather than only ever keeping "the latest."
+    """
+
+    __tablename__ = "query_feedback"
+
+    feedback_id: Mapped[uuid.UUID] = _uuid_pk()
+    query_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("query_log.query_id"), index=True)
+    page_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("wiki_page.page_id"), index=True)
+    principal: Mapped[str] = mapped_column(String(255), index=True)
+    rating: Mapped[FeedbackRating] = mapped_column(Enum(FeedbackRating, name="feedback_rating"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.clock_timestamp(), index=True
+    )
+
+
 class IdempotencyRecord(Base):
     """Stored response for an `Idempotency-Key` replay (09 §14).
 

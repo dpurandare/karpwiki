@@ -14,6 +14,7 @@ Admin Console). All operations are workspace-scoped except search (§4 of
 | `pages/{id}/versions` | list, get, diff | admin | [05](05-admin-backend-and-maintenance.md) §6 |
 | `pages/{id}/rollback` | execute | admin | Creates new version per [01](01-architecture-and-data-model.md) §5 |
 | `search` | `search` | any authenticated caller | [04](04-search-and-retrieval.md) §5 — single query mode, no synthesis |
+| `search/{query_id}/feedback` | execute (submit) | the principal who ran that search | [07](07-additional-features-and-roadmap.md) §4 — thumbs-up/down per result, the platform's relevance-regression signal |
 | `sources` | submit (upload) | end user (and connectors) | [03](03-ingestion-and-review-workflows.md) §2 |
 | `sources/{id}` | get status | submitter, admin | Pipeline state from [03](03-ingestion-and-review-workflows.md) §1 |
 | `review-items` | list, get | admin | [05](05-admin-backend-and-maintenance.md) §1 |
@@ -36,6 +37,7 @@ act on Maintenance Advisor proposals through the same protocol a human admin use
 | MCP tool | Maps to (API) | Caller | Notes |
 |---|---|---|---|
 | `wiki_search` | `search` | any authenticated caller | Single-stage lexical/catalog search ([04](04-search-and-retrieval.md) §1); returns ranked, cited page snippets — no synthesis |
+| `wiki_submit_search_feedback` | `search/{query_id}/feedback` | the principal who ran that search | Thumbs-up/down on one result ([07](07-additional-features-and-roadmap.md) §4) — the platform's relevance-regression signal |
 | `wiki_get_page` | `pages.get` | any authenticated caller | Fetch a specific page by path/id, e.g. for an agent following a citation |
 | `wiki_list_pages` | `pages.list` | any authenticated caller | Browse/filter by `page_type`, `tags`, `date`, `status` — e.g. to walk a workspace's `index.md` catalog programmatically |
 | `wiki_list_workspaces` | `workspaces.list` | any authenticated caller | Discover which workspaces the caller can search or submit to |

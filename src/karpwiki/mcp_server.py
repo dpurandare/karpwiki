@@ -143,6 +143,22 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
             )
 
     @mcp.tool()
+    async def wiki_submit_search_feedback(ctx: Context, query_id: str, page_id: str, rating: str) -> dict:
+        """Thumbs-up/down (`rating`: `"up"` or `"down"`) on one result of a search call this
+        same principal ran (07 §4, phase3-tasklist.md step 68) — the platform's relevance-
+        regression signal, and a real "this isn't serving readers" input to the Maintenance
+        Advisor's staleness detector. Maps to `POST /search/{query_id}/feedback`."""
+        principal = await _resolve_principal(ctx)
+        async with session_scope() as session:
+            return await api.run_submit_search_feedback(
+                session,
+                principal,
+                query_id=uuid.UUID(query_id),
+                page_id=uuid.UUID(page_id),
+                rating=api._parse_enum(api.FeedbackRating, rating, "rating"),
+            )
+
+    @mcp.tool()
     async def wiki_get_page(ctx: Context, page_id: str) -> dict:
         """Fetch a specific page by id, e.g. for an agent following a citation. Maps to
         `GET /pages/{id}`."""

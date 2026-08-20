@@ -1,19 +1,30 @@
-"""Query logging (04 §8, 02 §5) — phase2-tasklist.md step 25.
+"""Query logging (04 §8, 02 §5) — phase2-tasklist.md step 25. Search result feedback
+(07 §4, phase3-tasklist.md step 68) lives here too, not a separate module — every feedback
+row is meaningless without the `QueryLog` row it references, and there's little enough
+logic on either side to warrant splitting them.
 
 Every `search` call is recorded here regardless of outcome, including zero-result and
 empty-query attempts — 04 §8 says "every search call," not "every successful one."
 """
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import QueryLog
+from .models import FeedbackRating, QueryFeedback, QueryLog
 
 # 09 §8's decision: 90 days, full detail, then purged — the retention window is itself the
 # privacy boundary, no separate anonymization step.
 RETENTION_DAYS = 90
+
+
+class InvalidFeedbackError(ValueError):
+    """The named query call doesn't exist, or `page_id` wasn't among its own results —
+    the one data-integrity invariant worth enforcing here (not an AuthZ concern, so it
+    stays a plain `ValueError`, matching `ingestion.InvalidResolutionError`'s own split of
+    "business-rule check lives in the service function, role check lives in api.py")."""
 
 
 async def record(
@@ -32,6 +43,29 @@ async def record(
         results=results,
         duration_ms=duration_ms,
     )
+    session.add(entry)
+    await session.flush()
+    return entry
+
+
+async def submit_feedback(
+    session: AsyncSession,
+    *,
+    query_id: uuid.UUID,
+    page_id: uuid.UUID,
+    principal: str,
+    rating: FeedbackRating,
+) -> QueryFeedback:
+    """Record one thumbs-up/down on one result of one search call (07 §4, phase3-tasklist.md
+    step 68). `page_id` must be one of that call's own `results` — cheap to check here since
+    `results` is already the recorded evidence of what the caller actually saw, and it keeps
+    the signal honest (no rating a page nobody was ever shown)."""
+    query = await session.get(QueryLog, query_id)
+    if query is None:
+        raise InvalidFeedbackError(f"no search call {query_id}")
+    if not any(r.get("page_id") == str(page_id) for r in query.results):
+        raise InvalidFeedbackError(f"page {page_id} was not a result of search call {query_id}")
+    entry = QueryFeedback(query_id=query_id, page_id=page_id, principal=principal, rating=rating)
     session.add(entry)
     await session.flush()
     return entry
