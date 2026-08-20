@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-61 and 78 done, steps 62-77 and 79 not started.** Step 78 (track
+**Status (2026-08-20): steps 57-62 and 78 done, steps 63-77 and 79 not started.** Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
 not by either completeness audit pass; see its own entry for why. Phase 1 (steps 1–21) and Phase 2
 (steps 22–56) are both complete — see [`phase1-tasklist.md`](phase1-tasklist.md) and
@@ -214,6 +214,22 @@ findings that don't need a roadmap step (tracked there instead).
     as an accepted gap when steps 25/26 built federated search — found on a fresh read of `09`
     §14 against the current code, not previously known. This step adds the missing exception
     handling and the `partial`/`unavailable` response fields the contract already specifies.
+
+    **Done** — `api.run_search` (the shared Common Gateway logic both `GET /search` and MCP
+    `wiki_search` call) now wraps the shared-Postgres and dedicated-OpenSearch calls in separate
+    `try`/`except`: either backend failing degrades that pool to an empty result and records its
+    workspace ids as `unavailable`, rather than failing the whole request. A shared-index failure
+    also rolls the session back before the `query_log` write that follows — the failed raw-SQL
+    statement can otherwise leave the transaction unusable, the same recovery `bulk_move`'s own
+    halt-without-rollback batching already used. `partial`/`unavailable` are present in the
+    response only when a degradation actually happened, matching `09` §14's "single-workspace
+    operations... never carry the field" read as the non-degraded case never carrying it either.
+    Live-verified for real, not mocked: stopped the real `opensearch` container mid-session and
+    confirmed a real `GET /search` through the real gateway returned a real `200` with the shared
+    index's result still present, `"partial": true`, and the exact down dedicated workspace named
+    in `"unavailable"` — then restarted `opensearch` and confirmed the very same query fully
+    recovered with no gateway restart needed. See [09](09-implementation-notes.md) §67 for the
+    full writeup.
 
 63. **Read-time link resolution + cross-workspace AuthZ re-check** ([01](01-architecture-and-data-model.md)
     §3). `GET /pages/{id}` (Phase 2 step 43) returns a page's raw content with embedded

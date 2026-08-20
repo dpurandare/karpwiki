@@ -3451,5 +3451,60 @@ throwaway `live62-*` workspace afterward.
 scope or excluded; this closes a real, previously-unaddressed gap rather than deviating from
 anything spec/ already said.
 
+## 67. Search Partial-Failure / Degraded-Result Contract (Phase 3 Step 62)
+
+§14 above specified the contract in full when API conventions were first settled — "a
+partially-served search returns 200 with the results it has plus `\"partial\": true` and
+`\"unavailable\": [<workspace_id>, ...]`... mandatory, not advisory" — but steps 25/26 (building
+federated search and the dedicated-index backend) never actually wired the exception handling
+that contract requires. Found on a fresh re-read of `09` §14 against the current code during this
+step's own prep, not flagged as an accepted gap by either completeness audit pass — a real,
+previously-unnoticed contract gap in the same shape step 66's pagination finding already was.
+
+**`api.run_search`** (the shared Common Gateway logic both `GET /search` and MCP `wiki_search`
+call) wraps `search.search` (shared Postgres) and `dedicated_index.search` (OpenSearch) in
+separate `try`/`except Exception` blocks rather than one shared one — a failure in either backend
+degrades only that pool to an empty result and records its own resolved workspace ids into a
+shared `unavailable` list, while the other backend's real results still get served. Two different
+recovery needs, handled differently: a shared-Postgres failure rolls the *session* back
+(`await session.rollback()`) before the `query_log` write that follows — a failed raw-SQL
+statement on `session.execute` can leave the transaction unusable for anything else on that same
+session, the identical failure mode `bulk_move`'s own halt-without-rollback batching in this same
+file already established the fix for (`# noqa: BLE001 — 09 §11's halt-without-rollback`, cited
+directly as precedent in the new code's own comment). A dedicated-index (OpenSearch) failure
+needs no such rollback — it's a wholly separate client, never touches the SQLAlchemy session at
+all.
+
+**`partial`/`unavailable` are omitted, not `false`/`[]`, when nothing degraded** — read `09` §14's
+"single-workspace operations... never carry the field" as the general pattern for the non-partial
+case, not literally scoped to single-workspace-only. `unavailable` is built from a Python `set`
+(the dedicated-workspace-id lookup) unioned with a `list` (shared-workspace ids) — sorted before
+returning for deterministic response ordering, since set iteration order isn't guaranteed.
+
+**A stale module docstring claim fixed while touching this exact code**: `api.py`'s own top-of-
+file docstring still said "Not implemented here, deliberately: dedicated-index score
+normalization (04 §4) is step 26 — this endpoint only ever queries the one shared index" —
+factually false since step 26 landed (this exact function has called both `search.search` and
+`dedicated_index.search` since then). Removed rather than left standing while directly editing
+the function it was describing incorrectly.
+
+**Verification**: `tests/test_federated_search_api.py` (+4): a down dedicated backend degrades to
+the shared results plus `partial`/`unavailable`; a down shared backend degrades to the dedicated
+results *and* proves the session genuinely recovered (the `query_log` write immediately after the
+failure still succeeds — not just that the HTTP response looked right); a fully successful search
+carries neither field at all; both backends down at once returns a fully partial, empty result
+naming both workspaces. Full suite: 632 tests green. **Live-verified with a real backend outage,
+not a mock**: seeded a real shared-index workspace and a real dedicated-index workspace, each with
+a real indexed page sharing a search term, confirmed a real `GET /search` through the real gateway
+returned both — then actually stopped the real `opensearch` container (`docker compose stop
+opensearch`) mid-session and re-ran the identical query: a real `200`, the shared result still
+present, `"partial": true`, and the exact down workspace id in `"unavailable"`. Restarted
+`opensearch`, waited for it to report healthy again, and re-ran the same query once more — full
+recovery, both results present, neither field carried, no gateway restart needed anywhere in the
+cycle. Cleaned up the throwaway `live62s-*`/`live62d-*` workspaces afterward.
+
+**Spec touch-point** (applied): none required — `09` §14 already specifies this contract in full;
+this step closes the gap between that text and the code, not a deviation from it.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

@@ -20,10 +20,9 @@ discover one; `sources` list — 05 §7's admin Raw Source Browser), and step 51
 (`connectors` list/create/update — the real `Connector` model and its own admin CRUD,
 storage only; the polling worker pool that actually runs one is step 52).
 
-Not implemented here, deliberately: dedicated-index score normalization (04 §4) is step
-26 — this endpoint only ever queries the one shared index.
 """
 
+import logging
 import time
 import uuid
 from datetime import date
@@ -82,6 +81,8 @@ from .models import (
     Workspace,
 )
 from .search_result import DEFAULT_SEARCH_LIMIT
+
+logger = logging.getLogger(__name__)
 
 SUBMIT_ENDPOINT = "POST /sources"
 RESOLVE_ENDPOINT = "POST /review-items/{id}/resolve"
@@ -1626,6 +1627,17 @@ async def run_search(
     Times the call for `query_log.duration_ms` (phase2-tasklist.md step 44's Search
     Performance dashboard) — wall-clock from here, not just the retrieval call, since
     that's what a caller actually experiences.
+
+    **Partial failure** (09 §14, phase3-tasklist.md step 62): one backend being down must
+    not fail the whole query — each of the two backend calls below is caught separately
+    and degrades to an empty result for just that pool, with the affected workspace ids
+    recorded. `partial`/`unavailable` are only present in the response when a degradation
+    actually happened (09 §14: "single-workspace operations... never carry the field" —
+    read here as "the non-degraded case never carries it either"). A shared-index failure
+    also rolls the session back before continuing — the failed raw-SQL statement can leave
+    the transaction unusable for the `query_log` write that follows (same recovery
+    `bulk_move`'s own halt-without-rollback batching already uses, above); a dedicated-
+    index (OpenSearch) failure never touches this session at all, so needs no rollback.
     """
     started_at = time.monotonic()
     required_role = Role.contributor if include_drafts else Role.reader
@@ -1656,27 +1668,42 @@ async def run_search(
     )
     shared_ids = [w for w in resolved if w not in dedicated_ids]
 
-    shared_hits = await search.search(
-        session,
-        query=q,
-        workspace_ids=shared_ids,
-        limit=limit,
-        include_drafts=include_drafts,
-        page_types=page_type,
-        tags=tags,
-        date_from=date_from,
-        date_to=date_to,
-    )
-    dedicated_hits = await dedicated_index.search(
-        query=q,
-        workspace_ids=list(dedicated_ids),
-        limit=limit,
-        include_drafts=include_drafts,
-        page_types=page_type,
-        tags=tags,
-        date_from=date_from,
-        date_to=date_to,
-    )
+    unavailable: list[str] = []
+
+    try:
+        shared_hits = await search.search(
+            session,
+            query=q,
+            workspace_ids=shared_ids,
+            limit=limit,
+            include_drafts=include_drafts,
+            page_types=page_type,
+            tags=tags,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    except Exception:
+        logger.exception("shared index search failed for workspaces %s", shared_ids)
+        await session.rollback()
+        shared_hits = []
+        unavailable.extend(shared_ids)
+
+    try:
+        dedicated_hits = await dedicated_index.search(
+            query=q,
+            workspace_ids=list(dedicated_ids),
+            limit=limit,
+            include_drafts=include_drafts,
+            page_types=page_type,
+            tags=tags,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    except Exception:
+        logger.exception("dedicated index search failed for workspaces %s", dedicated_ids)
+        dedicated_hits = []
+        unavailable.extend(dedicated_ids)
+
     # 04 §4: normalize the dedicated backend's scores, merge, sort, truncate to `limit`
     # only after the two pools are combined — taking `limit` from each independently
     # first could drop a higher-ranked hit in favor of a lower one from the other pool.
@@ -1692,7 +1719,11 @@ async def run_search(
     )
     await session.commit()
 
-    return {"items": [_search_result_body(r) for r in results]}
+    body: dict[str, Any] = {"items": [_search_result_body(r) for r in results]}
+    if unavailable:
+        body["partial"] = True
+        body["unavailable"] = sorted(unavailable)  # deterministic — dedicated_ids is a set
+    return body
 
 
 async def run_resolve_review_item(
