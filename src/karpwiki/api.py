@@ -36,6 +36,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import (
+    analytics,
     bulk_move,
     classify,
     config,
@@ -1730,6 +1731,20 @@ def _register_routes(app: FastAPI) -> None:
     ):
         await _require_admin_scope(session, principal, workspace_id)
         return await monitoring.review_queue_health(session, workspace_id=workspace_id)
+
+    @app.get("/analytics/usage-trends")
+    async def usage_trends_analytics(
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        workspace_id: str | None = None,
+    ):
+        await _require_admin_scope(session, principal, workspace_id)
+        result = await analytics.usage_trends(session, workspace_id=workspace_id)
+        # Global, not workspace-scoped (analytics.active_workspaces_trend's own docstring
+        # explains why) — merged in here the same way ingestion_pipeline_metrics above
+        # merges in monitoring.queue_depths().
+        result["active_workspaces"] = await analytics.active_workspaces_trend(session)
+        return result
 
 
 async def _taxonomy_prefilter(

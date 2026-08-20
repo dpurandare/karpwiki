@@ -4298,4 +4298,90 @@ throwaway workspace/access-policy/snapshot rows afterward.
 `trend: None` gap step 44 (phase2-tasklist.md) and its own decision-log entry named is resolved.
 
 ---
+
+## 77. Usage Analytics — Search/Submission/Feedback Volume, Active Workspaces (Phase 3 Step 73)
+
+`phase3-tasklist.md` step 73 calls for "usage trends over time (search volume, submission volume,
+active workspaces) — building on step 72's trend data and the feedback signal from step 68." Unlike
+every step so far in this track, this feature names no specific spec table row to build against:
+`05` §8's Performance Monitoring table has five named dashboards and none of them is "Analytics";
+`07` §5's Platform Operations table lists only Bulk import/export and Workspace templates. The
+tasklist step itself is the only real specification for this one — the same shape of gap step 66's
+pagination finding and step 62's degraded-search finding both were, just caught this time by the
+tasklist's own authors rather than a later audit pass.
+
+**Real design fork, confirmed via `AskUserQuestion`**: where should this live? `monitoring.py`'s own
+module docstring scopes itself explicitly to `05` §8's five dashboards — stretching it to cover a
+metric outside that table would make the docstring's own claim inaccurate. Confirmed: new
+`analytics.py` module, matching this codebase's consistent one-file-per-concern pattern
+(`query_log.py`, `curate.py`, `notifications.py`, `monitoring.py` are all separate already), with
+its own `GET /analytics/*` REST namespace, admin-gated by the exact same `_require_admin_scope`
+helper `/metrics/*` already shares (no new authz logic needed).
+
+**No new snapshot table needed, unlike step 72.** Storage bytes had no natural per-event timestamp
+anywhere — nothing in this codebase records "how big was the object store on date X" as a byproduct
+of normal operation, which is exactly why step 72 had to invent one. Search volume, submission
+volume, and feedback are different: `query_log.created_at`, `raw_source.created_at`, and
+`query_feedback.created_at` already exist and are already populated by every real search/submission/
+feedback call. `usage_trends()` just `date_trunc('day', ...)`-buckets and counts directly off these
+three tables — no periodic task, no new config knob, no new migration at all this step.
+
+**Scoping details, each following existing precedent rather than inventing a new pattern**:
+- `search_volume` reuses `monitoring.search_performance`'s own `:workspace_id = ANY
+  (resolved_workspaces)` filter verbatim — a search can resolve several workspaces in one call, so
+  a plain equality filter would silently undercount.
+- `submission_volume` filters `raw_source.workspace_id = :workspace_id` when scoped. `raw_source.
+  workspace_id` is nullable until classification resolves it (`03` §1) — a still-`submitted` source
+  with no workspace yet counts toward the aggregate (`workspace_id=None`) total but never toward any
+  scoped view, which is the only coherent reading (a source can't count toward a workspace it hasn't
+  been assigned to yet).
+- `feedback` (up/down counts) joins `query_feedback` to `wiki_page` for scoping, since feedback rows
+  carry a `page_id`, not a `workspace_id` of their own — the same join `advisor.
+  find_low_feedback_pages` (step 68) already uses for the identical reason.
+- `active_workspaces_trend` is **global only** — no `workspace_id` parameter at all, the same
+  "doesn't take a scope because the concept doesn't have one" shape `monitoring.queue_depths()`
+  already established for Celery queue depth (a queue mixes every workspace's work; "active
+  workspaces" mixes every workspace by definition). `Workspace` itself has no `created_at`/activity
+  column to trend against, so a workspace counts as active on a given day if it had a real search or
+  submission event that day — `UNION ALL` over `query_log`'s `unnest(resolved_workspaces)` and
+  `raw_source.workspace_id IS NOT NULL`, deduplicated with `count(DISTINCT workspace_id)` per day.
+  Merged into the `GET /analytics/usage-trends` response at the API layer regardless of the
+  request's own `workspace_id` scope — the exact same pattern `ingestion_pipeline_metrics` already
+  uses to merge in global `queue_depths()` alongside a workspace-scoped dashboard.
+
+No MCP tool added — confirmed by checking `mcp_server.py` directly: none of the five existing
+`/metrics/*` dashboards has an MCP counterpart either (admin-only backend data, not an agent-facing
+operation), so this follows the same precedent by omission, not a new decision.
+
+**Verification**: `tests/test_analytics.py` (new, 11 tests): scoped vs. aggregate counting for all
+three `usage_trends` metrics, window exclusion, `raw_source.workspace_id IS NULL` correctly excluded
+from scoped submission volume but included in the aggregate, feedback scoping via the `wiki_page`
+join, `active_workspaces_trend` deduplicating multiple same-day events from one workspace down to a
+single count, and the empty-with-no-activity case. `tests/test_analytics_api.py` (new, 5 tests):
+the same admin-gating shape `test_metrics_api.py` already established (non-admin rejected, scoped
+admin allowed, wrong-workspace admin rejected, "admin anywhere" allowed when unscoped), plus a
+direct assertion that `active_workspaces` in the response reflects a *different* workspace's
+activity even when the request itself is scoped to another — proving the merge-in is unconditional.
+Full suite: 788 tests green (16 new). Live-verified against the real dev stack (no migration, no new
+task — rebuilt/restarted only `gateway`): a real `POST /sources` submission through the live gateway
+was picked up and classified/curated for real by the live workers, a real `GET /search` call and two
+real `POST /search/{query_id}/feedback` calls (one up, one down) followed. The live
+`GET /analytics/usage-trends?workspace_id=live73-ws` endpoint returned the exact real counts
+(`search_volume: 2`, `submission_volume: 1`, `feedback: {up: 1, down: 1}`) matching every action
+taken; the unscoped aggregate call returned genuinely larger totals reflecting real pre-existing dev
+activity across every other workspace (proof it's reading real current data, not a canned fixture);
+`active_workspaces` was identical in both the scoped and aggregate responses, confirming the
+unconditional global merge works against the live endpoint, not just in an isolated test. Cleaned up
+`live73-ws` and every seeded row afterward — this one needed a second, careful FK-ordered pass: the
+first attempt bundled every `DELETE` into one multi-statement `psql -c` argument, and Postgres's
+simple-query protocol runs a semicolon-separated batch as one implicit transaction — the batch's
+later `raw_source` deletion failed on a not-yet-deleted `ingestion_log` reference, silently rolling
+back every delete that had already appeared to succeed earlier in the same batch (their per-statement
+"DELETE n" output was real, just never committed). Re-run as separate `psql -c` invocations, one
+statement each, completed and verified cleanly.
+
+**Spec touch-point** (applied): `phase3-tasklist.md` step 73's "usage trends over time" gap is
+built; no `05`/`07` table needed updating since neither ever listed this dashboard as a row.
+
+---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

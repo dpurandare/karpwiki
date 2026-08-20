@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-72 and 78 done, steps 73-77 and 79 not started.**
+**Status (2026-08-20): steps 57-73 and 78 done, steps 74-77 and 79 not started.**
 Step 65 was resolved (not built as a standalone primitive) alongside step 70, both done together
 out of numeric sequence, per step 65's own text. Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
@@ -494,8 +494,27 @@ findings that don't need a roadmap step (tracked there instead).
     `trend` both workspace-scoped and aggregated across workspaces. See
     [09](09-implementation-notes.md) §76 for the full writeup.
 
-73. **Analytics dashboards.** Usage trends over time (search volume, submission volume, active
-    workspaces) — building on step 72's trend data and the feedback signal from step 68.
+73. **Analytics dashboards.** **Done.** Usage trends over time (search volume, submission volume,
+    active workspaces) — building on step 72's trend data and the feedback signal from step 68.
+    Names no specific row in `05` §8 or `07` §5 (neither table lists "Analytics" at all) — the
+    tasklist step itself is the only spec for this one. New `analytics.py` module, confirmed via
+    AskUserQuestion over extending `monitoring.py` (whose own docstring stays scoped to `05` §8's
+    five named dashboards); new `GET /analytics/usage-trends`, admin-gated by the same
+    `_require_admin_scope` helper `/metrics/*` already shares. No new snapshot table needed unlike
+    step 72 — `query_log`/`raw_source`/`query_feedback` already carry real per-event timestamps to
+    bucket by. `search_volume` reuses `search_performance`'s `resolved_workspaces = ANY` filter;
+    `submission_volume` correctly excludes a still-unresolved `raw_source.workspace_id IS NULL`
+    source from any scoped view while still counting it in the aggregate; `feedback` joins through
+    `wiki_page` the same way `find_low_feedback_pages` (step 68) already does; `active_workspaces`
+    is global-only (no `workspace_id` param at all) — the same "doesn't take a scope" shape
+    `queue_depths()` established for Celery queue depth — merged into the response unconditionally
+    the same way `ingestion_pipeline_metrics` merges in `queue_depths()`. 788 tests green (16 new).
+    Live-verified against the real dev stack (no migration, no new task — rebuilt only `gateway`):
+    a real submission, search, and two real feedback ratings through the live gateway produced
+    exact matching real counts on the live endpoint, both workspace-scoped and aggregate; cleanup
+    needed a second FK-ordered pass after a bundled multi-statement `psql -c` silently rolled back
+    on a later error (Postgres's simple-query protocol treats a `;`-separated batch as one implicit
+    transaction). See [09](09-implementation-notes.md) §77 for the full writeup.
 
 74. **Bulk import/export.** Admin tooling to seed a new workspace from an existing document
     repository (bulk submission, bypassing per-document review-item noise but still subject to
