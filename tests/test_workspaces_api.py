@@ -26,6 +26,20 @@ async def test_get_a_workspace_the_caller_cannot_access_is_404(client, session, 
     assert r.status_code == 404
 
 
+async def test_list_workspaces_respects_limit_and_carries_no_next_cursor(
+    client, session, workspace, other_workspace
+):
+    """Deliberately capped, not cursor-paginated (09 §14, phase3-tasklist.md step 66)."""
+    session.add(AccessPolicy(workspace_id=other_workspace.workspace_id, principal="deepak", role=Role.reader))
+    await session.commit()
+
+    r = await client.get("/workspaces", headers=CONTRIBUTOR, params={"limit": 1})
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["items"]) == 1
+    assert "next_cursor" not in body
+
+
 async def test_get_a_workspace_reader_can_access(client, session, workspace):
     r = await client.get(f"/workspaces/{workspace.workspace_id}", headers=READER)
     assert r.status_code == 200
@@ -103,6 +117,25 @@ async def test_grant_and_list_access_policy(client, session, workspace):
     principals = {g["principal"] for g in listed.json()["items"]}
     assert "user:morgan" in principals
     assert "avery" in principals  # the admin grant itself is visible too
+
+
+async def test_list_access_policy_respects_limit_and_carries_no_next_cursor(
+    client, session, workspace
+):
+    """Deliberately capped, not cursor-paginated (09 §14, phase3-tasklist.md step 66)."""
+    await _grant_admin(session, workspace)
+    await client.post(
+        f"/workspaces/{workspace.workspace_id}/access-policy",
+        headers=ADMIN,
+        json={"principal": "user:morgan", "role": "reader"},
+    )
+    r = await client.get(
+        f"/workspaces/{workspace.workspace_id}/access-policy", headers=ADMIN, params={"limit": 1}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["items"]) == 1
+    assert "next_cursor" not in body
 
 
 async def test_grant_access_policy_with_fuse_access(client, session, workspace):

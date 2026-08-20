@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-65, 70, and 78 done, steps 66-69, 71-77, and 79 not started.**
+**Status (2026-08-20): steps 57-66, 70, and 78 done, steps 67-69, 71-77, and 79 not started.**
 Step 65 was resolved (not built as a standalone primitive) alongside step 70, both done together
 out of numeric sequence, per step 65's own text. Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
@@ -300,27 +300,24 @@ findings that don't need a roadmap step (tracked there instead).
     that exists. Formally closed rather than carried forward again. See
     [09](09-implementation-notes.md) §70 for the full writeup.
 
-66. **API pagination-contract gap** ([09](09-implementation-notes.md) §14). `09` §14 states
-    cursor pagination (`{"items": [...], "next_cursor": <string|null>}`, `limit`/`cursor` params)
-    as the contract for "list endpoints," and `GET /search`'s own lack of it is explicitly
-    flagged as a deliberate gap (`09` §28). Four other list endpoints have the identical gap —
-    `GET /document-types`, `GET /connectors`, `GET /workspaces`, `GET /workspaces/{id}/access-policy`
-    — but were never flagged anywhere; they simply return `{"items": [...]}` with no `next_cursor`
-    and no way to page past the first `limit`-worth of rows (there is no `limit` param at all).
-    Found by a direct code-vs-spec review, not previously known. Low real-world impact today
-    (these lists are naturally small — a deployment's own workspace/connector/grant counts — not
-    append-heavy like `page_version`/`raw_source`), but the written contract is silently narrower
-    than what's implemented. Resolve either by extending cursor pagination to all four (matching
-    every other list endpoint), or by explicitly documenting them as deliberately unpaginated
-    given their expected cardinality, the same way `/search`'s own gap is documented — either
-    closes the gap between the written contract and actual behavior; which one is a design call
-    for whoever picks up this step, not pre-decided here.
-
-    Distinct from, and not closed by, the post-Phase-2 hardcoding-remediation pass ([09](
-    09-implementation-notes.md) §60): that pass added a `MAX_SEARCH_LIMIT` cap to `/search`'s
-    existing non-paginated `limit` param (a DRY/uncapped-value fix, found in the same audit), but
-    `/search` still has no cursor pagination, and none of the four endpoints this step names were
-    touched. This step remains open.
+66. **API pagination-contract gap** ([09](09-implementation-notes.md) §14). **Done — resolved:
+    documented as deliberately unpaginated, not extended to real cursor pagination.** Checked
+    directly with Deepak before choosing: none of the four affected tables (`DocumentType`,
+    `Connector`, `Workspace`, `AccessPolicy`) has a `created_at` column at all, so "extend cursor
+    pagination" would have meant four new migrations, not just reusing the existing pattern —
+    weighed against confirmation that none of these lists is expected to reach hundreds of rows
+    (deployment-configuration cardinality — workspace/connector/taxonomy/grant counts — not
+    append-heavy content), the capped-limit-only path matching `/search`'s own precedent won.
+    Each underlying list function gained a `limit: int = DEFAULT_LIST_LIMIT` parameter (same
+    `pagination.py` constants every cursor-paginated endpoint already clamps against), with no
+    `next_cursor` in the response, ever — `GET /document-types`, `GET /connectors`,
+    `GET /workspaces`, `GET /workspaces/{id}/access-policy`, and the MCP `wiki_list_workspaces`
+    tool. `09` §14's own pagination-contract paragraph now names this exception explicitly
+    (alongside `/search`'s pre-existing one) rather than silently falling short of it. 696 tests
+    green (10 new). Live-verified against the real dev stack: seeded a real workspace with 2
+    document types, 2 connectors, and 3 access-policy grants — confirmed `?limit=1` capped all
+    four live endpoints to exactly 1 item with no `next_cursor` key, and the unlimited default
+    call returned every row. See [09](09-implementation-notes.md) §71 for the full writeup.
 
 ## 3b — Notification Service, Feedback Loop, Content Quality ([07](07-additional-features-and-roadmap.md) §3-4)
 

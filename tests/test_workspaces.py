@@ -194,3 +194,21 @@ async def test_list_for_principal_includes_group_grants(session, workspace):
     await session.flush()
     result = await workspaces.list_for_principal(session, principal_keys=("user:deepak", "group:eng"))
     assert [w.workspace_id for w in result] == [workspace.workspace_id]
+
+
+# --- Deliberately capped, not cursor-paginated (09 §14, phase3-tasklist.md step 66) ------
+
+
+async def test_list_for_principal_respects_limit(session, workspace, other_workspace):
+    session.add(AccessPolicy(workspace_id=workspace.workspace_id, principal="user:deepak", role=Role.reader))
+    session.add(AccessPolicy(workspace_id=other_workspace.workspace_id, principal="user:deepak", role=Role.reader))
+    await session.flush()
+    result = await workspaces.list_for_principal(session, principal_keys=("user:deepak",), limit=1)
+    assert len(result) == 1
+
+
+async def test_list_access_respects_limit(session, workspace):
+    await workspaces.grant(session, workspace_id=workspace.workspace_id, principal="user:a", role=Role.reader)
+    await workspaces.grant(session, workspace_id=workspace.workspace_id, principal="user:b", role=Role.reader)
+    result = await workspaces.list_access(session, workspace_id=workspace.workspace_id, limit=1)
+    assert len(result) == 1

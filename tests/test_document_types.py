@@ -37,6 +37,21 @@ async def test_list_for_workspaces_spans_a_set(session, workspace, other_workspa
     assert await document_types.list_for_workspaces(session, workspace_ids=[]) == []
 
 
+# --- Deliberately capped, not cursor-paginated (09 §14, phase3-tasklist.md step 66) ------
+
+
+async def test_list_for_workspace_respects_limit(session, workspace):
+    types = await document_types.list_for_workspace(session, workspace_id=workspace.workspace_id, limit=1)
+    assert len(types) == 1
+
+
+async def test_list_for_workspaces_respects_limit(session, workspace, other_workspace):
+    types = await document_types.list_for_workspaces(
+        session, workspace_ids=[workspace.workspace_id, other_workspace.workspace_id], limit=1
+    )
+    assert len(types) == 1
+
+
 async def test_update_renames_a_type_code(session, workspace):
     doc_type = await session.get(DocumentType, "eng.runbook")
     updated = await document_types.update(session, doc_type=doc_type, new_type_code="eng.oncall-runbook")

@@ -48,6 +48,20 @@ async def test_listing_without_a_filter_spans_every_admin_workspace(
     assert codes == {"eng.design-doc", "eng.runbook", "policy.hr"}
 
 
+async def test_listing_respects_limit_and_carries_no_next_cursor(client, session, workspace):
+    """Deliberately capped, not cursor-paginated (09 §14, phase3-tasklist.md step 66)."""
+    await _grant_admin(session, workspace)
+    r = await client.get(
+        "/document-types",
+        headers=ADMIN,
+        params={"workspace_id": workspace.workspace_id, "limit": 1},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["items"]) == 1
+    assert "next_cursor" not in body
+
+
 async def test_create_a_document_type(client, session, workspace):
     await _grant_admin(session, workspace)
     r = await client.post(

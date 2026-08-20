@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import DocumentType, Workspace, WorkspaceStatus
+from .pagination import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
 
 
 class DuplicateTypeCodeError(ValueError):
@@ -27,26 +28,37 @@ async def create(
     return doc_type
 
 
-async def list_for_workspace(session: AsyncSession, *, workspace_id: str) -> list[DocumentType]:
+async def list_for_workspace(
+    session: AsyncSession, *, workspace_id: str, limit: int = DEFAULT_LIST_LIMIT
+) -> list[DocumentType]:
+    """Capped, not cursor-paginated (09 §14, phase3-tasklist.md step 66) — a workspace's own
+    taxonomy is deployment-config cardinality (a handful to a few dozen types), not an
+    append-heavy content table, so a plain cap is the honest contract rather than cursor
+    machinery nothing will ever page through."""
+    limit = min(limit, MAX_LIST_LIMIT)
     result = await session.execute(
         select(DocumentType)
         .where(DocumentType.workspace_id == workspace_id)
         .order_by(DocumentType.type_code)
+        .limit(limit)
     )
     return list(result.scalars())
 
 
 async def list_for_workspaces(
-    session: AsyncSession, *, workspace_ids: list[str]
+    session: AsyncSession, *, workspace_ids: list[str], limit: int = DEFAULT_LIST_LIMIT
 ) -> list[DocumentType]:
     """Every type across a set of workspaces — the admin listing endpoint's shape, since an
-    admin's queue/version-browser scope is already always a workspace *set* (09 §22)."""
+    admin's queue/version-browser scope is already always a workspace *set* (09 §22). Capped
+    the same way `list_for_workspace` above is, for the same reason."""
     if not workspace_ids:
         return []
+    limit = min(limit, MAX_LIST_LIMIT)
     result = await session.execute(
         select(DocumentType)
         .where(DocumentType.workspace_id.in_(workspace_ids))
         .order_by(DocumentType.workspace_id, DocumentType.type_code)
+        .limit(limit)
     )
     return list(result.scalars())
 

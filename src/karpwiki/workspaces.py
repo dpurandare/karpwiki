@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import wiki_export
 from .models import AccessPolicy, Role, Workspace, WorkspaceStatus
+from .pagination import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
 
 
 class DuplicateWorkspaceError(ValueError):
@@ -123,23 +124,37 @@ async def revoke(session: AsyncSession, *, workspace_id: str, principal: str, sc
         await session.flush()
 
 
-async def list_access(session: AsyncSession, *, workspace_id: str) -> list[AccessPolicy]:
+async def list_access(
+    session: AsyncSession, *, workspace_id: str, limit: int = DEFAULT_LIST_LIMIT
+) -> list[AccessPolicy]:
+    """Capped, not cursor-paginated (09 §14, phase3-tasklist.md step 66) — a workspace's
+    grant count (principals × scopes) is deployment-config cardinality, not an append-heavy
+    content table, so a plain cap is the honest contract rather than cursor machinery
+    nothing will page through."""
+    limit = min(limit, MAX_LIST_LIMIT)
     result = await session.execute(
         select(AccessPolicy)
         .where(AccessPolicy.workspace_id == workspace_id)
         .order_by(AccessPolicy.principal, AccessPolicy.scope)
+        .limit(limit)
     )
     return list(result.scalars())
 
 
-async def list_for_principal(session: AsyncSession, *, principal_keys: tuple[str, ...]) -> list[Workspace]:
+async def list_for_principal(
+    session: AsyncSession, *, principal_keys: tuple[str, ...], limit: int = DEFAULT_LIST_LIMIT
+) -> list[Workspace]:
     """06 §1: `workspaces` list/get returns only workspaces the caller can access — any role,
-    not admin-only, unlike `document-types` (09 §25)."""
+    not admin-only, unlike `document-types` (09 §25). Capped, not cursor-paginated (09 §14,
+    phase3-tasklist.md step 66) — a deployment's own workspace count, not an append-heavy
+    content table."""
+    limit = min(limit, MAX_LIST_LIMIT)
     result = await session.execute(
         select(Workspace)
         .join(AccessPolicy, AccessPolicy.workspace_id == Workspace.workspace_id)
         .where(AccessPolicy.principal.in_(principal_keys))
         .order_by(Workspace.workspace_id)
         .distinct()
+        .limit(limit)
     )
     return list(result.scalars())

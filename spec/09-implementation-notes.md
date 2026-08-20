@@ -358,11 +358,20 @@ for the credential/security model; `06` §3's principal table gains a Connector 
 needs. `techfeasibility.md` §3 deferred these to "the API design phase" — Phase 1 reaches them at
 its first endpoint (`phase1-tasklist.md` step 7), so they are settled here.
 
-**Pagination.** Cursor-based, not offset. List endpoints accept `limit` (default 50, max 200) and
-an opaque `cursor`, and return `{"items": [...], "next_cursor": <string|null>}`. The cursor encodes
-the sort key plus a tiebreak id. Offset pagination is wrong for this data: `page_version`,
-`raw_source`, and the log streams are append-heavy and partitioned (`02` §3), so rows inserted
-mid-scan shift every later offset and a paging admin silently skips items.
+**Pagination.** Cursor-based, not offset, for append-heavy content tables. List endpoints over
+`page_version`, `raw_source`, `review_item`, and the log streams accept `limit` (default 50, max
+200) and an opaque `cursor`, and return `{"items": [...], "next_cursor": <string|null>}`. The
+cursor encodes the sort key plus a tiebreak id. Offset pagination is wrong for this data: these
+tables are append-heavy and partitioned (`02` §3), so rows inserted mid-scan shift every later
+offset and a paging admin silently skips items.
+
+Five endpoints are a deliberate, documented exception to the contract above — a plain, capped
+`limit` (same constants, no `cursor`/`next_cursor`) rather than real cursor pagination:
+`GET /search` (`04` §4, `09` §28 — a ranked query, not a catalog crawl, so "page 2 of the same
+ranking" isn't the same problem cursor pagination solves), and `GET /document-types`,
+`GET /connectors`, `GET /workspaces`, `GET /workspaces/{id}/access-policy` (`09` §71,
+phase3-tasklist.md step 66 — deployment-*configuration* cardinality, not append-heavy content;
+none of the four backing tables even has a `created_at` column, and none is expected to need one).
 
 **Error responses.** One shape, on every non-2xx:
 
@@ -3809,6 +3818,60 @@ visibility stayed untouched. Cleaned up the throwaway `live70-ws` workspace afte
 **Spec touch-point** (applied): `07` §2's fine-grained access control roadmap item is built (the
 `page_type` half; `tag` remains a named, deferred gap). `phase3-tasklist.md` step 65's own
 global-admin question is formally resolved: not needed, closed rather than carried forward again.
+
+## 71. API Pagination-Contract Gap Resolved: Documented, Not Extended (Phase 3 Step 66)
+
+Step 66's own text left the fix genuinely open ("a design call for whoever picks up this step").
+Checked with Deepak directly before choosing, first surfacing the full inventory of every list
+endpoint's pagination status (six already cursor-paginated, each backed by a real `created_at`
+column; the four gap endpoints plus `/search` without one), then the real cost each option
+carries — closing the gap wasn't the fork; how to close it was.
+
+**Resolved: document as deliberately unpaginated, capped instead of cursor-paginated — not
+extend real cursor pagination.** The deciding fact, found while investigating: none of the four
+affected tables (`DocumentType`, `Connector`, `Workspace`, `AccessPolicy`) has a `created_at`
+column at all — `DocumentType`'s PK is `type_code` (a string), `AccessPolicy`'s is a three-string
+composite `(workspace_id, principal, scope)`, and `Workspace`/`Connector` simply never got one.
+Real cursor pagination would have meant four new migrations (mirroring `RawSource.created_at`'s
+own precedent from step 43), a materially bigger lift than "extending an existing pattern" first
+suggested. Weighed against that cost: all four lists are deployment-*configuration* cardinality
+(a workspace's own taxonomy, connector count, grant count; a deployment's own workspace count),
+not append-heavy content tables like `page_version`/`raw_source`/`review_item` — confirmed
+directly with Deepak, who doesn't expect hundreds of workspaces or connectors, and for
+`document-types` specifically: it's an admin-console-only view (no reader-facing consumer, no
+agent/automation touches it — classification reads the taxonomy through a *separate*,
+intentionally-unfiltered `document_types.list_active()` call, unrelated to this question), and
+its realistic ceiling tracks workspace count rather than growing independently.
+
+**Mechanically**: each of the six underlying list functions
+(`document_types.list_for_workspace(s)`, `connectors.list_for_workspace(s)`,
+`workspaces.list_for_principal`, `workspaces.list_access`) gained a `limit: int =
+DEFAULT_LIST_LIMIT` parameter, clamped via `min(limit, MAX_LIST_LIMIT)` and a plain SQL
+`.limit(...)` — the exact same constants (`pagination.py`) every cursor-paginated endpoint
+already clamps against, just without the cursor half. The four REST endpoints (`GET
+/document-types`, `GET /connectors`, `GET /workspaces`, `GET /workspaces/{id}/access-policy`) and
+the MCP `wiki_list_workspaces` tool now accept an optional `limit` query param/argument and pass
+it straight through — no `next_cursor` key in any response, ever, matching `/search`'s own
+existing "capped, no cursor" contract precedent exactly (`DEFAULT_SEARCH_LIMIT`/
+`MAX_SEARCH_LIMIT`, added in the post-Phase-2 hardcoding-remediation pass).
+
+**Verification**: `tests/test_document_types.py`/`test_connectors.py`/`test_workspaces.py` (+2
+each): `limit` actually caps the underlying query on both the single-workspace and
+multi-workspace/aggregate variants. `tests/test_document_types_api.py`/`test_connectors_api.py`/
+`test_workspaces_api.py` (+1 each, the latter covering both `/workspaces` and
+`/workspaces/{id}/access-policy`): the REST `?limit=` param caps results and the response
+carries no `"next_cursor"` key at all (not `null` — genuinely absent, same as `/search`'s own
+convention). Full suite: 696 tests green (10 new), everything else unaffected — every existing
+call site's result set already sits under `DEFAULT_LIST_LIMIT` (50), so this changed no observed
+behavior at default settings. Live-verified against the real dev stack: rebuilt/restarted
+`gateway` (no migration — no schema changed), seeded a real workspace with 2 document types, 2
+connectors, and 3 access-policy grants, confirmed `?limit=1` against all four live endpoints each
+returned exactly 1 item with no `next_cursor` key present, and the unlimited default call
+returned all rows. Cleaned up the throwaway `live66-ws` workspace afterward.
+
+**Spec touch-point** (applied): `09` §14's cursor-pagination contract now explicitly excludes
+these four (and `/search`, already documented) rather than silently falling short of it —
+resolves the gap `phase3-tasklist.md` step 66 named, per the option the spec itself left open.
 
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

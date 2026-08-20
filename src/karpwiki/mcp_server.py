@@ -212,12 +212,15 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
             }
 
     @mcp.tool()
-    async def wiki_list_workspaces(ctx: Context) -> dict:
+    async def wiki_list_workspaces(ctx: Context, limit: int = workspaces.DEFAULT_LIST_LIMIT) -> dict:
         """Discover which workspaces the caller can search or submit to. Maps to
-        `GET /workspaces`."""
+        `GET /workspaces` — deliberately capped, not cursor-paginated (09 §14,
+        phase3-tasklist.md step 66), same reasoning as the REST endpoint."""
         principal = await _resolve_principal(ctx)
         async with session_scope() as session:
-            found = await workspaces.list_for_principal(session, principal_keys=principal.policy_keys)
+            found = await workspaces.list_for_principal(
+                session, principal_keys=principal.policy_keys, limit=limit
+            )
             return {"items": [api._workspace_body(w) for w in found]}
 
     @mcp.tool()

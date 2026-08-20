@@ -61,6 +61,27 @@ async def test_list_for_workspaces_spans_a_set(session, workspace, other_workspa
     assert await connectors.list_for_workspaces(session, workspace_ids=[]) == []
 
 
+# --- Deliberately capped, not cursor-paginated (09 §14, phase3-tasklist.md step 66) ------
+
+
+async def test_list_for_workspace_respects_limit(session, workspace):
+    await connectors.create(session, workspace_id=workspace.workspace_id, type="git")
+    await connectors.create(session, workspace_id=workspace.workspace_id, type="website")
+
+    found = await connectors.list_for_workspace(session, workspace_id=workspace.workspace_id, limit=1)
+    assert len(found) == 1
+
+
+async def test_list_for_workspaces_respects_limit(session, workspace, other_workspace):
+    await connectors.create(session, workspace_id=workspace.workspace_id, type="git")
+    await connectors.create(session, workspace_id=other_workspace.workspace_id, type="website")
+
+    found = await connectors.list_for_workspaces(
+        session, workspace_ids=[workspace.workspace_id, other_workspace.workspace_id], limit=1
+    )
+    assert len(found) == 1
+
+
 async def test_update_only_changes_supplied_fields(session, workspace):
     connector = await connectors.create(
         session, workspace_id=workspace.workspace_id, type="git", config={"branch": "main"}

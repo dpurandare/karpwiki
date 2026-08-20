@@ -1062,9 +1062,15 @@ def _register_routes(app: FastAPI) -> None:
         principal: Annotated[Principal, Depends(_principal)],
         session: Annotated[AsyncSession, Depends(_session)],
         workspace_id: str | None = None,
+        limit: int = document_types.DEFAULT_LIST_LIMIT,
     ):
         """05 §7's taxonomy list — admin-only per 06 §1's `document-types` caller column
-        (unlike `workspaces` list/get, this resource has no reader-visible half)."""
+        (unlike `workspaces` list/get, this resource has no reader-visible half).
+
+        Deliberately not cursor-paginated (09 §14, phase3-tasklist.md step 66) — a
+        deployment-config-cardinality list (a workspace's own taxonomy, or an admin's
+        taxonomy across every workspace they administer), not an append-heavy content
+        table; `limit` (capped, no `next_cursor`) is the honest contract instead."""
         if workspace_id is not None:
             if not await has_role(
                 session, principal=principal, workspace_id=workspace_id, required=Role.admin
@@ -1074,7 +1080,9 @@ def _register_routes(app: FastAPI) -> None:
                     "forbidden",
                     "Listing document types for this workspace requires the admin role.",
                 )
-            types = await document_types.list_for_workspace(session, workspace_id=workspace_id)
+            types = await document_types.list_for_workspace(
+                session, workspace_id=workspace_id, limit=limit
+            )
         else:
             admin_workspaces = await any_workspace_with_role(
                 session, principal=principal, required=Role.admin
@@ -1084,7 +1092,7 @@ def _register_routes(app: FastAPI) -> None:
                     403, "forbidden", "Listing document types requires the admin role somewhere."
                 )
             types = await document_types.list_for_workspaces(
-                session, workspace_ids=admin_workspaces
+                session, workspace_ids=admin_workspaces, limit=limit
             )
         return {"items": [_document_type_body(t) for t in types]}
 
@@ -1165,9 +1173,11 @@ def _register_routes(app: FastAPI) -> None:
         principal: Annotated[Principal, Depends(_principal)],
         session: Annotated[AsyncSession, Depends(_session)],
         workspace_id: str | None = None,
+        limit: int = connectors.DEFAULT_LIST_LIMIT,
     ):
         """06 §1's `connectors` list (phase2-tasklist.md step 51) — same admin-scoping
-        shape as `document-types`' list."""
+        shape as `document-types`' list, including its "deliberately capped, not cursor-
+        paginated" reasoning (09 §14, phase3-tasklist.md step 66)."""
         if workspace_id is not None:
             if not await has_role(
                 session, principal=principal, workspace_id=workspace_id, required=Role.admin
@@ -1175,7 +1185,9 @@ def _register_routes(app: FastAPI) -> None:
                 raise ApiError(
                     403, "forbidden", "Listing connectors for this workspace requires the admin role."
                 )
-            found = await connectors.list_for_workspace(session, workspace_id=workspace_id)
+            found = await connectors.list_for_workspace(
+                session, workspace_id=workspace_id, limit=limit
+            )
         else:
             admin_workspaces = await any_workspace_with_role(
                 session, principal=principal, required=Role.admin
@@ -1184,7 +1196,9 @@ def _register_routes(app: FastAPI) -> None:
                 raise ApiError(
                     403, "forbidden", "Listing connectors requires the admin role somewhere."
                 )
-            found = await connectors.list_for_workspaces(session, workspace_ids=admin_workspaces)
+            found = await connectors.list_for_workspaces(
+                session, workspace_ids=admin_workspaces, limit=limit
+            )
         return {"items": [_connector_body(c) for c in found]}
 
     @app.post("/connectors", status_code=201)
@@ -1254,10 +1268,15 @@ def _register_routes(app: FastAPI) -> None:
     async def list_workspaces(
         principal: Annotated[Principal, Depends(_principal)],
         session: Annotated[AsyncSession, Depends(_session)],
+        limit: int = workspaces.DEFAULT_LIST_LIMIT,
     ):
         """06 §1: returns only workspaces the caller can access, any role — unlike
-        `document-types`, this resource has a reader-visible half."""
-        found = await workspaces.list_for_principal(session, principal_keys=principal.policy_keys)
+        `document-types`, this resource has a reader-visible half. Deliberately capped, not
+        cursor-paginated (09 §14, phase3-tasklist.md step 66) — a deployment's own
+        workspace count, not an append-heavy content table."""
+        found = await workspaces.list_for_principal(
+            session, principal_keys=principal.policy_keys, limit=limit
+        )
         return {"items": [_workspace_body(w) for w in found]}
 
     @app.get("/workspaces/{workspace_id}")
@@ -1418,9 +1437,12 @@ def _register_routes(app: FastAPI) -> None:
         workspace_id: str,
         principal: Annotated[Principal, Depends(_principal)],
         session: Annotated[AsyncSession, Depends(_session)],
+        limit: int = workspaces.DEFAULT_LIST_LIMIT,
     ):
+        """Deliberately capped, not cursor-paginated (09 §14, phase3-tasklist.md step 66) —
+        a workspace's grant count, not an append-heavy content table."""
         await _admin_workspace(session, principal, workspace_id)
-        grants = await workspaces.list_access(session, workspace_id=workspace_id)
+        grants = await workspaces.list_access(session, workspace_id=workspace_id, limit=limit)
         return {"items": [_access_policy_body(g) for g in grants]}
 
     @app.post("/workspaces/{workspace_id}/access-policy", status_code=201)
