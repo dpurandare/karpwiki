@@ -3321,5 +3321,62 @@ throwaway `live60-*` workspace afterward.
 **Spec touch-point** (applied): `04` §3's mermaid diagram and prose already specify the two-stage
 shape this step builds to; no wording change needed.
 
+## 65. Structured-Data Curator Treatment (Phase 3 Step 61)
+
+`curate.py`'s own module docstring had deferred this since Phase 1: every source got the
+narrative summary+citations treatment regardless of `content_shape`. `07` §1's two treatments
+(§1.1's table, §1.3's four-step extraction guidance) were fully specified from the start — this
+step is purely the missing half of an already-designed mechanism, not a new design.
+
+**`curate.StructuredCuratedContent`/`StructuredField`/`render_structured_source_body`** (new) —
+metadata-first: a structure table (name/type/description per field), a one-sentence intent
+statement, and a provenance section (source file, `artifact_identity`, `source_version` — the
+same fields `03` §3's deterministic pre-step already extracts and `03` §4's duplicate-version
+detection already consumes, now finally read by something on the *ingest* side too). Reuses
+`CuratedPage` for the defined-entity pages (`07` §1.3 step 4) rather than inventing a parallel
+type — the exact same create-or-update-by-title matching `_write_curated_page` already does for
+narrative content applies unchanged, since both content shapes ultimately produce the same
+`list[CuratedPage]` shape.
+
+**One deliberate simplification, not a corner cut**: `07` §1.3 step 2 describes the intent
+statement as "1-3 sentences," but `StructuredCuratedContent.intent_statement` is prompted and
+validated as a single sentence. Reasoning: it becomes the page's frontmatter `description`
+directly (`01` §6's own "one-sentence summary" contract, the same field every other page type
+already respects), and — via step 60's `index.md` machinery, which draws every catalog entry
+from `description` — it's also what `07` §1.1 itself calls index.md's "**one-line** intent
+statement." Making it genuinely one sentence keeps both contracts satisfied with one field
+rather than inventing a second, longer one solely for the page body; nothing in `07` §1.3's own
+guidance ("what question it answers, what system/process it supports, who owns/produces/consumes
+it") actually requires more than one well-written sentence to satisfy.
+
+**`ingestion.curate_source` branches on `source.content_shape`** (new `structured_call` parameter,
+`call_structured_curator_model`, mirroring `call`/`call_curator_model`'s existing shape exactly):
+`structured_data` sources call the new structured prompt and `_write_structured_source_page`;
+`narrative` sources are completely unchanged, still calling `call`/`_write_source_page` exactly
+as before this step. Both branches converge back into the same shared `pages` create-or-update
+loop, `overview.md`/`log.md`/`index.md` refresh, and reindex dispatch immediately after — the
+branch is scoped to exactly "which LLM call and which page-body renderer," nothing else in the
+pipeline needed to know the difference. `content_shape` stays a `raw_source` attribute, never a
+frontmatter field or a new `page_type` (`07` §1.1's own explicit framing), so no model/migration
+change was needed anywhere in this step.
+
+**Verification**: `tests/test_curate.py` (+4: structure-table rendering, no-fields-extracted
+handling, and both new models' validation), `tests/test_curate_orchestration.py` (+4: the
+structured page's body/description/tags, defined-entity-page creation, the intent statement
+reaching `index.md`'s catalog entry via step 60's existing machinery, and an explicit regression
+check that the narrative path's `description`/tags are unchanged). Full suite: 609 tests green.
+Live-verified against real dev Postgres, real MinIO, and real `gpt-5-nano` through the rebuilt
+containers: submitted a real 7-field JSON config; the deterministic pre-step correctly tagged
+`content_shape=structured_data` and extracted real `artifact_identity`/`source_version` from the
+JSON's own `name`/`version` fields; the real curator call produced a genuinely accurate 7-row
+structure table (correct types and descriptions for every field, not just names), a coherent
+intent statement, and a real defined-entity page for the config artifact itself — all of it
+flowing correctly into `index.md`'s real catalog entry via step 60's existing, unmodified
+machinery. Cleaned up the throwaway `live61-*` workspace afterward.
+
+**Spec touch-point** (applied): none required — `07` §1 already specifies everything built here
+in full; the one-sentence intent-statement simplification is documented above as a reasoned
+implementation choice, not a spec change.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

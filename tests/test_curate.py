@@ -103,3 +103,60 @@ def test_curated_page_requires_at_least_two_tags():
 
     with pytest.raises(ValidationError):
         CuratedPage(page_type="concept", title="X", tags=["one"], body="body")
+
+
+def test_structured_source_body_renders_the_structure_table():
+    from karpwiki.curate import StructuredCuratedContent, StructuredField
+
+    content = StructuredCuratedContent(
+        source_title="Payments Config",
+        intent_statement="Defines retry/backoff parameters for the Payments connector.",
+        fields=[
+            StructuredField(name="max_retries", type="int", description="Retry ceiling."),
+            StructuredField(name="backoff_ms", type="int", description=None),
+        ],
+    )
+    body = curate.render_structured_source_body(
+        content, filename="payments.yaml", artifact_identity="payments-config", source_version="2.1"
+    )
+    assert "Defines retry/backoff parameters" in body
+    assert "## Structure" in body
+    assert "| max_retries | int | Retry ceiling. |" in body
+    assert "| backoff_ms | int |  |" in body
+    assert "## Provenance" in body
+    assert "payments.yaml" in body
+    assert "`payments-config`" in body
+    assert "`2.1`" in body
+    assert "[^1]: payments.yaml" in body
+
+
+def test_structured_source_body_handles_no_fields_extracted():
+    from karpwiki.curate import StructuredCuratedContent
+
+    content = StructuredCuratedContent(source_title="Empty Config", intent_statement="Does very little.")
+    body = curate.render_structured_source_body(
+        content, filename="empty.json", artifact_identity=None, source_version=None
+    )
+    assert "(no fields extracted)" in body
+    assert "Artifact identity" not in body
+    assert "Version:" not in body
+
+
+def test_structured_field_requires_a_name():
+    import pytest
+    from pydantic import ValidationError
+
+    from karpwiki.curate import StructuredField
+
+    with pytest.raises(ValidationError):
+        StructuredField(name="")
+
+
+def test_structured_curated_content_requires_an_intent_statement():
+    import pytest
+    from pydantic import ValidationError
+
+    from karpwiki.curate import StructuredCuratedContent
+
+    with pytest.raises(ValidationError):
+        StructuredCuratedContent(source_title="X", intent_statement="")

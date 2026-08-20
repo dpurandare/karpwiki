@@ -37,6 +37,7 @@ from .frontmatter import split_frontmatter
 from .models import (
     AdminActionLog,
     Connector,
+    ContentShape,
     PageStatus,
     PageType,
     PageVersion,
@@ -777,6 +778,44 @@ async def call_curator_model(
     return result.output
 
 
+class StructuredCuratorCall(Protocol):
+    """The `structured_data` counterpart to `CuratorCall` above (07 §1.3,
+    phase3-tasklist.md step 61) — same shape, different output type."""
+
+    async def __call__(
+        self, *, model: str, source_text: str, filename: str, existing_titles: list[str]
+    ) -> curate.StructuredCuratedContent: ...
+
+
+async def call_structured_curator_model(
+    *, model: str, source_text: str, filename: str, existing_titles: list[str]
+) -> curate.StructuredCuratedContent:
+    """Real structured-data Curator call via Pydantic AI (07 §1.3, 08 §2). Transient
+    failures retried with backoff (03 §1, `llm.retry_transient`), same as
+    `call_curator_model`."""
+    from pydantic_ai import Agent
+
+    catalog = "\n".join(f"- {t}" for t in existing_titles) or "(none yet)"
+    agent = Agent(
+        model,
+        output_type=curate.StructuredCuratedContent,
+        system_prompt=(
+            "You curate an enterprise wiki from a structured data artifact — a schema, "
+            "config file, API spec, or data dictionary, not prose. Extract its fields, "
+            "columns, parameters, or endpoints as a structure table; write a one-sentence "
+            "intent statement (what this artifact is for, what system or process it "
+            "supports, who owns/produces/consumes it — inferred from context, not "
+            "invented); and propose an entity page for each major table, resource, or "
+            "config section it defines, when significant enough to be referenced "
+            "elsewhere. A page's title must match an existing page's title EXACTLY to "
+            "update it rather than create a duplicate.\n\n"
+            f"Existing concept/entity pages in this workspace:\n{catalog}"
+        ),
+    )
+    result = await llm.retry_transient(lambda: agent.run(f"Filename: {filename}\n\n{source_text}"))
+    return result.output
+
+
 class MergeCall(Protocol):
     """The LLM call `_resolve_merge` above makes, isolated the same way `CuratorCall` is."""
 
@@ -820,26 +859,50 @@ async def curate_source(
     source: RawSource,
     workspace: Workspace,
     call: CuratorCall = call_curator_model,
+    structured_call: StructuredCuratorCall = call_structured_curator_model,
 ) -> PipelineState:
     """Curator ingest (03 §6, step 12): raw source -> source/concept/entity pages,
-    overview.md and log.md refreshed, index_status implicitly `pending`/`stale` via the
-    versioning primitives that already do this on every write (02 §7)."""
+    overview.md/log.md/index.md refreshed, index_status implicitly `pending`/`stale` via
+    the versioning primitives that already do this on every write (02 §7).
+
+    Branches on `content_shape` (07 §1.1's two treatments, phase3-tasklist.md step 61): a
+    `structured_data` source gets the metadata-first structure-table+intent-statement
+    treatment (`structured_call`/`_write_structured_source_page`) instead of the narrative
+    summary+citations one — `content_shape` is a `raw_source` attribute, not a page-type
+    distinction (07 §1.1), so both paths still produce an ordinary `page_type: source`
+    page and feed the same `pages` create-or-update loop below.
+    """
     try:
         payload = objectstore.read_bytes(source.object_key)
         text = payload.decode("utf-8", errors="replace")
 
         existing = await _existing_concept_entity_pages(session, workspace.workspace_id)
         workspace_schema = await schema.load(session, workspace_id=workspace.workspace_id)
-        content = await call(
-            model=llm.resolve_model("curator", schema.as_dict(workspace_schema)),
-            source_text=text,
-            filename=source.filename,
-            existing_titles=[p.title for p in existing],
-        )
+        model = llm.resolve_model("curator", schema.as_dict(workspace_schema))
 
-        await _write_source_page(session, source=source, workspace=workspace, content=content)
+        if source.content_shape is ContentShape.structured_data:
+            structured_content = await structured_call(
+                model=model,
+                source_text=text,
+                filename=source.filename,
+                existing_titles=[p.title for p in existing],
+            )
+            await _write_structured_source_page(
+                session, source=source, workspace=workspace, content=structured_content
+            )
+            pages = structured_content.pages
+        else:
+            content = await call(
+                model=model,
+                source_text=text,
+                filename=source.filename,
+                existing_titles=[p.title for p in existing],
+            )
+            await _write_source_page(session, source=source, workspace=workspace, content=content)
+            pages = content.pages
+
         pages_touched = 1
-        for page in content.pages:
+        for page in pages:
             await _write_curated_page(
                 session, workspace_id=workspace.workspace_id, page=page, existing=existing
             )
@@ -914,6 +977,35 @@ async def _write_source_page(
         title=content.source_title,
         description=content.source_description,
         tags=["source", str(source.content_shape.value if source.content_shape else "narrative")],
+        body=body,
+        status=PageStatus.published,
+    )
+
+
+async def _write_structured_source_page(
+    session: AsyncSession,
+    *,
+    source: RawSource,
+    workspace: Workspace,
+    content: curate.StructuredCuratedContent,
+) -> None:
+    """Finalize a `structured_data` source's page (07 §1.3) — same upsert-by-path shape as
+    `_write_source_page`, different render and `description` source (the intent statement,
+    not a prose summary)."""
+    body = curate.render_structured_source_body(
+        content,
+        filename=source.filename,
+        artifact_identity=source.artifact_identity,
+        source_version=source.source_version,
+    )
+    await _upsert_singleton(
+        session,
+        workspace_id=workspace.workspace_id,
+        path=f"sources/{source.source_id}.md",
+        page_type=PageType.source,
+        title=content.source_title,
+        description=content.intent_statement,
+        tags=["source", "structured_data"],
         body=body,
         status=PageStatus.published,
     )

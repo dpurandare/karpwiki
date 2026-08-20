@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from karpwiki import curate, ingestion, objectstore, pipeline, schema, versioning
-from karpwiki.curate import CuratedContent, CuratedPage
+from karpwiki.curate import CuratedContent, CuratedPage, StructuredCuratedContent, StructuredField
 from karpwiki.models import (
     ContentShape,
     PageStatus,
@@ -25,7 +25,16 @@ BODY = (
 )
 
 
-async def _classified(session, workspace, *, filename="restart-payments.md", payload=BODY):
+async def _classified(
+    session,
+    workspace,
+    *,
+    filename="restart-payments.md",
+    payload=BODY,
+    content_shape=ContentShape.narrative,
+    artifact_identity=None,
+    source_version=None,
+):
     source_id = uuid.uuid4()
     key = f"/{workspace.workspace_id}/sources/{source_id}/{filename}"
     objectstore.write_bytes(key, payload)
@@ -35,7 +44,9 @@ async def _classified(session, workspace, *, filename="restart-payments.md", pay
         object_key=key,
         filename=filename,
         content_hash=hashlib.sha256(payload).hexdigest(),
-        content_shape=ContentShape.narrative,
+        content_shape=content_shape,
+        artifact_identity=artifact_identity,
+        source_version=source_version,
         submitted_by="user:deepak",
         pipeline_state=PipelineState.ingesting,
     )
@@ -54,7 +65,18 @@ def _content(pages=(), title="Restarting Payments", description="Restart runbook
     )
 
 
-def _returns(content: CuratedContent):
+def _structured_content(
+    pages=(),
+    title="Payments Config",
+    intent="Defines retry/backoff parameters for the Payments connector.",
+    fields=(),
+):
+    return StructuredCuratedContent(
+        source_title=title, intent_statement=intent, fields=list(fields), pages=list(pages)
+    )
+
+
+def _returns(content):
     async def _call(**_kwargs):
         return content
 
@@ -171,6 +193,92 @@ async def test_a_page_matching_an_existing_title_is_updated_not_duplicated(sessi
     assert pages[0].current_version_id != original_version
     new_version = await session.get(PageVersion, pages[0].current_version_id)
     assert "New content." in new_version.content
+
+
+async def test_structured_data_source_gets_the_metadata_first_treatment(session, workspace):
+    """phase3-tasklist.md step 61 (07 §1.1's two treatments): a structured_data source's
+    page body is a structure table + intent statement + provenance, not a prose summary —
+    and its description is the intent statement, not source_description (narrative's own
+    field, which StructuredCuratedContent doesn't even have)."""
+    source = await _classified(
+        session,
+        workspace,
+        filename="payments.yaml",
+        payload=b'{"name": "payments-config", "version": "2.1"}',
+        content_shape=ContentShape.structured_data,
+        artifact_identity="payments-config",
+        source_version="2.1",
+    )
+    content = _structured_content(
+        fields=[StructuredField(name="max_retries", type="int", description="Retry ceiling.")]
+    )
+    await ingestion.curate_source(
+        session, source=source, workspace=workspace, structured_call=_returns(content)
+    )
+    await session.commit()
+
+    result = await session.execute(select(WikiPage).where(WikiPage.page_type == PageType.source))
+    page = result.scalar_one()
+    version = await session.get(PageVersion, page.current_version_id)
+    assert version.frontmatter["description"] == (
+        "Defines retry/backoff parameters for the Payments connector."
+    )
+    assert version.frontmatter["tags"] == ["source", "structured_data"]
+    assert "## Structure" in version.content
+    assert "max_retries" in version.content
+    assert "## Provenance" in version.content
+    assert "`payments-config`" in version.content
+    assert "`2.1`" in version.content
+
+
+async def test_structured_data_source_still_creates_entity_pages(session, workspace):
+    source = await _classified(session, workspace, content_shape=ContentShape.structured_data)
+    content = _structured_content(
+        pages=[CuratedPage(page_type="entity", title="Retry Policy", tags=["a", "b"], body="b")]
+    )
+    await ingestion.curate_source(
+        session, source=source, workspace=workspace, structured_call=_returns(content)
+    )
+    await session.commit()
+
+    result = await session.execute(select(WikiPage).where(WikiPage.page_type == PageType.entity))
+    assert result.scalar_one().path == "entities/retry-policy.md"
+
+
+async def test_structured_data_intent_statement_becomes_the_index_catalog_entry(session, workspace):
+    """07 §1.1: index.md's catalog entry for a structured_data source is the intent
+    statement, "phrased the way a user would search... not the filename" — step 60's
+    index.md already draws every page's catalog entry from its `description` field, so
+    this falls out for free once `description` is set to the intent statement above."""
+    source = await _classified(session, workspace, content_shape=ContentShape.structured_data)
+    content = _structured_content(intent="Defines retry/backoff parameters for the Payments connector.")
+    await ingestion.curate_source(
+        session, source=source, workspace=workspace, structured_call=_returns(content)
+    )
+    await session.commit()
+
+    index_page = (
+        await session.execute(
+            select(WikiPage).where(WikiPage.workspace_id == workspace.workspace_id, WikiPage.path == "index.md")
+        )
+    ).scalar_one()
+    version = await session.get(PageVersion, index_page.current_version_id)
+    assert "Defines retry/backoff parameters for the Payments connector." in version.content
+
+
+async def test_narrative_sources_are_unaffected_by_the_structured_branch(session, workspace):
+    """The narrative path (default content_shape) must still use CuratedContent/`call`,
+    not StructuredCuratedContent/`structured_call` — a regression check that adding the
+    branch didn't change existing behavior."""
+    source = await _classified(session, workspace)  # content_shape=narrative, the default
+    await ingestion.curate_source(session, source=source, workspace=workspace, call=_returns(_content()))
+    await session.commit()
+
+    result = await session.execute(select(WikiPage).where(WikiPage.page_type == PageType.source))
+    page = result.scalar_one()
+    version = await session.get(PageVersion, page.current_version_id)
+    assert version.frontmatter["tags"] == ["source", "narrative"]
+    assert version.frontmatter["description"] == "Restart runbook."
 
 
 async def test_the_existing_catalog_is_passed_to_the_call(session, workspace):

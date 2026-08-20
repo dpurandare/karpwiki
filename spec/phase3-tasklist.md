@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-60 done, steps 61-78 not started.** Phase 1 (steps 1–21) and Phase 2
+**Status (2026-08-20): steps 57-61 done, steps 62-78 not started.** Phase 1 (steps 1–21) and Phase 2
 (steps 22–56) are both complete — see [`phase1-tasklist.md`](phase1-tasklist.md) and
 [`phase2-tasklist.md`](phase2-tasklist.md). See [`implementation-audit.md`](implementation-audit.md)
 for the full write-up of the two audit passes that shaped track 3a, including redundancy/dead-code
@@ -183,6 +183,25 @@ findings that don't need a roadmap step (tracked there instead).
     `source_version` are already captured at classification time (`03` §3) and already drive
     duplicate-version detection (`03` §4) — this step is purely the Curator Agent's differentiated
     ingest treatment for a source already tagged `structured_data`.
+
+    **Done** — new [`curate.StructuredCuratedContent`](../src/karpwiki/curate.py)/`StructuredField`/
+    `render_structured_source_body` (structure table + intent statement + provenance, reusing
+    `CuratedPage` for defined-entity pages so the existing create-or-update-by-exact-title
+    machinery applies unchanged) and a new
+    [`ingestion.call_structured_curator_model`](../src/karpwiki/ingestion.py)/
+    `_write_structured_source_page`. `curate_source` branches on `source.content_shape`: a
+    `structured_data` source gets this treatment instead of the narrative
+    summary+citations one, both still landing on the same `page_type: source` page and feeding
+    the same downstream `pages` create-or-update loop, `overview.md`/`log.md`/`index.md`
+    refresh, and reindex dispatch. The intent statement doubles as the page's `description` —
+    the exact field step 60's `index.md` already draws every catalog entry from — so 07 §1.1's
+    "index.md catalog entry: one-line intent statement... not the filename" falls out for free,
+    no new plumbing needed. Live-verified against real dev Postgres, real MinIO, and real
+    `gpt-5-nano`: a real JSON config produced a real 7-row structure table with correct
+    types/descriptions, a real intent statement, real provenance showing the real
+    deterministically-extracted `artifact_identity`/`source_version`, a real defined-entity
+    page, and the intent statement correctly appearing as `index.md`'s catalog entry for that
+    source. See [09](09-implementation-notes.md) §65 for the full writeup.
 
 62. **Search partial-failure / degraded-result contract** ([09](09-implementation-notes.md) §14).
     `09` §14 specifies that a federated search spanning an unavailable backend "returns 200 with

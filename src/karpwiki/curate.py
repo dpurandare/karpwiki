@@ -1,16 +1,15 @@
-"""Curator decisions (03 §6) — no I/O, no database, no transitions.
+"""Curator decisions (03 §6, 07 §1) — no I/O, no database, no transitions.
 
 One LLM call proposes the source page's content and the concept/entity pages a source
-warrants (`CuratedContent`). A second, separate call folds a duplicate source into an
-existing page when an admin resolves a `duplicate` review item as `merge` (03 §4,
-`MergedPage`) — its own call, not a variant of curation, since it targets one page an
-admin already picked rather than proposing new ones. Everything else here is deterministic
-rendering: matching a proposed page against the workspace's existing pages, and
-regenerating `overview.md`/`log.md` bodies from queryable ground truth rather than parsing
-prior markdown.
-
-Phase 1 curates every source as `narrative` — 07 §1.3's structured-data metadata/intent
-page is out of scope (phase1-tasklist §0, accepted simplification).
+warrants — `CuratedContent` for a `narrative` source, `StructuredCuratedContent` for
+`structured_data` (07 §1.1's two treatments; `ingestion.curate_source` branches on
+`RawSource.content_shape` and calls one or the other, phase3-tasklist.md step 61). A
+second, separate call folds a duplicate source into an existing page when an admin resolves
+a `duplicate` review item as `merge` (03 §4, `MergedPage`) — its own call, not a variant of
+curation, since it targets one page an admin already picked rather than proposing new ones.
+Everything else here is deterministic rendering: matching a proposed page against the
+workspace's existing pages, and regenerating `overview.md`/`log.md`/`index.md` bodies from
+queryable ground truth rather than parsing prior markdown.
 """
 
 import re
@@ -49,6 +48,80 @@ class CuratedContent(BaseModel):
             "concept or entity, reuse its EXACT existing title so it is updated rather than "
             "duplicated; otherwise pick a new, distinct title."
         ),
+    )
+
+
+class StructuredField(BaseModel):
+    """One row of the structure table (07 §1.3 step 1) — a field/column/parameter/endpoint
+    the artifact declares."""
+
+    name: str = Field(min_length=1)
+    type: str | None = None
+    description: str | None = None
+
+
+class StructuredCuratedContent(BaseModel):
+    """The Curator's structured output for a `structured_data` source (07 §1.3) —
+    metadata-first: a structure table and an intent statement, not a prose summary. Reuses
+    `CuratedPage` for `pages` (entity pages for defined tables/resources/config
+    sections, §1.3 step 4) — the same create-or-update-by-exact-title matching
+    `_write_curated_page` already does for narrative content applies unchanged.
+    """
+
+    source_title: str = Field(min_length=1)
+    intent_statement: str = Field(
+        min_length=1,
+        description=(
+            "One sentence: what this artifact is for, what system/process it supports, who "
+            "owns/produces/consumes it — inferred from context (surrounding files, naming, "
+            "comments), not invented. Becomes the source page's frontmatter description AND "
+            "its index.md catalog entry (07 §1.1: 'phrased the way a user would search... not "
+            "the filename') — the same one-sentence contract 01 §6 already requires of every "
+            "page's description, so no separate field is needed for the catalog entry."
+        ),
+    )
+    fields: list[StructuredField] = Field(
+        default_factory=list, description="Structure table rows — name, type, description."
+    )
+    pages: list[CuratedPage] = Field(
+        default_factory=list,
+        description=(
+            "An entity page for each major table, resource, or config section this artifact "
+            "defines, when significant enough to be referenced from elsewhere (07 §1.3 step "
+            "4). Reuse an existing page's EXACT title to update it rather than duplicate it."
+        ),
+    )
+
+
+def render_structured_source_body(
+    content: StructuredCuratedContent,
+    *,
+    filename: str,
+    artifact_identity: str | None,
+    source_version: str | None,
+) -> str:
+    """07 §1.3: structure table + intent statement + provenance — the `structured_data`
+    counterpart to `render_source_body`'s narrative summary+citations treatment (07 §1.1's
+    own distinguishing framing: "metadata-first, not a prose summary")."""
+    if content.fields:
+        rows = "\n".join(
+            f"| {f.name} | {f.type or ''} | {f.description or ''} |" for f in content.fields
+        )
+        table = f"| Field | Type | Description |\n|---|---|---|\n{rows}"
+    else:
+        table = "(no fields extracted)"
+
+    provenance = [f"- Source file: {filename} [^1]"]
+    if artifact_identity:
+        provenance.append(f"- Artifact identity: `{artifact_identity}`")
+    if source_version:
+        provenance.append(f"- Version: `{source_version}`")
+
+    return (
+        f"{content.intent_statement}\n\n"
+        f"## Structure\n\n{table}\n\n"
+        "## Provenance\n\n" + "\n".join(provenance) + "\n\n"
+        f"[^1]: {filename}"
     )
 
 
