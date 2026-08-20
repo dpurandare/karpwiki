@@ -4488,4 +4488,78 @@ precedent for throwaway live-verify workspaces (steps 57/61 and others).
 intended rather than a second, parallel export mechanism.
 
 ---
+
+## 79. Workspace Templates (Phase 3 Step 75)
+
+`07` §5's Platform Operations table: "Predefined SCHEMA.md templates for common document-type
+categories (e.g. 'Policy workspace', 'Engineering docs workspace') to bootstrap new workspaces with
+sensible taxonomy/thresholds." Depends on step 59, which already built the real thing a template
+needs to produce — `schema.WorkspaceSchema`, `schema.write` (parse+validate+version+write-through to
+the wiki export mirror), and `POST /workspaces/{id}/schema`.
+
+**Real design fork, confirmed via `AskUserQuestion`**: how should an admin actually apply a
+template? Auto-applying at creation time (a new `template` param on `POST /workspaces`) would touch
+the workspace-creation code path and partially duplicate `schema.write`'s own validation/write logic
+inline. Confirmed the simpler alternative instead: **content library only**. New `GET
+/workspace-templates` (list) and `GET /workspace-templates/{name}?workspace_id=...` (ready-to-POST
+YAML content, `workspace_id` already filled in) — an admin creates the workspace exactly as today
+(still getting `wiki_export.write_schema_placeholder`'s stub), fetches a template, and applies it
+through the pre-existing `POST /workspaces/{workspace_id}/schema` endpoint. Zero changes to
+`workspaces.create`; 100% reuse of step 59's already-tested write/validate path — the same
+end-to-end flow the live-verify below actually exercised.
+
+**Exactly two templates — no others invented**: `policy` and `engineering-docs`, matching `07` §5's
+own two named examples literally, in a new `workspace_templates.py`. Each is a plain Python dict
+shaped like `schema.WorkspaceSchema` (not raw hand-written YAML text) — `render()` validates it
+through `WorkspaceSchema.model_validate()` before serializing, so a malformed template fails loudly
+at render time, not silently the first time `schema.write` rejects it. No new DB table: matches this
+project's established config-vs-hardcode precedent (`pii.py`'s category list, `doc_extract.py`'s
+MIME sniffing) — this is static, rarely-changing content, not something an admin edits at runtime
+(no template CRUD was asked for), so a Python module is the simplest correct home for it.
+
+**Each template only overrides fields with a real, defensible domain reason to differ from the
+platform default** — not every field, matching `09` §6's own "optional — omit to inherit the
+platform default" philosophy `schema.py`'s docstring already commits to:
+- `policy`: `ingestion_policy: gated` (compliance content reviewed before going live, unlike the
+  platform's `auto` default); `classification.min_confidence: 0.85` vs. the platform's `0.75`
+  (misrouting into a compliance-sensitive workspace is more consequential); `staleness.
+  low_traffic_days: 545` vs. `365` (policies are reviewed on a longer cadence, low query traffic
+  alone shouldn't flag one stale); `retention.superseded_source_days: 365` vs. `180` (audit-trail
+  value in keeping superseded policy originals longer).
+- `engineering-docs`: `staleness.high_traffic_days: 30` vs. the platform's `90` (code changes fast —
+  a heavily-referenced doc should be checked for freshness sooner); `dedup.near_duplicate_score:
+  0.70` vs. `0.60` (engineering docs legitimately share templated structure across many
+  runbooks/design docs without being duplicates — a looser default would produce false-positive
+  duplicate flags); `retention.superseded_source_days: 90` vs. `180` (fast churn, no audit-trail
+  reason to keep superseded engineering sources as long as a policy workspace would).
+
+No MCP tool: checked `mcp_server.py` directly and confirmed schema.py's own five step-59 endpoints
+(`GET`/`POST .../schema`, versions, rollback) have no MCP counterpart either — workspace governance
+configuration, not an agent-facing content operation. Same precedent-by-omission this track has now
+established three times running (metrics, analytics, this).
+
+**Verification**: `tests/test_workspace_templates.py` (new, 7 tests): both named templates present,
+each renders valid `schema`-parseable content, `workspace_id` substitution is per-call (two
+different calls produce two different, correctly-scoped results), an unknown name raises, and each
+template's own domain-motivated overrides are asserted directly (not just "it parses"). `tests/
+test_workspace_templates_api.py` (new, 6 tests): list requires only authentication (no role, same
+bar `GET /workspaces` itself uses); the detail endpoint is admin-gated on the target workspace, 404s
+for an unknown template, and — the test that actually proves the whole design — fetches a template
+through the new endpoint and applies it through the EXISTING schema-write endpoint end to end,
+confirming the read-back content matches. Full suite: 819 tests green (13 new).
+
+Live-verified against the real dev stack (no migration, no new task — rebuilt only `gateway`): a
+real throwaway workspace with a real admin grant; `GET /workspace-templates` through the live
+gateway listed both real templates; `GET /workspace-templates/engineering-docs?workspace_id=live75-
+ws` returned real ready-to-apply content; `POST`ed that content, unmodified, to the real, pre-
+existing `/workspaces/live75-ws/schema` endpoint — succeeded, and a follow-up `GET` on the same
+endpoint returned it back exactly. Separately confirmed the real object-store `SCHEMA.md` mirror
+(`wiki_export`'s write-through hook, step 57) picked up the identical content with no extra step.
+Cleaned up all seeded rows afterward, each `DELETE` as its own separate `psql -c` invocation (`09`
+§77/§78's own documented lesson, applied cleanly this time).
+
+**Spec touch-point** (applied): `07` §5's Workspace templates cell is built — both named examples,
+applied through machinery step 59 already built and tested rather than a new, parallel apply path.
+
+---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

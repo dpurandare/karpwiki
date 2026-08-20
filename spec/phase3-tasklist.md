@@ -24,7 +24,8 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-74 and 78 done, steps 75-77 and 79 not started.**
+**Status (2026-08-20): steps 57-75 and 78 done, steps 76-77 and 79 not started. Track 3d
+(Platform Operations) is now fully complete and closed out.**
 Step 65 was resolved (not built as a standalone primitive) alongside step 70, both done together
 out of numeric sequence, per step 65's own text. Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
@@ -546,10 +547,26 @@ findings that don't need a roadmap step (tracked there instead).
     whose extracted file content matched the object store byte-for-byte. See
     [09](09-implementation-notes.md) §78 for the full writeup.
 
-75. **Workspace templates.** Predefined `SCHEMA.md` templates for common document-type categories
-    (e.g. "Policy workspace," "Engineering docs workspace") to bootstrap a new workspace with
-    sensible taxonomy/thresholds instead of a blank one. Depends on step 59 — there is no real
-    `SCHEMA.md` to template until then.
+75. **Workspace templates.** **Done.** Predefined `SCHEMA.md` templates for common document-type
+    categories (e.g. "Policy workspace," "Engineering docs workspace") to bootstrap a new workspace
+    with sensible taxonomy/thresholds instead of a blank one. Content-library design, confirmed via
+    AskUserQuestion over auto-applying at creation time: new `GET /workspace-templates` (list) +
+    `GET /workspace-templates/{name}?workspace_id=...` (ready-to-POST YAML, `workspace_id` already
+    filled in) — applied through the EXISTING `POST /workspaces/{id}/schema` (step 59), zero
+    changes to workspace creation itself. Exactly the two named examples, no others invented; each
+    a plain Python dict shaped like `schema.WorkspaceSchema` (validated at render time, not left to
+    fail silently at write time), overriding only fields with a real domain reason to differ from
+    the platform default — `policy` gets `ingestion_policy: gated`, a higher confidence bar, and
+    longer staleness/retention windows (compliance content reviewed less often, kept longer for
+    audit); `engineering-docs` gets a shorter staleness window and looser dedup threshold (code
+    changes fast; templated runbook/design-doc structure shouldn't false-positive as duplicates). No
+    new DB table (static content, no template CRUD asked for); no MCP tool (matches schema.py's own
+    step-59 precedent — none of its five endpoints has one either). 819 tests green (13 new).
+    Live-verified against the real dev stack (no migration, no new task — rebuilt only `gateway`): a
+    real template fetched through the live gateway was applied, unmodified, through the real
+    pre-existing schema-write endpoint — confirmed on both the DB read-back and the real
+    object-store `SCHEMA.md` mirror. See [09](09-implementation-notes.md) §79 for the full writeup.
+    **Closes out track 3d** (steps 72-75, all done).
 
 ## 3e — Operational Hardening
 

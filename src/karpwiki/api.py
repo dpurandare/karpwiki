@@ -55,6 +55,7 @@ from . import (
     tasks,
     versioning,
     wiki_export,
+    workspace_templates,
     workspaces,
 )
 from .auth import (
@@ -1454,6 +1455,33 @@ def _register_routes(app: FastAPI) -> None:
         archived = await workspaces.archive(session, workspace=workspace)
         await session.commit()
         return _workspace_body(archived)
+
+    @app.get("/workspace-templates")
+    async def list_workspace_templates_endpoint(
+        principal: Annotated[Principal, Depends(_principal)],
+    ):
+        """Workspace templates (07 §5, phase3-tasklist.md step 75). Any authenticated
+        principal, same bar `GET /workspaces` itself uses — the name/title list carries no
+        sensitive threshold values, just what's available to browse before choosing one."""
+        return {"templates": workspace_templates.list_templates()}
+
+    @app.get("/workspace-templates/{name}")
+    async def get_workspace_template_endpoint(
+        name: str,
+        workspace_id: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+    ):
+        """Returns ready-to-POST YAML content, `workspace_id` already filled in — apply it
+        via the existing `POST /workspaces/{workspace_id}/schema` (step 59). Admin-gated on
+        the target workspace, same reasoning `get_schema` below already gives: workspace
+        governance configuration, not plain metadata."""
+        await _admin_workspace(session, principal, workspace_id)
+        try:
+            content = workspace_templates.render(name, workspace_id=workspace_id)
+        except workspace_templates.UnknownTemplateError:
+            raise ApiError(404, "not_found", f"No workspace template named {name!r}.") from None
+        return {"name": name, "workspace_id": workspace_id, "content": content}
 
     @app.get("/workspaces/{workspace_id}/schema")
     async def get_schema(
