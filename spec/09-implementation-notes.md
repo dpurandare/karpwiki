@@ -4725,4 +4725,83 @@ files touched.
 updated with a `**Done**` marker and a direct link to the new runbook.
 
 ---
+
+## 82. Phase 3 Closing Verify (Phase 3 Step 79) — PHASE 3 COMPLETE
+
+`07` §6's own stated Phase 3 exit criteria: "Admin staff can run the Platform without manual
+intervention outside the review queue." `phase3-tasklist.md` step 79 names four specific
+demonstrations, each tying together features already independently built and live-verified in
+their own originating steps — this step's job is proving they compose correctly together, the
+same shape Phase 2's own closing verify (step 56, `test_end_to_end_2e.py`) already established for
+a track-level close-out, here applied to the whole phase.
+
+**A real correction to this step's own tasklist text, found while implementing it**: the original
+wording named "a per-tag-scoped reader (step 70)" — step 70 only ever built `page_type` scoping;
+`tag` scoping was explicitly deferred at the time (`09` §70's own decision log entry says so
+directly). The tasklist text named a feature that was never built. Corrected to
+"per-page-type-scoped reader" rather than silently left wrong, matching this project's own
+established practice of fixing a stale claim found while directly touching the text that carries
+it (step 62's docstring fix is the direct precedent).
+
+**Both an automated regression test and a real live-verify session, matching step 56's own
+precedent exactly** — a closing-verify step's whole point is proving real composition, which a
+fast in-memory test alone demonstrates less convincingly than an actual live pass through the real
+deployed system.
+
+**New `tests/test_end_to_end_phase3.py`** (4 tests):
+1. A real 10-hour-aged review item triggers `tasks._notify_sla_breaches` to fire a real
+   notification via a fake sink — nothing in the test ever calls a dashboard endpoint.
+2. Three real "down" `query_log.submit_feedback` calls plus the real `tasks.
+   _detect_staleness_tiered` sweep raise a real `reindex` review item naming `low_feedback` in its
+   `detail`, with no manual per-page flag anywhere in the test.
+3. A `page_type:entity`-scoped grant restricts that type workspace-wide (`auth.
+   has_role_for_page`'s own documented behavior — restriction is per-page_type, not
+   workspace-wide-for-everything, confirmed by reading the function directly rather than assumed
+   from memory of an earlier step), and the IDENTICAL restriction is confirmed through both
+   `GET /pages/{id}` (REST, via the shared `client` fixture) and `wiki_get_page` (MCP, via a fresh
+   `mcp_client_factory` fixture defined locally in this file — not exported from
+   `test_mcp_server.py`) for the same two principals and pages in one test.
+4. `wiki_mount.scoped_filesystem` reads a real, current `index.md` directly from the object store
+   with zero `client`/gateway calls anywhere in the test, cross-checked against a second,
+   independent read via `objectstore.read_text` directly — proving it's genuinely the same content,
+   not a coincidence of `scoped_filesystem`'s own implementation. FUSE mount's own kernel-driver
+   boundary (step 58, `AskUserQuestion`-confirmed out of scope: macFUSE never installed on this
+   host) is not revisited here — this demonstrates the real substance a FUSE mount would expose
+   (the same fsspec-backed, read-only view the mount would VFS-wrap), not a live OS-level mount.
+
+840 tests green (4 new).
+
+**Live-verified end to end against the real dev stack, all four tied together in one continuous
+session** (mirroring step 56's own "one continuous flow, not DB-script-verified pieces"
+discipline):
+- A real `live79-ws` review item, backdated 10 hours, run through the real `notify_sla_breaches`
+  task inside the live `worker-maintenance` container, produced a real logged SLA-breach line
+  (`LogNotificationSink`, the dev-stack default) — confirmed via `docker compose logs`, no
+  dashboard ever polled.
+- Three real feedback ratings submitted through the live REST API (found and worked around a real
+  constraint while doing this: `POST /search/{query_id}/feedback` only accepts a rating from the
+  SAME principal who ran that exact search — three separate real searches, not three ratings on
+  one, were needed), run through the real `detect_staleness_tiered` task in the same live worker,
+  produced a real `reindex` review item with `reason: "low_feedback"` — confirmed via the live
+  `GET /review-items` endpoint.
+- A real `page_type:entity`-scoped grant via the live `POST /workspaces/{id}/access-policy`
+  restricted the entity page for `casey` (workspace-wide reader, no scoped grant: real `403`) while
+  leaving `morgan` (the scoped grant holder: real `200`) unaffected — confirmed through the live
+  REST gateway, AND, separately, through a real `python -m karpwiki.mcp_server` stdio subprocess
+  (the same live mechanism step 45/46's own live-verify already established, `09` §36) pointed at
+  the identical live dev Postgres — the exact same restriction, same two principals, same two
+  pages, same result, on a completely independent transport.
+- `mc cat` directly against the live MinIO backend (no gateway, no app process at all) read the
+  real, current `index.md`; `wiki_mount.scoped_filesystem` read the identical content from inside
+  the live `worker-maintenance` container, after a real `check_fuse_access` grant/check round trip
+  against the same live Postgres.
+
+Cleaned up all seeded `live79-ws` rows afterward, each `DELETE` its own separate `psql -c`
+invocation (`09` §77/§78's own documented lesson, no repeat of that mistake).
+
+**Spec touch-point** (applied): `07` §6's Phase 3 exit criteria are demonstrated end to end, for
+real, tying together steps 58/60/67/68/70. **Phase 3 is complete**: all 23 steps (57-79) done,
+every track (3a-3f) closed out, the Exit Criteria table (`phase3-tasklist.md`) satisfied in full.
+
+---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

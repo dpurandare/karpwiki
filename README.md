@@ -46,14 +46,16 @@ Start with [`spec/00-overview.md`](spec/00-overview.md).
 
 ## Implementation
 
-This repo builds [`spec/phase1-tasklist.md`](spec/phase1-tasklist.md) and
-[`spec/phase2-tasklist.md`](spec/phase2-tasklist.md) under [`src/karpwiki/`](src/karpwiki/).
-**Phase 1 and Phase 2 are both complete** (steps 1–56 — all of 1a/1b/1c and 2a–2e) — see those
-two files for what each step maps to in the code.
-[`phase3-tasklist.md`](spec/phase3-tasklist.md) plans what's next (notifications, the search
-feedback loop, fine-grained access control, analytics, plus a handful of real gaps carried
-forward from Phase 1/2 — the `index.md` catalog page and the structured-data Curator treatment
-among them) but nothing in it is built yet.
+This repo builds [`spec/phase1-tasklist.md`](spec/phase1-tasklist.md),
+[`spec/phase2-tasklist.md`](spec/phase2-tasklist.md), and
+[`spec/phase3-tasklist.md`](spec/phase3-tasklist.md) under [`src/karpwiki/`](src/karpwiki/).
+**Phases 1, 2, and 3 are all complete** (steps 1–79 — all of 1a/1b/1c, 2a–2e, and 3a–3f) — see
+those three files for what each step maps to in the code. Phase 3 closed the remaining gaps
+carried forward from Phase 1/2 (the `index.md` catalog page, structured-data Curator treatment,
+real `SCHEMA.md` storage, FUSE-mount access, wiki markdown export) and built out real notification
+delivery, the search feedback loop, content quality scoring, fine-grained (page_type) access
+control, PII detection, analytics dashboards, bulk import/export, workspace templates, an optional
+search-result cache, and documented backup/DR procedures.
 
 In short: submit a document, it's classified against the workspace's taxonomy with a lexical
 cross-check, checked for duplicates against a real Postgres full-text index, and curated by an LLM
@@ -62,9 +64,10 @@ a review item raised whenever a human needs to look at something. Once indexed, 
 is searchable with lexical ranking and a catalog-match boost; an admin can list and resolve every
 review-item kind (including duplicate `merge`, `supersede`, and `keep_both`) and roll back a page
 version, both through the gateway. Multi-workspace routing, connectors, the Maintenance Advisor,
-MCP, and horizontal scaling are all real too (Phase 2) — see the sections below for each. Phase 3+
-scope is [`07-additional-features-and-roadmap.md`](spec/07-additional-features-and-roadmap.md)'s
-roadmap.
+MCP, and horizontal scaling are all real too (Phase 2) — see the sections below for each. Phase 4
+scope (compliance erasure, legal hold, multi-region/DR topology) is
+[`07-additional-features-and-roadmap.md`](spec/07-additional-features-and-roadmap.md)'s roadmap,
+deferred until an actual organizational need defines it, per that file's own framing.
 
 Pipeline stages run as real automatic background jobs (steps 30–33): submitting a document
 enqueues classification, an accepted classification enqueues dedup-then-curation, every page write
@@ -196,10 +199,12 @@ environment variable name, so `credential_ref: "GIT_MAIN_TOKEN"` resolves agains
 connector type so far is `"git"` (`config: {"repo_url": ..., "branch": "main"}`) — real `git`
 clone/diff against any remote, `last_sync_cursor` tracking one commit SHA; an auth failure
 disables the connector (`disabled_auth`, no retry) and fires
-`notifications.NotificationSink.notify_connector_auth_failure` — the default
-`LogNotificationSink` writes a structured log line; a real Notification Service backend (Phase 3
-per the roadmap, `07 §6`) would implement the same interface with no change to
-`connector_polling.py`.
+`notifications.NotificationSink.notify_connector_auth_failure` — `LogNotificationSink` (a
+structured log line) is the default; setting `KARPWIKI_NOTIFICATION_WEBHOOK_URL` swaps in a real
+`WebhookNotificationSink` (one JSON POST per event) with no change to `connector_polling.py` or any
+other caller (Phase 3 step 67). The same sink also fires on review-SLA breaches and search-latency
+SLA breaches (a beat-scheduled sweep, `tasks.notify_sla_breaches`) and on a submitter's document
+being ingested/rejected/merged.
 
 ## Scaling
 
@@ -262,22 +267,25 @@ working per-workspace escape hatch for a large or isolated workspace. What isn't
 OpenSearch instance here is single-node, not a sharded cluster, and nothing in this repo shards a
 large dedicated workspace's own index further.
 
-**Metadata DB partitioning, and the Cache — not built, roadmap only.** [06 §4](spec/06-api-mcp-and-scaling.md)'s
-table names read replicas and `workspace_id`-based sharding as the Metadata DB's scaling
-mechanism at large scale, and an optional read-through cache for hot pages/queries
-([02 §6](spec/02-storage-and-indexing.md)). Neither exists in this repo — one Postgres database,
-no cache layer. Both are explicitly [07](spec/07-additional-features-and-roadmap.md) roadmap items,
-not a Phase 2 gap; nothing here should be read as implying otherwise.
+**Metadata DB partitioning — not built, roadmap only.** [06 §4](spec/06-api-mcp-and-scaling.md)'s
+table names read replicas and `workspace_id`-based sharding as the Metadata DB's scaling mechanism
+at large scale. Neither exists in this repo — one shared Postgres database — and it's explicitly a
+[07](spec/07-additional-features-and-roadmap.md) roadmap item for a larger deployment than this
+one, not a gap in what's built. The optional read-through cache
+([02 §6](spec/02-storage-and-indexing.md)) *is* built (Phase 3 step 76 — search results only, off
+by default via `KARPWIKI_CACHE_ENABLED`; page caching stays a documented follow-on, `09 §80`).
 
 ## Reference Implementation
 
 [`spec/08-implementation-stack.md`](spec/08-implementation-stack.md) is an optional appendix
 pinning a concrete Python stack (FastAPI, Celery, PostgreSQL, fsspec, Pydantic AI, etc.) to the
 vendor-neutral roles defined in `00`–`07`. [`spec/09-implementation-notes.md`](spec/09-implementation-notes.md)
-follows up with concrete design decisions — 36 sections as of Phase 2 step 33, spanning
-implementation-readiness gaps found before coding started, decisions forced by actually building
-Phase 1 (API conventions, the auth scope, the LLM model and its cost tradeoff, the near-duplicate
-similarity metric, the review queue's resolution mechanics, the Version Browser's diff approach),
-and Phase 2's multi-workspace routing, the dedicated-per-workspace OpenSearch backend, taxonomy
-bulk-move, and real async dispatch with retry/idempotency semantics — plus several bugs a live
-end-to-end run caught that the test suite alone had missed, phase-1 and phase-2 alike.
+follows up with concrete design decisions — 82 sections as of Phase 3's own closing verify,
+spanning implementation-readiness gaps found before coding started, decisions forced by actually
+building Phase 1 (API conventions, the auth scope, the LLM model and its cost tradeoff, the
+near-duplicate similarity metric, the review queue's resolution mechanics, the Version Browser's
+diff approach), Phase 2's multi-workspace routing, the dedicated-per-workspace OpenSearch backend,
+taxonomy bulk-move, and real async dispatch with retry/idempotency semantics, and Phase 3's real
+notification delivery, fine-grained access control, PII detection, and the rest of that phase's own
+tasklist — plus several real bugs a live end-to-end run caught that the test suite alone had
+missed, across all three phases.

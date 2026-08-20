@@ -24,8 +24,8 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-78 done, step 79 (closing verify) not started. Tracks 3a-3f are
-all fully complete and closed out — step 79 is the only remaining item in Phase 3.**
+**Status (2026-08-20): PHASE 3 COMPLETE. All 23 steps (57-79) done, all tracks (3a-3f) closed out,
+Exit Criteria table below fully satisfied.**
 Step 65 was resolved (not built as a standalone primitive) alongside step 70, both done together
 out of numeric sequence, per step 65's own text. Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
@@ -661,10 +661,47 @@ close without them.
     the Platform without manual intervention outside the review queue." Demonstrate end to end: a
     real threshold breach fires a real notification (step 67) with no admin polling a dashboard
     for it; a real low-feedback page surfaces to the Maintenance Advisor (step 68) with no manual
-    sweep; a per-tag-scoped reader (step 70) is correctly restricted through both the real REST and
-    MCP surfaces, not just one of them; a real FUSE mount (step 58) shows a real, current
+    sweep; a per-page-type-scoped reader (step 70) is correctly restricted through both the real
+    REST and MCP surfaces, not just one of them; a real FUSE mount (step 58) shows a real, current
     `index.md` (step 60) an agent can read directly, no gateway round trip — the platform's own
     Karpathy-pattern premise, demonstrated for real for the first time.
+
+    **Done.** Text above corrected from "per-tag-scoped" to "per-page-type-scoped" while
+    implementing this step — step 70 only ever built `page_type` scoping; `tag` scoping was
+    explicitly deferred at the time (`09` §70's own decision log), so the original wording named a
+    feature that doesn't exist. New `tests/test_end_to_end_phase3.py` (4 tests, mirroring
+    `test_end_to_end_2e.py`'s own closing-verify shape from Phase 2): a real 10-hour-aged review
+    item triggers `tasks._notify_sla_breaches` to fire a real notification with no dashboard ever
+    polled in the test; three real "down" feedback ratings plus the real
+    `tasks._detect_staleness_tiered` sweep raise a real `reindex` review item with `low_feedback`
+    named in its `detail`, no manual per-page flag anywhere; a `page_type:entity`-scoped grant
+    restricts that type workspace-wide (`auth.has_role_for_page`'s own documented behavior), and
+    the identical restriction is confirmed through both `GET /pages/{id}` (REST) and `wiki_get_page`
+    (MCP) for the SAME two principals and pages in one test; `wiki_mount.scoped_filesystem` reads a
+    real, current `index.md` directly from the object store with zero gateway/`client` calls
+    anywhere in the test, cross-checked against a second, independent read via `objectstore.py`
+    directly. FUSE mount's own kernel-driver boundary (step 58, `AskUserQuestion`-confirmed out of
+    scope: macFUSE never installed on this host) is not revisited — this step demonstrates the real
+    substance the mount would expose, not a live OS-level mount. 840 tests green (4 new).
+    Live-verified end to end against the real dev stack, tying all four together in one continuous
+    session (mirroring step 56's own Phase 2 closing-verify discipline): a real 10-hour-aged
+    `live79-ws` review item, run through the real `notify_sla_breaches` task in the live
+    `worker-maintenance` container, produced a real logged SLA-breach line — no dashboard polled;
+    three real feedback ratings via the live REST API, run through the real
+    `detect_staleness_tiered` task in the same live worker, produced a real `reindex` review item
+    (`reason: "low_feedback"`) visible through the live `GET /review-items` endpoint; a real
+    `page_type:entity`-scoped grant via the live `POST /workspaces/{id}/access-policy` restricted
+    the entity page for `casey` (workspace-wide reader, no scoped grant: real `403`) while leaving
+    it open for `morgan` (scoped grant holder: real `200`) — confirmed through BOTH the live REST
+    gateway AND a real `python -m karpwiki.mcp_server` stdio subprocess against the same live dev
+    Postgres, identical result on both surfaces; `mc cat` against the live MinIO backend (no
+    gateway, no app process) read the real, current `index.md`, matching `wiki_mount.
+    scoped_filesystem`'s own real fsspec-backed view read from inside the worker container.
+    Cleaned up all seeded rows afterward, each `DELETE` its own separate `psql -c` invocation. See
+    [09](09-implementation-notes.md) §82 for the full writeup.
+
+    **Phase 3 is now complete.** All 23 steps (57-79) done; every track (3a-3f) closed out; the
+    Exit Criteria table below is satisfied in full.
 
 ## Exit Criteria
 
