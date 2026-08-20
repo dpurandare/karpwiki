@@ -24,8 +24,8 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-20): steps 57-76 and 78 done, steps 77 and 79 not started. Track 3d
-(Platform Operations) is now fully complete and closed out.**
+**Status (2026-08-20): steps 57-78 done, step 79 (closing verify) not started. Tracks 3a-3f are
+all fully complete and closed out — step 79 is the only remaining item in Phase 3.**
 Step 65 was resolved (not built as a standalone primitive) alongside step 70, both done together
 out of numeric sequence, per step 65's own text. Step 78 (track
 3f) was found and closed out of numeric sequence — a real gap surfaced live during step 62 prep,
@@ -602,14 +602,26 @@ close without them.
     live `GET /metrics/search-performance` then reported a real `cache_hit_rate: 0.5` matching the
     one real hit and one real miss. See [09](09-implementation-notes.md) §80 for the full writeup.
 
-77. **Backup & disaster recovery procedures.** Periodic snapshots of the Metadata DB and object
-    store, with a documented point-in-time restore; scoped per-workspace given the storage
-    partitioning Phase 2 already made real (`06` §4, steps 30–35). For wiki *content* specifically,
-    this can lean on step 57's real markdown export (already framed as a backup/migration
-    mechanism, `02` §2) rather than a from-scratch procedure; the Metadata DB and object store
-    still need their own snapshot/restore story beyond that. Lighter-weight than, and explicitly
-    distinct from, Phase 4's full multi-region/DR topology — this is backup/restore procedure, not
-    a second active region.
+77. **Backup & disaster recovery procedures.** **Done.** Periodic snapshots of the Metadata DB and
+    object store, with a documented point-in-time restore; scoped per-workspace given the storage
+    partitioning Phase 2 already made real (`06` §4, steps 30–35). Scope confirmed via
+    AskUserQuestion: **documentation only**, no application code — this step's own text says
+    "documented" restore, not "built," and DB/object-store backup is normally operated with the
+    storage layer's own tooling (`pg_dump`/managed snapshots, S3 versioning) and a runbook, not
+    reimplemented in-app; this reference deployment also has one shared Postgres DB, not a real
+    per-workspace physical partition to snapshot separately. New
+    [spec/backup-and-dr.md](backup-and-dr.md): a verified table classification for workspace-scoped
+    restore (checked directly against all 19 tables in `models.py` — 13 direct-`workspace_id`, 4
+    joined through `wiki_page`, 2 not cleanly scopable and documented as accepted limitations, not
+    silent gaps), real copy-pasteable snapshot commands against the actual dev-stack service names,
+    the row-filtered `psql \copy` restore technique `pg_restore --table` alone can't provide, and a
+    real cross-store consistency caveat (the Metadata DB and object store are never restored
+    atomically together — practical mitigation and the existing `wiki_export.export_workspace`
+    repair pass documented, not silently assumed away). For wiki *content* specifically, leans on
+    step 57's real markdown export exactly as this step's own text calls for, rather than a
+    from-scratch procedure. No tests, no live-verify, no migration — a pure documentation
+    deliverable; `git status` confirms zero `.py` files touched. See
+    [09](09-implementation-notes.md) §81 for the full writeup.
 
 ## 3f — Ingestion Format Coverage
 

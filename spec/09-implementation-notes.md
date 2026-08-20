@@ -4656,4 +4656,73 @@ override file, and restarted `gateway` once more to confirm it reverted to cache
 Page caching remains a named, deliberate follow-on, not silently dropped.
 
 ---
+
+## 81. Backup & Disaster Recovery Procedures (Phase 3 Step 77)
+
+`07` §3: "Periodic snapshots of the Metadata DB and object store per workspace; documented
+point-in-time restore. Because workspaces are independently partitioned (`06` §4), restore can be
+scoped to a single workspace."
+
+**Real design fork, confirmed via `AskUserQuestion`**: unlike every other Phase 3 step, this one is
+titled "procedures" and its own spec text says "documented" restore, not "built" — a real signal
+this might not call for application code at all. Database and object-store backup/restore is
+normally operated with the storage layer's own tooling (`pg_dump`/managed-provider snapshots, S3
+versioning/replication) and a runbook, not reimplemented inside the application — and this
+reference deployment has one shared Postgres database, not a real per-workspace physical
+partition to snapshot separately (`06` §4's "partitioning/sharding" describes a *scaling*
+mechanism for a larger deployment than this one, not this implementation's actual topology).
+Confirmed: **documentation only**, new `spec/backup-and-dr.md`, no application code — matches how
+real backup/DR is normally operated, and step 57/74's wiki-export/`GET .../export` already cover
+the wiki-content half in real, tested code (the tasklist's own step 77 text explicitly names this:
+"can lean on step 57's real markdown export... rather than a from-scratch procedure").
+
+**The real content of the runbook, not just "run pg_dump somewhere"**:
+- A **complete, verified table classification** for workspace-scoped restore (07 §3's own explicit
+  requirement) — not assumed, checked directly against every one of the 19 tables in `models.py`:
+  13 with a direct `workspace_id` column, 4 that need a join through `wiki_page.workspace_id`
+  (`page_version`, `index_status`, `page_link`, `query_feedback` — none of the four has a
+  `workspace_id` column of its own, confirmed by reading each class definition directly rather than
+  assuming from the "usually has one" pattern), and 2 genuinely not cleanly scopable to one
+  workspace: `query_log.resolved_workspaces` (an array — one search call can span several
+  workspaces) and `idempotency_record` (principal/endpoint-scoped, holds only short-lived replay
+  bodies, excluded by design).
+- A real, copy-pasteable full-DB snapshot command against the actual dev-stack service names
+  (`docker compose exec postgres pg_dump ...`), `-Fc` specifically because only the custom format
+  supports the selective-table restore the workspace-scoped procedure below needs.
+- A real, copy-pasteable object-store snapshot command using the dev stack's own already-configured
+  `mc` alias (`minio-init`'s `mc alias set local ...`) — workspace-scoped snapshot is a direct
+  prefix copy with no filtering logic needed at all, since every object already lives under
+  `/{workspace_id}/...` (02 §2's own path scheme) — a much simpler story than the DB side.
+- A real technique for workspace-scoped DB restore, since `pg_restore --table` restores selected
+  *tables*, not filtered *rows*: restore into a scratch database, then `psql \copy` each table from
+  the classification above into the live database, direct-column tables filtered by `WHERE
+  workspace_id = '<id>'`, joined tables filtered by joining `wiki_page` the same way — in FK
+  dependency order, each restore as its own statement (explicitly citing `09` §77's own documented
+  `psql -c` batching lesson: a bundled multi-statement script's per-statement "success" output
+  isn't proof of a committed result).
+- **A real cross-store consistency caveat, not silently assumed away**: the Metadata DB and object
+  store are never restored atomically together — no cross-store transaction exists between them
+  today (`02` §8's own Consistency Model already names the Metadata DB as the commit point, with
+  the wiki mirror "not required to be transactional" with it). Documented the practical mitigation
+  (snapshot the object store immediately *after* the DB, never before, since a page write's DB
+  commit always precedes its mirror write) and the one already-existing repair pass that closes
+  whatever residual gap exists for wiki content specifically (`wiki_export.export_workspace`,
+  itself a from-DB-truth regenerated projection).
+- Named which `page_link`/`query_log` rows a workspace-scoped restore leaves imperfect (a link
+  crossing the restored workspace's boundary, a search event spanning restored and unrestored
+  workspaces) and *why* each is an accepted limitation rather than a defect: `page_links.sync`
+  re-derives link rows from current markdown on the next write to either page, and the read-time
+  AuthZ re-check (`01` §3, step 63) means a stale link is never served to an unauthorized caller in
+  the meantime regardless; `query_log` is analytics/audit data the running application doesn't
+  depend on for correctness, and splitting one historical search event across two restore
+  operations has no clean, correct answer anyway.
+
+No tests, no live-verify, no migration this step — a pure documentation deliverable, confirmed as
+the right scope via `AskUserQuestion` before writing anything. `git status` confirms zero `.py`
+files touched.
+
+**Spec touch-point** (applied): `07` §3's Backup & disaster recovery row is built — the row itself
+updated with a `**Done**` marker and a direct link to the new runbook.
+
+---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)
