@@ -24,7 +24,7 @@ actual organizational need, not a fixed timeline," [07](07-additional-features-a
 §6): the compliance erasure workflow, legal hold, data residency controls, multi-region/DR
 topology, and multi-language support.
 
-**Status (2026-08-19): steps 57-58 done, steps 59-78 not started.** Phase 1 (steps 1–21) and Phase 2
+**Status (2026-08-20): steps 57-59 done, steps 60-78 not started.** Phase 1 (steps 1–21) and Phase 2
 (steps 22–56) are both complete — see [`phase1-tasklist.md`](phase1-tasklist.md) and
 [`phase2-tasklist.md`](phase2-tasklist.md). See [`implementation-audit.md`](implementation-audit.md)
 for the full write-up of the two audit passes that shaped track 3a, including redundancy/dead-code
@@ -107,6 +107,43 @@ findings that don't need a roadmap step (tracked there instead).
     template field, `09` §6), so the rule has been unenforceable since connectors shipped in
     Phase 2. Once a workspace's `SCHEMA.md` is real, wire that comparison into
     `connector_polling.poll_connector` as part of this same step.
+
+    **Done** — new [`schema.py`](../src/karpwiki/schema.py): a `WorkspaceSchema` Pydantic model
+    (every field optional — each consumer falls back to its own existing constant when unset,
+    same as an injected `None` always has), `parse`/`write`/`rollback`/`history`/`load`, backed
+    by a new `SchemaVersion` table (migration `7eb53cee0b95`) versioned like a wiki page but not
+    one ("`page_type` not applicable," `01` §7). `Workspace.schema_ref` (a free-text pointer with
+    no real content behind it) is replaced by `current_schema_version_id`, a real FK — confirmed
+    via AskUserQuestion as a deliberate, small breaking API change; the JSON key stays
+    `schema_ref` for API stability, now derived rather than caller-settable. New
+    `GET`/`POST /workspaces/{id}/schema`, `GET .../schema/versions`, `POST .../schema/rollback`
+    (also confirmed via AskUserQuestion), admin-only like the access-policy endpoints. Rewired
+    `ingestion.classify_source` (09 §27's own flagged "needs revisiting" ordering — resolves
+    `result.document_type`'s workspace *before* the gate, confirmed via AskUserQuestion),
+    `ingestion.check_duplicates`'s `near_duplicate_score`, four `llm.resolve_model` call sites
+    (`ingestion.py`×2, `advisor.py`×2 — the classifier call site stays platform-default only,
+    since classification is what determines the workspace in the first place), and all five
+    `tasks.py` detector wrappers' thresholds. New `ingestion.resolve_ingestion_policy` closes the
+    connector-tightening gap — wired at curate time (`tasks.py`'s `_curate`), not inside
+    `poll_connector` as the tasklist text above literally says, since that function only ever
+    creates a `raw_source` unconditionally and has no gating decision of its own to make; the
+    real `auto`/`gated` decision already lives where `check_duplicates` reads it. **A real bug
+    caught live, not by the test suite**: `llm.resolve_model`'s `.get(role, {})` only applies its
+    default when the key is *absent* — a real parsed schema dict (`schema.as_dict`) sets
+    `llm.<role>: None` *explicitly* for every unset role, so the very first real curator call
+    against a real per-workspace schema raised `AttributeError` on `None.get("model")`. Fixed in
+    `llm.py` (`.get(role) or {}`) and added a regression test using the same explicit-`None`
+    shape — none of this module's existing tests had ever exercised it, since they all
+    hand-built dicts with keys either fully absent or fully present. Live-verified end to end
+    against real dev Postgres, real MinIO, and real `gpt-5-nano` through the rebuilt
+    `gateway`/`nginx`/worker containers: a real classification at confidence 0.55 (well under
+    the 0.75 platform default) was correctly *accepted* under a workspace-configured
+    `min_confidence: 0.01`, and — after the bug fix — a real curator call completed the full
+    pipeline to `ingested` and searchable using the fixed `resolve_model` path; a real
+    Superseded-Source Detector run correctly flagged a 10-day-old source under a
+    workspace-configured 5-day retention window (would not have triggered under the old 180-day
+    platform default). Cleaned up the throwaway `live59-*` workspace afterward. See
+    [09](09-implementation-notes.md) §63 for the full writeup.
 
 60. **Real `index.md` catalog page** ([01](01-architecture-and-data-model.md) §4,
     [04](04-search-and-retrieval.md) §3). No code has ever materialized an actual per-workspace

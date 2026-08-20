@@ -6,11 +6,9 @@ phase2-tasklist.md step 23.
 here) and no unarchive (archived is described as read-only and excluded from default
 routing, never as reversible in the operation table).
 
-`schema_ref` is carried as a plain pointer field here, matching 01 §3's own framing
-("pointer to this workspace's SCHEMA.md") — actually storing and versioning SCHEMA.md
-content, and wiring workspaces' thresholds/model overrides to something real instead of
-`09` §6's hardcoded Python defaults, is a separate, currently-undesigned piece of work
-carried forward rather than built as a side effect of workspace CRUD.
+Real SCHEMA.md content is `schema.py`'s job (phase3-tasklist.md step 59), not this module's
+— `create()` below only ever writes the wiki-export placeholder for a brand-new workspace
+that has no schema configured yet.
 """
 
 from sqlalchemy import select
@@ -30,7 +28,6 @@ async def create(
     workspace_id: str,
     name: str,
     description: str | None = None,
-    schema_ref: str | None = None,
     storage_bindings: dict | None = None,
 ) -> Workspace:
     if await session.get(Workspace, workspace_id) is not None:
@@ -39,13 +36,12 @@ async def create(
         workspace_id=workspace_id,
         name=name,
         description=description,
-        schema_ref=schema_ref,
         status=WorkspaceStatus.active,
         storage_bindings=storage_bindings or {},
     )
     session.add(workspace)
     await session.flush()
-    wiki_export.write_schema_placeholder(workspace_id=workspace_id, schema_ref=schema_ref)
+    wiki_export.write_schema_placeholder(workspace_id=workspace_id)
     return workspace
 
 
@@ -55,7 +51,6 @@ async def update(
     workspace: Workspace,
     name: str | None = None,
     description: str | None = None,
-    schema_ref: str | None = None,
     storage_bindings: dict | None = None,
     dedicated_index: bool | None = None,
 ) -> Workspace:
@@ -63,9 +58,6 @@ async def update(
         workspace.name = name
     if description is not None:
         workspace.description = description
-    if schema_ref is not None:
-        workspace.schema_ref = schema_ref
-        wiki_export.write_schema_placeholder(workspace_id=workspace.workspace_id, schema_ref=schema_ref)
     if storage_bindings is not None:
         workspace.storage_bindings = storage_bindings
     if dedicated_index is not None:

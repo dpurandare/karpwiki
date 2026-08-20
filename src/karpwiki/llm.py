@@ -79,8 +79,15 @@ class ModelNotConfiguredError(RuntimeError):
 
 
 def resolve_model(role: AgentRole, schema: dict | None = None) -> str:
-    """Return the `provider:model` string for `role` in a workspace with this SCHEMA.md."""
-    override = ((schema or {}).get("llm") or {}).get(role, {}).get("model")
+    """Return the `provider:model` string for `role` in a workspace with this SCHEMA.md.
+
+    `.get(role) or {}`, not `.get(role, {})`: a real parsed SCHEMA.md dict (`schema.py`'s
+    `as_dict`) sets every optional field explicitly, including `llm.<role>: None` when no
+    override is configured for that role — the key is present with value `None`, not
+    absent, so a plain `.get(role, {})` default never applies and `.get("model")` on `None`
+    raises. `or {}` treats "absent" and "explicitly None" the same way, correctly.
+    """
+    override = (((schema or {}).get("llm") or {}).get(role) or {}).get("model")
     model = override or _PLATFORM_DEFAULTS.get(role) or ""
     if not model:
         raise ModelNotConfiguredError(

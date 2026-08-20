@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from karpwiki import bulk_move, objectstore, versioning, wiki_export, workspaces
+from karpwiki import bulk_move, objectstore, schema, versioning, wiki_export, workspaces
 from karpwiki.frontmatter import split_frontmatter
 from karpwiki.models import PageType, VersionTrigger
 
@@ -63,31 +63,29 @@ async def test_delete_removes_the_mirrored_file(session, workspace):
     assert not objectstore.exists(path)
 
 
-async def test_schema_placeholder_names_the_pointer_when_set(session, workspace):
-    await workspaces.update(session, workspace=workspace, schema_ref="s3://schemas/eng-docs.md")
+async def test_schema_placeholder_written_at_workspace_create(session):
+    created = await workspaces.create(session, workspace_id="fresh-ws", name="Fresh")
     await session.commit()
 
-    exported = objectstore.read_text(wiki_export.export_path(workspace.workspace_id, "SCHEMA.md"))
-    assert "s3://schemas/eng-docs.md" in exported
+    exported = objectstore.read_text(wiki_export.export_path(created.workspace_id, "SCHEMA.md"))
+    assert "No schema has been configured" in exported
     assert "step 59" in exported
 
 
-async def test_schema_placeholder_written_at_workspace_create(session):
-    created = await workspaces.create(
-        session, workspace_id="fresh-ws", name="Fresh", schema_ref="s3://schemas/fresh.md"
+async def test_real_schema_write_replaces_the_placeholder(session):
+    created = await workspaces.create(session, workspace_id="fresh-ws2", name="Fresh 2")
+    await session.commit()
+
+    await schema.write(
+        session,
+        workspace=created,
+        content="workspace_id: fresh-ws2\ningestion_policy: gated\n",
+        author="user:deepak",
     )
     await session.commit()
 
     exported = objectstore.read_text(wiki_export.export_path(created.workspace_id, "SCHEMA.md"))
-    assert "s3://schemas/fresh.md" in exported
-
-
-async def test_schema_placeholder_reports_not_set_when_absent(session):
-    created = await workspaces.create(session, workspace_id="bare-ws", name="Bare")
-    await session.commit()
-
-    exported = objectstore.read_text(wiki_export.export_path(created.workspace_id, "SCHEMA.md"))
-    assert "(not set)" in exported
+    assert exported == "workspace_id: fresh-ws2\ningestion_policy: gated\n"
 
 
 async def test_export_workspace_backfills_every_current_page_and_schema(session, workspace):

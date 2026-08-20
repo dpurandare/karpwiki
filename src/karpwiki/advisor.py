@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import config, curate, dedup, llm, review, search, versioning
+from . import config, curate, dedup, llm, review, schema, search, versioning
 from .frontmatter import split_frontmatter
 from .models import (
     IndexState,
@@ -774,8 +774,9 @@ async def resolve_existing_duplicate(
         duplicate_version = await session.get(PageVersion, duplicate_page.current_version_id)
         _, primary_body = split_frontmatter(primary_version.content)
         _, duplicate_body = split_frontmatter(duplicate_version.content)
+        workspace_schema = await schema.load(session, workspace_id=primary_page.workspace_id)
         merged = await (call or call_page_merge_model)(
-            model=llm.resolve_model("curator"),
+            model=llm.resolve_model("curator", schema.as_dict(workspace_schema)),
             primary_body=primary_body,
             duplicate_body=duplicate_body,
             primary_path=primary_page.path,
@@ -982,6 +983,7 @@ async def run_contradiction_detector(
     candidates = await find_contradiction_candidates(
         session, workspace_id=workspace_id, min_similarity=min_similarity, max_similarity=max_similarity
     )
+    workspace_schema_dict = schema.as_dict(await schema.load(session, workspace_id=workspace_id))
     items: list[ReviewItem] = []
     checked = 0
     for candidate in candidates:
@@ -1010,7 +1012,7 @@ async def run_contradiction_detector(
 
         checked += 1
         judgment = await (call or call_contradiction_check)(
-            model=llm.resolve_model("curator"),
+            model=llm.resolve_model("curator", workspace_schema_dict),
             page_a_body=body_a,
             page_a_path=candidate.page_a_path,
             page_b_body=body_b,

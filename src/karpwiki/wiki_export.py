@@ -17,14 +17,13 @@ pattern `_write_diff` already uses (`09` §7). `02` §2 explicitly allows this: 
 "not required to be transactional with the Metadata DB write, which remains the system of
 record."
 
-**`SCHEMA.md` is a placeholder, not real content** (confirmed via AskUserQuestion):
-`workspace.schema_ref` is still a bare pointer string, not real, parsed SCHEMA.md content
-(`09` §26, phase3-tasklist.md step 59 — "a self-contained feature on the scale of a track
-of its own"), and it isn't a `wiki_page` at all, so it has no `current_version_id` to hook
-a write off of. `write_schema_placeholder` writes a small note plus whatever `schema_ref`
-currently points to, called from `workspaces.create`/`update` (whenever `schema_ref`
-changes) and from `export_workspace`'s backfill below. Step 59 replaces this with real,
-versioned content.
+**`SCHEMA.md` real content, since step 59**: `schema.py` now owns real, versioned SCHEMA.md
+storage (`SchemaVersion`, not a `wiki_page`, so it has no `current_version_id` to hook a
+write off of the way pages do) — `schema.write` calls `write()` above directly with the
+real content whenever a workspace's schema changes. `write_schema_placeholder` below is now
+only for a workspace with **no** schema configured yet — `workspaces.create` writes it for
+a brand-new workspace, and `export_workspace`'s backfill below writes either the real
+current content or the placeholder, whichever applies.
 
 **`export_workspace` is the rebuild-from-DB-truth backfill** (confirmed via
 AskUserQuestion): `02` §3 calls the export "a regenerated projection," the same guarantee
@@ -42,7 +41,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import objectstore
-from .models import PageVersion, WikiPage, Workspace
+from .models import PageVersion, SchemaVersion, WikiPage, Workspace
 
 
 def export_path(workspace_id: str, path: str) -> str:
@@ -61,25 +60,22 @@ def delete(*, workspace_id: str, path: str) -> None:
     objectstore.delete(export_path(workspace_id, path))
 
 
-def _schema_placeholder(schema_ref: str | None) -> str:
+def _schema_placeholder() -> str:
     return (
         "# SCHEMA.md\n\n"
-        "Real SCHEMA.md storage, parsing, and versioning is not yet implemented "
-        "(phase3-tasklist.md step 59) — this is a placeholder written by the wiki export "
-        "mirror (step 57) until then.\n\n"
-        f"**schema_ref**: {schema_ref or '(not set)'}\n"
+        "No schema has been configured for this workspace yet — write one via "
+        "`POST /workspaces/{workspace_id}/schema` (09 §6, phase3-tasklist.md step 59).\n"
     )
 
 
-def write_schema_placeholder(*, workspace_id: str, schema_ref: str | None) -> str:
-    return objectstore.write_text(
-        export_path(workspace_id, "SCHEMA.md"), _schema_placeholder(schema_ref)
-    )
+def write_schema_placeholder(*, workspace_id: str) -> str:
+    return objectstore.write_text(export_path(workspace_id, "SCHEMA.md"), _schema_placeholder())
 
 
 async def export_workspace(session: AsyncSession, *, workspace_id: str) -> int:
-    """Write every current page version's mirror, plus the SCHEMA.md placeholder, from DB
-    truth. Returns the number of pages exported."""
+    """Write every current page version's mirror, plus SCHEMA.md (real content if a schema
+    is configured, the placeholder otherwise), from DB truth. Returns the number of pages
+    exported."""
     result = await session.execute(
         select(WikiPage, PageVersion)
         .join(PageVersion, WikiPage.current_version_id == PageVersion.version_id)
@@ -92,5 +88,10 @@ async def export_workspace(session: AsyncSession, *, workspace_id: str) -> int:
 
     workspace = await session.get(Workspace, workspace_id)
     if workspace is not None:
-        write_schema_placeholder(workspace_id=workspace_id, schema_ref=workspace.schema_ref)
+        if workspace.current_schema_version_id is not None:
+            schema_version = await session.get(SchemaVersion, workspace.current_schema_version_id)
+            if schema_version is not None:
+                write(workspace_id=workspace_id, path="SCHEMA.md", content=schema_version.content)
+        else:
+            write_schema_placeholder(workspace_id=workspace_id)
     return count

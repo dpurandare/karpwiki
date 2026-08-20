@@ -30,11 +30,13 @@ from . import (
     objectstore,
     pipeline,
     review,
+    schema,
     versioning,
 )
 from .frontmatter import split_frontmatter
 from .models import (
     AdminActionLog,
+    Connector,
     PageStatus,
     PageType,
     PageVersion,
@@ -177,6 +179,10 @@ async def classify_source(
     lexical = classify.lexical_match(f"{source.filename}\n{text}", types)
 
     try:
+        # No per-workspace override here, unlike every other resolve_model call site: which
+        # workspace this source belongs to is exactly what classification is about to
+        # determine (03 §3) — there is no workspace, and so no SCHEMA.md, to read yet.
+        # Always the platform default.
         result = await call(
             model=llm.resolve_model("classifier"),
             text=text,
@@ -196,10 +202,31 @@ async def classify_source(
         )
         return PipelineState.error
 
+    # 09 §27 flagged this ordering as needing revisiting once SCHEMA.md thresholds are real
+    # (phase3-tasklist.md step 59): `result.document_type` — the model's chosen label — is
+    # already known here, before the gate runs, so its owning workspace can be resolved now
+    # to read *that* workspace's own `min_confidence` rather than always the platform
+    # default. `routing_workspace` is reused below on the accept path (routing.document_type
+    # is always `result.document_type` whenever `routing.accepted`, per `classify.route`'s
+    # own logic) rather than looked up a second time.
+    routing_workspace = await document_types.workspace_for_type(
+        session, type_code=result.document_type
+    )
+    resolved_min_confidence = min_confidence
+    if resolved_min_confidence is None:
+        resolved_min_confidence = DEFAULT_MIN_CONFIDENCE
+        if routing_workspace is not None:
+            workspace_schema = await schema.load(session, workspace_id=routing_workspace.workspace_id)
+            if (
+                workspace_schema is not None
+                and workspace_schema.thresholds.classification.min_confidence is not None
+            ):
+                resolved_min_confidence = workspace_schema.thresholds.classification.min_confidence
+
     routing = classify.route(
         result,
         lexical,
-        min_confidence=DEFAULT_MIN_CONFIDENCE if min_confidence is None else min_confidence,
+        min_confidence=resolved_min_confidence,
         document_types=types,
     )
     detail = {
@@ -230,10 +257,10 @@ async def classify_source(
         )
         return PipelineState.pending_review
 
-    # 03 §3 step 6: document_type -> workspace_id via the taxonomy's routing table. `types`
-    # (just fetched from list_active) already constrained `routing.document_type` to a
-    # registered, active-workspace code, so this can't miss within one request/transaction.
-    workspace = await document_types.workspace_for_type(session, type_code=routing.document_type)
+    # `routing_workspace` was already resolved above (from `result.document_type`, to read
+    # its threshold for the gate) — reused here rather than looked up a second time, valid
+    # since `routing.document_type is result.document_type` whenever `routing.accepted`.
+    workspace = routing_workspace
     if workspace is None:
         raise RuntimeError(
             f"routing accepted {routing.document_type!r} but its workspace is no longer active"
@@ -378,6 +405,32 @@ async def reject_source(
             status=PageStatus.draft,
         )
     return PipelineState.rejected
+
+
+async def resolve_ingestion_policy(
+    session: AsyncSession, *, source: RawSource, workspace_schema: schema.WorkspaceSchema | None
+) -> str:
+    """The effective `auto`/`gated` policy for `source` (03 §7, 09 §6's SCHEMA.md
+    `ingestion_policy` field, phase3-tasklist.md step 59) — the workspace's own
+    schema-configured policy (`"auto"` if none is set), tightened to `"gated"` if the
+    source's connector (`submitted_by="connector:<id>"`) is itself configured `gated`.
+
+    09 §13: a connector's own `ingestion_policy` "may only tighten... never relax" its
+    workspace's policy — this is that comparison, real now that a workspace's own policy is
+    real content instead of only ever a SCHEMA.md template field. The tasklist's own text
+    names `connector_polling.poll_connector` as where to wire this, but that function only
+    ever creates a `raw_source` unconditionally (03 §2: "indistinguishable from any other
+    submission") — it has no gating decision to make. The actual `auto`/`gated` decision
+    happens here, at curate time (`check_duplicates` below), which is where the workspace's
+    policy already governs the "no concerns found" path.
+    """
+    workspace_policy = workspace_schema.ingestion_policy if workspace_schema else "auto"
+    if source.submitted_by.startswith("connector:"):
+        connector_id = uuid.UUID(source.submitted_by.removeprefix("connector:"))
+        connector = await session.get(Connector, connector_id)
+        if connector is not None and connector.ingestion_policy == "gated":
+            return "gated"
+    return workspace_policy
 
 
 async def check_duplicates(
@@ -586,8 +639,9 @@ async def _resolve_merge(
         new_text = payload.decode("utf-8", errors="replace")
         current_version = await session.get(PageVersion, target.current_version_id)
         _, existing_body = split_frontmatter(current_version.content)
+        workspace_schema = await schema.load(session, workspace_id=source.workspace_id)
         merged = await call(
-            model=llm.resolve_model("curator"),
+            model=llm.resolve_model("curator", schema.as_dict(workspace_schema)),
             existing_body=existing_body,
             new_source_text=new_text,
             filename=source.filename,
@@ -775,8 +829,9 @@ async def curate_source(
         text = payload.decode("utf-8", errors="replace")
 
         existing = await _existing_concept_entity_pages(session, workspace.workspace_id)
+        workspace_schema = await schema.load(session, workspace_id=workspace.workspace_id)
         content = await call(
-            model=llm.resolve_model("curator"),
+            model=llm.resolve_model("curator", schema.as_dict(workspace_schema)),
             source_text=text,
             filename=source.filename,
             existing_titles=[p.title for p in existing],

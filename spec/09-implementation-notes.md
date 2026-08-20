@@ -3143,5 +3143,111 @@ workspaces from dev Postgres afterward.
 **Spec touch-point** (applied): none required — `09` §12 already specifies this step's full scope;
 nothing built here diverges from it.
 
+## 63. Real SCHEMA.md Storage and Parsing (Phase 3 Step 59)
+
+§26 above flagged this as "a self-contained feature on the scale of a track of its own" — this
+step is that track. Three real design forks confirmed via AskUserQuestion before any code was
+written, since the step touches enough surface area (models, migrations, API contract,
+five modules' consumer wiring) that guessing wrong on any one would mean rework across all of it.
+
+**Fork 1 — `schema_ref`'s meaning.** Repurposed as the current `SchemaVersion`'s id (a real FK,
+`Workspace.current_schema_version_id`), no longer a caller-settable free-text pointer — a
+deliberate, small breaking API change: `schema_ref` is gone from `CreateWorkspaceRequest`/
+`UpdateWorkspaceRequest`, but the JSON response key stays `schema_ref` (now derived) for API
+stability. `workspace.schema_ref`'s old column is dropped outright, not migrated — every existing
+value was already just a placeholder string, never real content (§26).
+
+**Fork 2 — rollback.** `01` §7 says SCHEMA.md changes should be "auditable and reversible";
+versioning covers "auditable," and a `schema.rollback` was added (mirrors `versioning.rollback`
+exactly) to cover "reversible" for real, alongside `POST /workspaces/{id}/schema/rollback`.
+
+**Fork 3 — the classification confidence-gate ordering**, the one §27 explicitly flagged as
+"needs revisiting once SCHEMA.md thresholds are real." Traced before asking: `result.document_type`
+(the model's raw output label) is already known before `classify.route`'s confidence check runs,
+so its owning workspace can be resolved right there via `document_types.workspace_for_type` — no
+bigger pipeline restructuring needed, just moving one lookup earlier and reusing it (rather than
+re-querying) on the accept path, since `routing.document_type is result.document_type` whenever
+`routing.accepted`. Confirmed and built this way; the classifier's own `resolve_model` call stays
+platform-default-only, since classification is what determines the workspace in the first
+place — there is no schema to read yet at that point, a real (not cut-corner) constraint.
+
+**`schema.py`** (new): `WorkspaceSchema` (Pydantic) mirrors 09 §6's own template exactly, but
+**every field is optional with no default value duplicated from any other module** — mirroring
+`ingestion.DEFAULT_MIN_CONFIDENCE`/`dedup.DEFAULT_NEAR_DUPLICATE_SCORE`/etc. into this module
+would either force a circular import (`schema.py` would need `ingestion.py`, which needs
+`schema.py` for the confidence-gate override) or create silent drift between two copies of the
+same number. Every consumer instead treats a `None` field exactly like an already-existing
+directly-injected `None` override: fall back to its own constant, same as before this step.
+`document_types` is parsed but explicitly **not authoritative** — reconciling it against the real
+`document_type` table would be materially bigger scope (validation, sync-on-write, conflict
+resolution) than this step; `retention.page_version_max_count` is parsed and stored but nothing in
+this codebase enforces a version-count cap anywhere (checked directly, not assumed).
+
+**`SchemaVersion`** (new table, migration `7eb53cee0b95`) — versioned like `page_version` but not
+one: no `page_type`, no `wiki_page` row, `content` is plain YAML text (not markdown+frontmatter).
+Same circular-FK shape `wiki_page.current_version_id` already established (`use_alter=True`);
+round-tripped clean against real dev Postgres (upgrade → downgrade → upgrade), same discipline as
+every migration since the step-51 bug. Dropping the old `schema_ref` column outright (not
+migrating its values) is deliberate, documented in the migration itself.
+
+**Rewiring, module by module**: `ingestion.classify_source` (confidence gate, above);
+`ingestion.check_duplicates`'s `near_duplicate_score`, sourced at its one real call site
+(`tasks.py`'s `_curate`) alongside the new `ingestion.resolve_ingestion_policy`; four
+`llm.resolve_model` call sites (`ingestion.py`'s `curate_source` and merge-resolution,
+`advisor.py`'s existing-duplicate merge and contradiction check) now pass
+`schema.as_dict(await schema.load(...))` instead of always `None`; all five `tasks.py` detector
+task wrappers (`_detect_superseded_sources`/`_existing_duplicates`/`_orphans`/`_contradictions`/
+`_staleness_tiered`) read live schema overrides — except plain `_detect_staleness`, which stays
+unwired since `09` §6's template has no flat `threshold_days` field to read (only the tiered
+variant's `high_traffic_days`/`low_traffic_days` exist, and that variant is the one beat actually
+schedules).
+
+**`ingestion.resolve_ingestion_policy`** closes the second, smaller gap the tasklist step names:
+`09` §13's "a connector's policy may only tighten, never relax" rule, unenforceable until a
+workspace's own policy was real content. The tasklist's own text says wire this into
+`connector_polling.poll_connector` — traced through and that's not where the gating decision
+actually happens: `poll_connector` only ever creates a `raw_source` unconditionally (03 §2's
+"indistinguishable from any other submission"), no gate to enforce. The real `auto`/`gated`
+decision lives in `check_duplicates`'s "no concerns found" branch, at curate time — that's where
+this function is actually called from, with a correction note left in the tasklist's own step 59
+text rather than silently building it somewhere else without saying why.
+
+**A real bug caught live, not by the test suite — the most notable finding of this step.**
+`llm.resolve_model`'s `((schema or {}).get("llm") or {}).get(role, {}).get("model")` relies on
+`.get(role, {})`'s default applying whenever `role` is missing — but `schema.as_dict()` (a real
+`WorkspaceSchema.model_dump()`) sets *every* optional field explicitly, including
+`llm.<role>: None` for an unconfigured role. The key is present with value `None`, not absent, so
+the default never applies and `None.get("model")` raises `AttributeError`. This shipped in the
+first version of this step's code, passed the full test suite (592 tests) unchanged, and only
+surfaced on the very first real curator call against a real per-workspace schema during live
+verification — every existing test in `test_llm.py` had hand-built its own schema dicts with keys
+either fully absent or fully present, never explicitly `None`, so nothing had ever exercised this
+shape before a real `schema.as_dict()` output did. Fixed with `.get(role) or {}` (treats "absent"
+and "explicitly `None`" the same), plus a regression test using the same explicit-`None` shape.
+Rebuilt and redeployed the `gateway`/worker containers with the fix, then re-ran the exact live
+check that had failed — it completed cleanly the second time. **Worth remembering generally**:
+a hand-built test fixture that happens to omit a key is not equivalent to a real serializer that
+emits the key with an explicit `None` — don't assume dict `.get(key, default)` behaves the same
+against both shapes without checking which one production code actually produces.
+
+**Verification**: `tests/test_schema.py` (18, new), `tests/test_schema_api.py` (8, new),
+`tests/test_ingestion_policy.py` (6, new), `tests/test_task_schema_wiring.py` (7, new), plus
+targeted additions to `test_ingestion.py` (workspace-aware confidence gate, 3 tests),
+`test_curate_orchestration.py` (real `llm.resolve_model` wiring, 1 test), `test_workspaces.py`/
+`test_workspaces_api.py` (the `schema_ref` API-shape change). Full suite: 593 tests green. The
+`karpwiki_test` database needed a manual `DROP SCHEMA public CASCADE`/recreate mid-step — its
+`Base.metadata.drop_all`/`create_all` fixture (not Alembic-driven) tried to drop the new
+`fk_workspace_current_schema_version` constraint by name on a DB whose actual tables predated this
+step's model changes; a one-time, expected consequence of a circular-FK rename against a
+pre-existing local test DB, not a bug. Live-verified against real dev Postgres, real MinIO, and
+real `gpt-5-nano` through the rebuilt `gateway`/`nginx`/worker containers (details above, including
+the bug/fix/re-verify cycle). Cleaned up the throwaway `live59-*` workspace and all its data
+(including `page_index` rows this time — the first live check in this session to actually reach
+real search indexing before cleanup) afterward.
+
+**Spec touch-point** (applied): none required — `01` §7 and `09` §6/§26/§27 already specify
+everything built here; the three AskUserQuestion forks above fill in what those sections
+deliberately left open (exact API shape, rollback inclusion, gate ordering), not deviations.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

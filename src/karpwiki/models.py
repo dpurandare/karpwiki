@@ -151,7 +151,16 @@ class Workspace(Base):
     workspace_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text)
-    schema_ref: Mapped[str | None] = mapped_column(String(512))
+    # Real SCHEMA.md storage (01 §7, 09 §26, phase3-tasklist.md step 59) — replaces the old
+    # free-text `schema_ref` pointer string (nothing ever loaded/parsed/versioned real
+    # content behind it) with a real FK to this workspace's current, versioned
+    # `schema_version` row; `use_alter` since `schema_version.workspace_id` FKs back here
+    # (same circular-FK shape `wiki_page.current_version_id` already uses).
+    current_schema_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "schema_version.version_id", use_alter=True, name="fk_workspace_current_schema_version"
+        )
+    )
     status: Mapped[WorkspaceStatus] = mapped_column(
         Enum(WorkspaceStatus, name="workspace_status"), default=WorkspaceStatus.active
     )
@@ -256,6 +265,31 @@ class PageVersion(Base):
     trigger: Mapped[VersionTrigger] = mapped_column(Enum(VersionTrigger, name="version_trigger"))
     restored_from_version_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("page_version.version_id")
+    )
+
+
+class SchemaVersion(Base):
+    """A workspace's `SCHEMA.md` content, versioned like a wiki page (01 §7: "auditable and
+    reversible") but not one — "`page_type` not applicable — treated as workspace
+    configuration" (01 §7's own words), so it gets its own table rather than living in
+    `wiki_page`/`page_version` (phase3-tasklist.md step 59). `content` is the raw YAML text;
+    `schema.py` parses/validates it into `WorkspaceSchema` on read, mirroring how
+    `page_version.content` is the raw markdown+frontmatter document `versioning.py` renders
+    and `frontmatter.py` parses back.
+    """
+
+    __tablename__ = "schema_version"
+
+    version_id: Mapped[uuid.UUID] = _uuid_pk()
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspace.workspace_id"), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    author: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.clock_timestamp()
+    )
+    change_summary: Mapped[str | None] = mapped_column(Text)
+    restored_from_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("schema_version.version_id")
     )
 
 

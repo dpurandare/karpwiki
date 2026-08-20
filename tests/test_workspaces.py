@@ -3,7 +3,7 @@ step 23."""
 
 import pytest
 
-from karpwiki import workspaces
+from karpwiki import schema, workspaces
 from karpwiki.models import AccessPolicy, Role, Workspace, WorkspaceStatus
 
 
@@ -27,9 +27,21 @@ async def test_update_changes_only_supplied_fields(session, workspace):
     assert updated.storage_bindings == original_bindings  # unchanged
 
 
-async def test_update_sets_schema_ref(session, workspace):
-    updated = await workspaces.update(session, workspace=workspace, schema_ref="/eng-docs/SCHEMA.md")
-    assert updated.schema_ref == "/eng-docs/SCHEMA.md"
+async def test_update_no_longer_accepts_schema_ref(session, workspace):
+    """Since phase3-tasklist.md step 59, schema_ref is derived (the current SchemaVersion's
+    id, set only by schema.write()) — no longer a caller-settable free-text pointer."""
+    with pytest.raises(TypeError):
+        await workspaces.update(session, workspace=workspace, schema_ref="/eng-docs/SCHEMA.md")
+
+
+async def test_writing_a_real_schema_sets_current_schema_version_id(session, workspace):
+    version = await schema.write(
+        session,
+        workspace=workspace,
+        content=f"workspace_id: {workspace.workspace_id}\n",
+        author="user:deepak",
+    )
+    assert workspace.current_schema_version_id == version.version_id
 
 
 async def test_archive_sets_status(session, workspace):

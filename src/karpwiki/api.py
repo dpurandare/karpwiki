@@ -49,6 +49,7 @@ from . import (
     query_log,
     ratelimit,
     review,
+    schema,
     search,
     tasks,
     versioning,
@@ -76,6 +77,7 @@ from .models import (
     ReviewKind,
     ReviewStatus,
     Role,
+    SchemaVersion,
     WikiPage,
     Workspace,
 )
@@ -476,12 +478,13 @@ async def _admin_connector(
 
 
 class CreateWorkspaceRequest(BaseModel):
-    """POST /workspaces body (06 §1, 05 §7, 01 §3)."""
+    """POST /workspaces body (06 §1, 05 §7, 01 §3). No `schema_ref` — since phase3-tasklist.md
+    step 59, SCHEMA.md has real, versioned content written through `POST
+    /workspaces/{id}/schema` instead of a caller-supplied pointer string."""
 
     workspace_id: str
     name: str
     description: str | None = None
-    schema_ref: str | None = None
     storage_bindings: dict | None = None
 
 
@@ -492,9 +495,22 @@ class UpdateWorkspaceRequest(BaseModel):
 
     name: str | None = None
     description: str | None = None
-    schema_ref: str | None = None
     storage_bindings: dict | None = None
     dedicated_index: bool | None = None
+
+
+class WriteSchemaRequest(BaseModel):
+    """POST /workspaces/{id}/schema body (01 §7, 09 §6, phase3-tasklist.md step 59)."""
+
+    content: str
+    change_summary: str | None = None
+
+
+class RollbackSchemaRequest(BaseModel):
+    """POST /workspaces/{id}/schema/rollback body — mirrors `RollbackRequest` for pages."""
+
+    target_version_id: uuid.UUID
+    change_summary: str | None = None
 
 
 class GrantAccessRequest(BaseModel):
@@ -529,11 +545,34 @@ def _workspace_body(workspace: Workspace) -> dict[str, Any]:
         "workspace_id": workspace.workspace_id,
         "name": workspace.name,
         "description": workspace.description,
-        "schema_ref": workspace.schema_ref,
+        # 01 §3's own definition ("pointer to this workspace's SCHEMA.md") — since step 59
+        # this is the real current SchemaVersion's id, not a caller-supplied free-text
+        # string; kept as the same JSON key for API stability.
+        "schema_ref": (
+            str(workspace.current_schema_version_id)
+            if workspace.current_schema_version_id
+            else None
+        ),
         "status": workspace.status.value,
         "storage_bindings": workspace.storage_bindings,
         "dedicated_index": workspace.dedicated_index,
     }
+
+
+def _schema_version_body(version: SchemaVersion, *, include_content: bool = False) -> dict[str, Any]:
+    body = {
+        "version_id": str(version.version_id),
+        "workspace_id": version.workspace_id,
+        "author": version.author,
+        "created_at": version.created_at.isoformat(),
+        "change_summary": version.change_summary,
+        "restored_from_version_id": (
+            str(version.restored_from_version_id) if version.restored_from_version_id else None
+        ),
+    }
+    if include_content:
+        body["content"] = version.content
+    return body
 
 
 def _access_policy_body(policy: AccessPolicy) -> dict[str, Any]:
@@ -1149,7 +1188,6 @@ def _register_routes(app: FastAPI) -> None:
                 workspace_id=payload.workspace_id,
                 name=payload.name,
                 description=payload.description,
-                schema_ref=payload.schema_ref,
                 storage_bindings=payload.storage_bindings,
             )
         except workspaces.DuplicateWorkspaceError as exc:
@@ -1176,7 +1214,6 @@ def _register_routes(app: FastAPI) -> None:
             workspace=workspace,
             name=payload.name,
             description=payload.description,
-            schema_ref=payload.schema_ref,
             storage_bindings=payload.storage_bindings,
             dedicated_index=payload.dedicated_index,
         )
@@ -1193,6 +1230,78 @@ def _register_routes(app: FastAPI) -> None:
         archived = await workspaces.archive(session, workspace=workspace)
         await session.commit()
         return _workspace_body(archived)
+
+    @app.get("/workspaces/{workspace_id}/schema")
+    async def get_schema(
+        workspace_id: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+    ):
+        """01 §7, 09 §6, phase3-tasklist.md step 59. Admin-only, same as the access-policy
+        endpoints below — workspace governance configuration, not plain metadata (unlike
+        `GET /workspaces/{id}` itself, which any `reader` can see)."""
+        await _admin_workspace(session, principal, workspace_id)
+        workspace = await session.get(Workspace, workspace_id)
+        if workspace is None or workspace.current_schema_version_id is None:
+            raise ApiError(404, "not_found", f"No schema configured for workspace {workspace_id!r}.")
+        version = await session.get(SchemaVersion, workspace.current_schema_version_id)
+        return _schema_version_body(version, include_content=True)
+
+    @app.get("/workspaces/{workspace_id}/schema/versions")
+    async def list_schema_versions(
+        workspace_id: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        limit: int = schema.DEFAULT_LIST_LIMIT,
+        cursor: str | None = None,
+    ):
+        await _admin_workspace(session, principal, workspace_id)
+        versions, next_cursor = await schema.history(
+            session, workspace_id=workspace_id, limit=limit, cursor=cursor
+        )
+        return {"items": [_schema_version_body(v) for v in versions], "next_cursor": next_cursor}
+
+    @app.post("/workspaces/{workspace_id}/schema", status_code=201)
+    async def write_schema(
+        workspace_id: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        payload: WriteSchemaRequest,
+    ):
+        workspace = await _admin_workspace(session, principal, workspace_id)
+        try:
+            version = await schema.write(
+                session,
+                workspace=workspace,
+                content=payload.content,
+                author=f"user:{principal.id}",
+                change_summary=payload.change_summary,
+            )
+        except schema.SchemaValidationError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
+        await session.commit()
+        return _schema_version_body(version, include_content=True)
+
+    @app.post("/workspaces/{workspace_id}/schema/rollback")
+    async def rollback_schema(
+        workspace_id: str,
+        principal: Annotated[Principal, Depends(_principal)],
+        session: Annotated[AsyncSession, Depends(_session)],
+        payload: RollbackSchemaRequest,
+    ):
+        workspace = await _admin_workspace(session, principal, workspace_id)
+        try:
+            version = await schema.rollback(
+                session,
+                workspace=workspace,
+                target_version_id=payload.target_version_id,
+                author=f"user:{principal.id}",
+                change_summary=payload.change_summary,
+            )
+        except ValueError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
+        await session.commit()
+        return _schema_version_body(version, include_content=True)
 
     @app.get("/workspaces/{workspace_id}/access-policy")
     async def list_access_policy(

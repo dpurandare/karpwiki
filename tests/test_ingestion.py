@@ -5,7 +5,7 @@ import uuid
 
 import pytest
 
-from karpwiki import classify, config, ingestion, llm, objectstore, pipeline
+from karpwiki import classify, config, ingestion, llm, objectstore, pipeline, schema
 from karpwiki.classify import ClassificationResult
 from karpwiki.models import ContentShape, PipelineState, RawSource
 
@@ -90,6 +90,60 @@ async def test_low_confidence_parks_the_source_unrouted(session, workspace):
     assert source.workspace_id is None
     # Not relocated: no workspace was decided, so there is no prefix to move it under.
     assert source.object_key == staged
+
+
+async def test_workspace_schema_confidence_threshold_can_refuse_what_the_default_accepts(
+    session, workspace
+):
+    """phase3-tasklist.md step 59: `result.document_type` resolves its workspace before the
+    gate runs, so a real per-workspace threshold now actually gates, not just the platform
+    default (09 §27's own flagged "needs revisiting" ordering question)."""
+    await schema.write(
+        session,
+        workspace=workspace,
+        content=f"workspace_id: {workspace.workspace_id}\nthresholds:\n  classification:\n    min_confidence: 0.95\n",
+        author="user:deepak",
+    )
+    source = await _submitted(session)
+
+    state = await ingestion.classify_source(session, source=source, call=_returns(confidence=0.9))
+    await session.commit()
+
+    assert state is PipelineState.pending_review  # 0.9 clears the 0.75 default but not 0.95
+
+
+async def test_workspace_schema_confidence_threshold_can_accept_what_the_default_refuses(
+    session, workspace
+):
+    await schema.write(
+        session,
+        workspace=workspace,
+        content=f"workspace_id: {workspace.workspace_id}\nthresholds:\n  classification:\n    min_confidence: 0.5\n",
+        author="user:deepak",
+    )
+    source = await _submitted(session)
+
+    state = await ingestion.classify_source(session, source=source, call=_returns(confidence=0.6))
+    await session.commit()
+
+    assert state is PipelineState.classified  # 0.6 fails the 0.75 default but clears 0.5
+
+
+async def test_an_explicit_min_confidence_override_still_wins_over_the_schema(session, workspace):
+    await schema.write(
+        session,
+        workspace=workspace,
+        content=f"workspace_id: {workspace.workspace_id}\nthresholds:\n  classification:\n    min_confidence: 0.95\n",
+        author="user:deepak",
+    )
+    source = await _submitted(session)
+
+    state = await ingestion.classify_source(
+        session, source=source, call=_returns(confidence=0.6), min_confidence=0.1
+    )
+    await session.commit()
+
+    assert state is PipelineState.classified  # explicit override (0.1) beats the schema (0.95)
 
 
 async def test_low_confidence_creates_a_classification_review_item(session, workspace):

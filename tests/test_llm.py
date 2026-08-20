@@ -37,6 +37,17 @@ def test_unconfigured_role_raises_rather_than_guessing(monkeypatch):
         llm.resolve_model("curator", {})
 
 
+def test_a_role_key_explicitly_present_but_none_falls_back_to_the_default(monkeypatch):
+    """A real parsed SCHEMA.md dict (schema.as_dict) sets every optional field explicitly,
+    including `llm.<role>: None` when unset — the key is present, not absent, unlike this
+    test file's other hand-built dicts above. Regression for a real bug this shape
+    triggered live (phase3-tasklist.md step 59): `.get(role, {})`'s default never applies
+    when the key already exists with value `None`, and `.get("model")` on `None` raised."""
+    monkeypatch.setitem(llm._PLATFORM_DEFAULTS, "curator", "openai:platform-default")
+    schema = {"llm": {"classifier": None, "curator": None}}
+    assert llm.resolve_model("curator", schema) == "openai:platform-default"
+
+
 async def test_retry_transient_succeeds_after_failures(monkeypatch):
     monkeypatch.setattr(config, "LLM_RETRY_BASE_DELAY_SECONDS", 0.0)
     attempts = []

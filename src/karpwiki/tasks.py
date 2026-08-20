@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from celery import Celery
 from sqlalchemy import select
 
-from . import advisor, connector_polling, ingestion, pipeline, search
+from . import advisor, connector_polling, ingestion, pipeline, schema, search
 from . import connectors_git  # noqa: F401 — registers "git" into connector_polling.ADAPTERS (step 54)
 from .config import (
     CELERY_BROKER_URL,
@@ -151,7 +151,20 @@ async def _curate(
             return
         if source.pipeline_state is PipelineState.classified:
             summary = await _classification_summary(session, source_id)
-            state = await ingestion.check_duplicates(session, source=source, summary=summary)
+            workspace_schema = await schema.load(session, workspace_id=source.workspace_id)
+            effective_policy = await ingestion.resolve_ingestion_policy(
+                session, source=source, workspace_schema=workspace_schema
+            )
+            near_duplicate_score = (
+                workspace_schema.thresholds.dedup.near_duplicate_score if workspace_schema else None
+            )
+            state = await ingestion.check_duplicates(
+                session,
+                source=source,
+                summary=summary,
+                ingestion_policy=effective_policy,
+                near_duplicate_score=near_duplicate_score,
+            )
         elif source.pipeline_state is PipelineState.ingesting:
             state = PipelineState.ingesting
         else:
@@ -180,7 +193,10 @@ async def _reindex(page_id: uuid.UUID) -> None:
 
 async def _detect_staleness(workspace_id: str) -> None:
     """Phase 2 step 36 — the maintenance queue's first real task. Nothing schedules this
-    yet (step 41's Celery beat); dispatched manually per workspace until then."""
+    yet (step 41's Celery beat); dispatched manually per workspace until then. Not
+    schema-wired (unlike the tiered variant below): 09 §6's SCHEMA.md template only defines
+    tiered `high_traffic_days`/`low_traffic_days`, no flat `threshold_days` field this
+    plain, non-tiered path's own default could read instead."""
     async with session_scope() as session:
         await advisor.run_staleness_detector(session, workspace_id=workspace_id)
 
@@ -188,19 +204,36 @@ async def _detect_staleness(workspace_id: str) -> None:
 async def _detect_superseded_sources(workspace_id: str) -> None:
     """Phase 2 step 37 — same manual-dispatch position as `_detect_staleness` above."""
     async with session_scope() as session:
-        await advisor.run_superseded_source_detector(session, workspace_id=workspace_id)
+        workspace_schema = await schema.load(session, workspace_id=workspace_id)
+        kwargs = {}
+        if workspace_schema is not None and workspace_schema.retention.superseded_source_days is not None:
+            kwargs["retention_days"] = workspace_schema.retention.superseded_source_days
+        await advisor.run_superseded_source_detector(session, workspace_id=workspace_id, **kwargs)
 
 
 async def _detect_existing_duplicates(workspace_id: str) -> None:
     """Phase 2 step 38 — same manual-dispatch position as the two detectors above."""
     async with session_scope() as session:
-        await advisor.run_existing_content_duplicate_detector(session, workspace_id=workspace_id)
+        workspace_schema = await schema.load(session, workspace_id=workspace_id)
+        kwargs = {}
+        if workspace_schema is not None and workspace_schema.thresholds.dedup.near_duplicate_score is not None:
+            kwargs["threshold"] = workspace_schema.thresholds.dedup.near_duplicate_score
+        await advisor.run_existing_content_duplicate_detector(
+            session, workspace_id=workspace_id, **kwargs
+        )
 
 
 async def _detect_orphans(workspace_id: str) -> None:
     """Phase 2 step 39 — same manual-dispatch position as the three detectors above."""
     async with session_scope() as session:
-        await advisor.run_orphan_detector(session, workspace_id=workspace_id)
+        workspace_schema = await schema.load(session, workspace_id=workspace_id)
+        kwargs = {}
+        if (
+            workspace_schema is not None
+            and workspace_schema.thresholds.orphan.query_log_lookback_days is not None
+        ):
+            kwargs["lookback_days"] = workspace_schema.thresholds.orphan.query_log_lookback_days
+        await advisor.run_orphan_detector(session, workspace_id=workspace_id, **kwargs)
 
 
 async def _detect_contradictions(
@@ -215,7 +248,15 @@ async def _detect_contradictions(
     model; unlike the other four detectors' tasks, this one needs the seam because
     step 40's detection itself spends a real LLM call, not just its resolution."""
     async with session_scope() as session:
-        await advisor.run_contradiction_detector(session, workspace_id=workspace_id, call=call)
+        workspace_schema = await schema.load(session, workspace_id=workspace_id)
+        kwargs = {}
+        if workspace_schema is not None and workspace_schema.thresholds.dedup.near_duplicate_score is not None:
+            # advisor.py's own DEFAULT_CONTRADICTION_MAX_SIMILARITY already derives from
+            # dedup.DEFAULT_NEAR_DUPLICATE_SCORE — same reasoning, real value instead.
+            kwargs["max_similarity"] = workspace_schema.thresholds.dedup.near_duplicate_score
+        await advisor.run_contradiction_detector(
+            session, workspace_id=workspace_id, call=call, **kwargs
+        )
 
 
 async def _detect_staleness_tiered(workspace_id: str) -> None:
@@ -225,7 +266,20 @@ async def _detect_staleness_tiered(workspace_id: str) -> None:
     one-task-per-detector shape, and leaving manual/test dispatch of `detect_staleness`
     exactly as it behaved before this step."""
     async with session_scope() as session:
-        await advisor.run_staleness_detector(session, workspace_id=workspace_id, tiered=True)
+        workspace_schema = await schema.load(session, workspace_id=workspace_id)
+        kwargs = {}
+        if workspace_schema is not None:
+            if workspace_schema.thresholds.staleness.high_traffic_days is not None:
+                kwargs["high_traffic_days"] = workspace_schema.thresholds.staleness.high_traffic_days
+            if workspace_schema.thresholds.staleness.low_traffic_days is not None:
+                kwargs["low_traffic_days"] = workspace_schema.thresholds.staleness.low_traffic_days
+            if workspace_schema.thresholds.orphan.query_log_lookback_days is not None:
+                kwargs["traffic_lookback_days"] = (
+                    workspace_schema.thresholds.orphan.query_log_lookback_days
+                )
+        await advisor.run_staleness_detector(
+            session, workspace_id=workspace_id, tiered=True, **kwargs
+        )
 
 
 async def _active_workspace_ids(session) -> list[str]:

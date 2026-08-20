@@ -7,7 +7,7 @@ from datetime import date
 import pytest
 from sqlalchemy import select
 
-from karpwiki import curate, ingestion, objectstore, pipeline, versioning
+from karpwiki import curate, ingestion, objectstore, pipeline, schema, versioning
 from karpwiki.curate import CuratedContent, CuratedPage
 from karpwiki.models import (
     ContentShape,
@@ -106,6 +106,26 @@ async def test_proposed_pages_are_created_when_no_match_exists(session, workspac
     page = result.scalar_one()
     assert page.path == "concepts/backoff.md"
     assert page.status is PageStatus.published
+
+
+async def test_curate_source_uses_the_workspaces_schema_configured_curator_model(session, workspace):
+    """phase3-tasklist.md step 59: llm.resolve_model's own `schema: dict | None` parameter
+    has never been passed anything but `None` until this step wired it up."""
+    await schema.write(
+        session,
+        workspace=workspace,
+        content=f"workspace_id: {workspace.workspace_id}\nllm:\n  curator:\n    model: openai:workspace-choice\n",
+        author="user:deepak",
+    )
+    source = await _classified(session, workspace)
+    used_models = []
+
+    async def _capturing_call(**kwargs):
+        used_models.append(kwargs["model"])
+        return _content()
+
+    await ingestion.curate_source(session, source=source, workspace=workspace, call=_capturing_call)
+    assert used_models == ["openai:workspace-choice"]
 
 
 async def test_entity_pages_land_under_entities_not_entitys(session, workspace):
