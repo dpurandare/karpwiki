@@ -71,6 +71,7 @@ behave like one platform.
 | [09-implementation-notes.md](09-implementation-notes.md) | *(Optional appendix)* Design decisions for implementation-readiness gaps — pipeline-state storage, connector execution, MCP delegation, `SCHEMA.md` example, `diff_ref` format |
 | [deployment-guide.md](deployment-guide.md) | *(Optional appendix)* Running this repo's own reference implementation outside the dev docker-compose stack — real backing services, env vars, auth/secrets, scaling |
 | [backup-and-dr.md](backup-and-dr.md) | *(Optional appendix)* Metadata DB and object-store snapshot/restore procedure, including a verified workspace-scoped restore technique |
+| [user-guide-admins.md](user-guide-admins.md) | *(Optional appendix)* How to operate a deployment day to day — workspace setup, the review queue, connectors, access control, dashboards |
 
 ## 5. System at a Glance
 
