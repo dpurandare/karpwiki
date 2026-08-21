@@ -212,7 +212,9 @@ For running this outside the dev docker-compose stack — real managed Postgres/
 secrets, and scaling guidance grounded in the actual code — see
 [`spec/deployment-guide.md`](spec/deployment-guide.md). For day-to-day operation once it's
 running — workspace setup, the review queue, connectors, access control, dashboards — see
-[`spec/user-guide-admins.md`](spec/user-guide-admins.md).
+[`spec/user-guide-admins.md`](spec/user-guide-admins.md). For an AI agent using this over MCP —
+connecting, identity, the full tool reference, on-behalf-of submission — see
+[`spec/user-guide-agents.md`](spec/user-guide-agents.md).
 
 [06 §4](spec/06-api-mcp-and-scaling.md) describes the scaling model in the abstract, per layer.
 Phase 2 steps 30–33 made one of those layers real — the async worker pool — so this section says

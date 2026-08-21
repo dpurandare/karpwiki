@@ -4,7 +4,7 @@ workspace resolution, and dispatch as ONE shared Common Gateway layer with REST/
 two protocol adapters on top of it, not two independent copies of that logic — so the two
 genuinely complex operations here (`wiki_search`, `wiki_resolve_review_item`) call the
 exact same `api.run_search`/`api.run_resolve_review_item` the REST endpoints do. The other
-eight tools are thin enough (one role check plus one existing service-layer call) that
+nine tools are thin enough (one role check plus one existing service-layer call) that
 writing the equivalent code directly here matches how `api.py`'s own many endpoints
 already look — extracting a shared helper for each would be pure ceremony.
 

@@ -72,6 +72,7 @@ behave like one platform.
 | [deployment-guide.md](deployment-guide.md) | *(Optional appendix)* Running this repo's own reference implementation outside the dev docker-compose stack — real backing services, env vars, auth/secrets, scaling |
 | [backup-and-dr.md](backup-and-dr.md) | *(Optional appendix)* Metadata DB and object-store snapshot/restore procedure, including a verified workspace-scoped restore technique |
 | [user-guide-admins.md](user-guide-admins.md) | *(Optional appendix)* How to operate a deployment day to day — workspace setup, the review queue, connectors, access control, dashboards |
+| [user-guide-agents.md](user-guide-agents.md) | *(Optional appendix)* How an AI agent uses karpwiki through MCP — connecting, identity, the full tool reference, on-behalf-of submission |
 
 ## 5. System at a Glance
 
