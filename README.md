@@ -208,6 +208,10 @@ being ingested/rejected/merged.
 
 ## Scaling
 
+For running this outside the dev docker-compose stack — real managed Postgres/S3/Redis, auth,
+secrets, and scaling guidance grounded in the actual code — see
+[`spec/deployment-guide.md`](spec/deployment-guide.md).
+
 [06 §4](spec/06-api-mcp-and-scaling.md) describes the scaling model in the abstract, per layer.
 Phase 2 steps 30–33 made one of those layers real — the async worker pool — so this section says
 plainly what's demonstrated in this repo today versus what §4 describes as the eventual shape.

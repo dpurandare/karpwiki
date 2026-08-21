@@ -69,6 +69,8 @@ behave like one platform.
 | [07-additional-features-and-roadmap.md](07-additional-features-and-roadmap.md) | Completeness features (RBAC, notifications, analytics, connectors, etc.) and phased roadmap |
 | [08-implementation-stack.md](08-implementation-stack.md) | *(Optional appendix)* Python reference implementation — concrete library/service choices for each role above |
 | [09-implementation-notes.md](09-implementation-notes.md) | *(Optional appendix)* Design decisions for implementation-readiness gaps — pipeline-state storage, connector execution, MCP delegation, `SCHEMA.md` example, `diff_ref` format |
+| [deployment-guide.md](deployment-guide.md) | *(Optional appendix)* Running this repo's own reference implementation outside the dev docker-compose stack — real backing services, env vars, auth/secrets, scaling |
+| [backup-and-dr.md](backup-and-dr.md) | *(Optional appendix)* Metadata DB and object-store snapshot/restore procedure, including a verified workspace-scoped restore technique |
 
 ## 5. System at a Glance
 
