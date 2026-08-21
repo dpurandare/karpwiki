@@ -4803,5 +4803,89 @@ invocation (`09` §77/§78's own documented lesson, no repeat of that mistake).
 real, tying together steps 58/60/67/68/70. **Phase 3 is complete**: all 23 steps (57-79) done,
 every track (3a-3f) closed out, the Exit Criteria table (`phase3-tasklist.md`) satisfied in full.
 
+## 83. Self-Hosted Model Support via Ollama (post-Phase-3, config-only)
+
+Deepak asked to evaluate running Ollama-hosted models instead of OpenAI, and — confirmed directly
+against the installed `pydantic-ai-slim==2.30.0`, not assumed from memory — the answer was that
+**zero code changes are needed**: every LLM call in this codebase (`ingestion.call_model`/
+`call_curator_model`/`call_structured_curator_model`/`call_merge_model`, `advisor.
+call_page_merge_model`) already resolves its model exclusively through `llm.resolve_model(role,
+schema)` (§16), producing a single `provider:model` string handed to `Agent(model, ...)`. Pydantic
+AI 2.30.0 ships a built-in `ollama:` provider (`pydantic_ai.models.ollama.OllamaModel`) that talks
+to Ollama's OpenAI-compatible endpoint via the *same* `openai` client package
+`pydantic-ai-slim[openai]` already depends on — no new dependency, no new code path, purely a
+configuration value, exactly the `00` §3/`08` §2 "provider out of scope" design already promised
+in the abstract.
+
+**What was built**: an *optional* `ollama` Compose service + one-shot `ollama-init` puller
+(mirrors `minio-init`'s pattern), gated behind a `profiles: ["ollama"]` entry rather than a plain
+service — pulling a model is a multi-GB download most dev-stack runs shouldn't pay for by default.
+New `OLLAMA_BASE_URL` (hardcoded to the container-network hostname in `docker-compose.yml`'s
+`x-worker-env`, **not** `${OLLAMA_BASE_URL:-...}` substitution — a real mistake caught live via
+`docker compose config` before anything ran: Compose auto-loads the project `.env` too, and a
+host-run app's `.env` legitimately sets this to a `localhost` URL, which would otherwise leak into
+every container and break their reach to the `ollama` service — same reasoning `AWS_ENDPOINT_URL`
+above it already hardcodes for exactly the same localhost-vs-container-hostname split) and
+`KARPWIKI_OLLAMA_MODEL` (read only by `ollama-init`, default `gemma4:latest`) are new;
+`.env.example` documents the swap as a commented alternative, the checked-in default stays
+`openai:gpt-5-nano` per `§16`'s own cost-first reasoning — this is a per-deployment choice, not a
+change to the platform recommendation.
+
+**Live-verified against gemma4:latest, with a real, mixed, honestly-reported result — not assumed
+working from the wiring alone**: a real submission through a live dev stack (`live83-ws`, a
+throwaway workspace + `runbook` document type) with both `KARPWIKI_LLM_CLASSIFIER_MODEL` and
+`KARPWIKI_LLM_CURATOR_MODEL` set to `ollama:gemma4:latest`.
+- The in-stack `ollama` Compose service pulled `gemma4:latest` (9.6GB) successfully, but its
+  `llama-server` process was OOM-killed loading it — Docker Desktop's VM here caps total memory at
+  7.75GB, and the model's tensor buffers alone need ~8.7GB. **A real capacity finding worth
+  documenting, not a code bug**: the Compose-service path needs meaningfully more memory allocated
+  to Docker Desktop than the stack's other services combined require. Repointed
+  `OLLAMA_BASE_URL` at the host's already-running native Ollama app (`host.docker.internal:11434`,
+  full 24GB system RAM) via a temporary `docker-compose.override.yml` (`09` §80's own
+  cache-toggle-override precedent, removed after) to continue the live-verify.
+- **Classifier: worked cleanly.** A real submission classified with `confidence: 1.0`, correctly
+  routed to the workspace's only `document_type` (`runbook`), and a genuinely well-written,
+  accurate summary — `ClassificationResult`'s small, flat schema validated on the first attempt.
+- **Curator: failed, 3/3 real attempts, ~7 minutes wall time.** `CuratedContent`'s larger, nested
+  schema (source page fields + a list of proposed concept/entity pages, each with its own body)
+  never validated against gemma4:latest's real output — `pydantic_ai.exceptions.
+  UnexpectedModelBehavior: Exceeded maximum output retries (1)`, surfaced through the existing
+  `llm.retry_transient`/`TransientCallFailed` path exactly as designed, and the source correctly
+  landed in `error` with a real, honest `{"step": "curate", "error": "UnexpectedModelBehavior",
+  "attempts": 3}` detail — the retry/failure machinery itself needed no changes to handle a
+  provider that fails differently than OpenAI does. This is the exact risk flagged when this was
+  first evaluated (in-chat, not written up before now): a small local model's *classification*
+  confidence-calibration was fine, but *curation*'s larger structured-output surface is a real,
+  unresolved quality gap on this model/tag, not a wiring problem — a bigger Gemma 4 tag (`12b`/
+  `26b`, per Ollama's own library listing) or prompt/schema adjustment would be the next thing to
+  try, not attempted here.
+- **A real, separate, pre-existing gap surfaced only because this live-verify used a genuinely
+  empty database** (every prior live-verify session's DB already had some earlier workspace/grant
+  seeded, so this was never actually hit before): `POST /workspaces` requires the caller to
+  already hold the admin role in *some* existing workspace (`api.create_workspace`'s own comment:
+  "checks admin in at least one *existing* workspace... reused rather than inventing the
+  global-admin grant `09` §22 explicitly declined to build") — but on a truly fresh deployment,
+  zero `access_policy` rows exist anywhere, so *no* caller can ever create the first workspace
+  through the documented API. This directly contradicts `deployment-guide.md` §9's own "whoever
+  calls it becomes that workspace's own admin automatically... there is no separate seed script or
+  admin bootstrap CLI" claim. Worked around here by calling `workspaces.create`/`workspaces.grant`
+  directly inside the gateway container (the exact same functions the guarded endpoint itself
+  calls) purely to unblock this session's verification — **not fixed**, since the right bootstrap
+  answer is a real design decision (e.g., allow creation when zero `access_policy` rows exist
+  system-wide) outside this task's scope. Flagged to Deepak directly rather than silently patched
+  or silently left for someone else to rediscover.
+
+All seeded rows (`live83-ws` workspace/document-type/raw_source/review_item/ingestion_log, plus one
+orphaned `source`-type `wiki_page` + its `page_version`/`index_status` the failed curator attempt
+left behind — `wiki_page.current_version_id` nulled first to break the circular FK before deleting
+`page_version`, then the page) cleaned up afterward, each `DELETE` its own separate `psql -c`
+invocation (`09` §77/§78's own documented lesson). `docker-compose.override.yml` removed.
+
+**Spec touch-point**: `08` §2's LLM Layer bullet now cross-links here. Deepak's personal
+(gitignored) `.env` was set to `KARPWIKI_LLM_CLASSIFIER_MODEL=ollama:gemma4:latest` (proven working)
+with `KARPWIKI_LLM_CURATOR_MODEL` left on `openai:gpt-5-nano` (ollama:gemma4:latest demonstrably
+unreliable for this role in this real trial) — a deliberate, explained per-role split using the
+exact mechanism `§16` already provides for it, not a silent revert.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

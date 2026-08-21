@@ -55,7 +55,9 @@ remain correct regardless of which implementation is built against them.
 - Its model-provider abstraction keeps the LLM provider swappable, consistent with
   [00](00-overview.md) §3's "LLM provider out of scope." Each agent's model is a single
   `provider:model` string resolved from the workspace's `SCHEMA.md` if present, else the platform
-  default — so no code path branches on provider ([09](09-implementation-notes.md) §16).
+  default — so no code path branches on provider ([09](09-implementation-notes.md) §16). This
+  extends to self-hosted models with zero code change, e.g. `ollama:<model>` via Pydantic AI's
+  built-in Ollama provider ([09](09-implementation-notes.md) §83).
 - Two provider-independent requirements on prompt construction: order each agent's prompt
   stable-prefix-first (system prompt + taxonomy or `SCHEMA.md` rules, *then* the source document)
   so the per-workspace prefix is cacheable across a batch, and size the output-token ceiling for

@@ -85,6 +85,13 @@ volume for a production deployment, but not correctness-critical if you don't bo
 rationale. Copy it and fill in real values; don't re-derive the list here. The handful that need a
 real operational decision, not just a value, are called out below.
 
+One of those decisions: `KARPWIKI_LLM_CLASSIFIER_MODEL`/`KARPWIKI_LLM_CURATOR_MODEL` default to
+`openai:gpt-5-nano` (`09` §16's cost-first rationale), but either can be pointed at a self-hosted
+model via Pydantic AI's built-in `ollama:` provider instead — e.g. `ollama:gemma4:latest` plus
+`OLLAMA_BASE_URL` — with no code change (`09` §83). Worth considering where sending content to a
+third-party model is the concern, not just cost; validate classification/curation quality against
+your own content before relying on it in production, same as any model-tier choice.
+
 ## 5. Authentication
 
 **The dev-stack default, `TrustedHeaderAuthenticator`, is explicitly not production-safe on its
@@ -111,7 +118,8 @@ valid, not one prescribed backend):
 - **`OPENAI_API_KEY`** — read directly by the OpenAI SDK/Pydantic AI, never touched by
   `src/karpwiki/config.py` itself. Inject it however your orchestrator delivers secrets to a
   container (a Kubernetes Secret mounted as an env var, your cloud provider's secret-injection
-  mechanism, ...).
+  mechanism, ...). Not needed at all for a role running on the `ollama:` provider (`09` §83) — a
+  self-hosted model has no API key to manage or rotate.
 - **Connector credentials** (`credential_ref` on a `Connector` row) — resolved through
   `secrets_manager.SecretResolver` at poll time, held only for that call's lifetime, never
   persisted or logged (`09` §13). The default `EnvSecretResolver` treats `credential_ref` as an
