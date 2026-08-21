@@ -206,15 +206,19 @@ other caller (Phase 3 step 67). The same sink also fires on review-SLA breaches 
 SLA breaches (a beat-scheduled sweep, `tasks.notify_sla_breaches`) and on a submitter's document
 being ingested/rejected/merged.
 
-## Scaling
+## Guides
 
-For running this outside the dev docker-compose stack — real managed Postgres/S3/Redis, auth,
-secrets, and scaling guidance grounded in the actual code — see
-[`spec/deployment-guide.md`](spec/deployment-guide.md). For day-to-day operation once it's
-running — workspace setup, the review queue, connectors, access control, dashboards — see
-[`spec/user-guide-admins.md`](spec/user-guide-admins.md). For an AI agent using this over MCP —
-connecting, identity, the full tool reference, on-behalf-of submission — see
-[`spec/user-guide-agents.md`](spec/user-guide-agents.md).
+- Running this outside the dev docker-compose stack (real managed Postgres/S3/Redis, auth,
+  secrets, scaling): [`spec/deployment-guide.md`](spec/deployment-guide.md)
+- Day-to-day admin operation (workspace setup, the review queue, connectors, access control,
+  dashboards): [`spec/user-guide-admins.md`](spec/user-guide-admins.md)
+- Submitting documents and searching as a regular user:
+  [`spec/user-guide-contributors.md`](spec/user-guide-contributors.md)
+- Using this from an AI agent over MCP (connecting, identity, the full tool reference,
+  on-behalf-of submission): [`spec/user-guide-agents.md`](spec/user-guide-agents.md)
+- Metadata DB / object-store backup and restore: [`spec/backup-and-dr.md`](spec/backup-and-dr.md)
+
+## Scaling
 
 [06 §4](spec/06-api-mcp-and-scaling.md) describes the scaling model in the abstract, per layer.
 Phase 2 steps 30–33 made one of those layers real — the async worker pool — so this section says
