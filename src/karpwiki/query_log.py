@@ -10,7 +10,7 @@ empty-query attempts — 04 §8 says "every search call," not "every successful 
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import FeedbackRating, QueryFeedback, QueryLog
@@ -72,10 +72,23 @@ async def submit_feedback(
 
 
 async def purge_older_than(session: AsyncSession, *, days: int = RETENTION_DAYS) -> int:
-    """09 §8's retention window. Nothing schedules this yet — it exists to be called once
-    the async layer (phase2-tasklist.md step 30+) can run it on a recurring job, the same
-    position every other still-manual maintenance operation is in before then."""
+    """09 §8's retention window, run on a recurring schedule by
+    `tasks.purge_query_log` (`KARPWIKI_QUERY_LOG_PURGE_INTERVAL_HOURS`).
+
+    Deletes each expired call's `query_feedback` rows first: that FK has no
+    `ON DELETE CASCADE` (nothing in this schema uses one), so deleting the `query_log`
+    row on its own raises `ForeignKeyViolationError` the moment any result was ever
+    rated. Purging them together is also what 09 §8 actually requires — a feedback row
+    carries its own `principal`, so leaving it behind would keep identifiable search
+    activity past the window that is itself the privacy boundary.
+
+    Returns the number of `query_log` rows purged; feedback rows go with them.
+    """
     cutoff = datetime.now(UTC) - timedelta(days=days)
+    expired = select(QueryLog.query_id).where(QueryLog.created_at < cutoff)
+    await session.execute(
+        delete(QueryFeedback).where(QueryFeedback.query_id.in_(expired))
+    )
     result = await session.execute(delete(QueryLog).where(QueryLog.created_at < cutoff))
     await session.flush()
     return result.rowcount or 0

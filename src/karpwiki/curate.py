@@ -274,9 +274,10 @@ def render_index_body(
 
 
 def render_log_body(entries: list[tuple[datetime, str]]) -> str:
-    """`entries` is (timestamp, description), newest first, already merged from every
-    source 02 §5 names for `log.md` — `ingestion_log` and `admin_action_log` (09 §23);
-    `lint_log` doesn't exist in Phase 1, no lint pass is built. The merge and per-source
+    """`entries` is (timestamp, description), newest first, already merged from all three
+    sources 02 §5 names for `log.md` — `ingestion_log`, `admin_action_log`, and `lint_log`
+    (09 §23, §74), the last of which sat named-but-unbuilt until content quality scoring
+    (phase3-tasklist.md step 69) became its first real writer. The merge and per-source
     description formatting happen in `ingestion.refresh_log`, not here — this function
     stays a pure renderer over whatever timeline it's given.
     """

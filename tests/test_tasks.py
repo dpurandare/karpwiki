@@ -761,6 +761,41 @@ async def test_record_storage_snapshots_task_purges_expired_rows(session, worksp
     assert stale.snapshot_id not in {r.snapshot_id for r in rows}
 
 
+def test_maintenance_queue_registers_the_query_log_purge():
+    assert tasks.app.tasks["karpwiki.maintenance.purge_query_log"] is not None
+
+
+def test_beat_schedule_wires_the_query_log_purge():
+    """09 §8's 90-day retention was decided at step 25 and `purge_older_than` written for
+    it, but nothing ever scheduled the call — so the window was never actually enforced."""
+    schedule = tasks.app.conf.beat_schedule
+    assert schedule["query-log-purge"]["task"] == "karpwiki.maintenance.purge_query_log"
+
+
+async def test_purge_query_log_task_drops_only_expired_rows(session, workspace, task_db):
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
+
+    from karpwiki import query_log
+    from karpwiki.models import QueryLog
+
+    expired = await query_log.record(
+        session, principal="user:x", query_text="old", resolved_workspaces=["ws"], results=[]
+    )
+    fresh = await query_log.record(
+        session, principal="user:x", query_text="new", resolved_workspaces=["ws"], results=[]
+    )
+    expired.created_at = datetime.now(UTC) - timedelta(days=query_log.RETENTION_DAYS + 10)
+    await session.commit()
+
+    await tasks._purge_query_log()
+
+    remaining = {r.query_id for r in (await session.execute(select(QueryLog))).scalars().all()}
+    assert expired.query_id not in remaining
+    assert fresh.query_id in remaining
+
+
 async def test_curate_task_notifies_the_submitter_on_ingested(session, workspace, task_db):
     from karpwiki import objectstore
 

@@ -306,7 +306,18 @@ async def run_staleness_detector(
     for finding in low_feedback:
         await search.mark_stale(session, finding.page_id)
 
-    findings = stale + superseded + low_feedback
+    # Deduplicated by page_id, keeping the first signal that found it (`setdefault`) — the
+    # signal order here is the reporting priority. The three signals are not mutually
+    # exclusive — Signal 1 filters on `index_status = stale` and Signal 3 filters on
+    # nothing but feedback, so one page can genuinely satisfy both. Without this it lands
+    # in `detail["pages"]` twice, inflating `page_count`/`severity`, and approving the item
+    # dispatches `reindex` twice for it — the second call raising `search.reindex`'s
+    # "not pending/stale" ValueError as an uncaught task failure, since the first already
+    # moved it to `indexed`.
+    by_page: dict[uuid.UUID, StaleFinding] = {}
+    for finding in stale + superseded + low_feedback:
+        by_page.setdefault(finding.page_id, finding)
+    findings = list(by_page.values())
     if not findings:
         return None
 

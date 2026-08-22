@@ -404,6 +404,30 @@ async def test_run_staleness_detector_batches_into_one_item(session, workspace):
     assert status.state is IndexState.stale
 
 
+async def test_run_staleness_detector_reports_a_multi_signal_page_once(session, workspace):
+    """The three signals aren't mutually exclusive — Signal 1 filters on `index_status =
+    stale`, Signal 3 on feedback alone — so one page can satisfy both. It must appear once:
+    a duplicate entry inflates `page_count`/`severity`, and resolving the item would
+    dispatch `reindex` twice, the second call failing `search.reindex`'s pending/stale
+    guard because the first already moved the page to `indexed`."""
+    page = await _page(session, workspace, title="Stale And Downvoted")
+    await _make_stale(session, page, days_ago=100)
+    for _ in range(3):
+        await _feedback(session, page, rating=FeedbackRating.down)
+
+    item = await advisor.run_staleness_detector(
+        session, workspace_id=workspace.workspace_id, threshold_days=90
+    )
+    await session.commit()
+
+    assert item is not None
+    page_ids = [p["page_id"] for p in item.detail["pages"]]
+    assert page_ids == [str(page.page_id)]
+    assert item.detail["page_count"] == 1
+    # First signal wins: the signal order in `run_staleness_detector` is reporting priority.
+    assert item.detail["pages"][0]["reason"] == "stale_content"
+
+
 async def test_run_staleness_detector_sorts_findings_by_quality_worst_first(session, workspace):
     """Step 69 (07 §4): content quality scoring prioritizes an admin's batch, worst
     structural quality first — doesn't change which pages are flagged, only their order."""

@@ -1235,7 +1235,7 @@ async def _refresh_overview(session: AsyncSession, *, workspace_id: str) -> None
 
 async def refresh_log(session: AsyncSession, *, workspace_id: str) -> None:
     """log.md merges `ingestion_log`, `admin_action_log`, and `lint_log` (02 §5, 09 §23,
-    §73) — `lint_log` sat named-but-unbuilt since Phase 1 until content quality scoring
+    §74) — `lint_log` sat named-but-unbuilt since Phase 1 until content quality scoring
     (phase3-tasklist.md step 69) became its first real writer.
 
     Public: `curate_source` below calls it after an ingest, and `api.py`'s rollback

@@ -487,9 +487,10 @@ class PageIndex(Base):
 class QueryLog(Base):
     """Every `search` call (04 §8, 02 §5): query text, principal, resolved workspaces, and
     returned page IDs/scores. Feeds the Maintenance Advisor's orphan/low-traffic detector
-    (05 §2) once that exists. Retained 90 days then purged (09 §8) — `query_log.purge_older_than`
-    exists for that; nothing schedules it automatically yet, same as every other still-manual
-    maintenance job before the async layer (phase2-tasklist.md step 30+) is real.
+    (05 §2) once that exists. Retained 90 days then purged (09 §8) by
+    `query_log.purge_older_than`, run on a recurring schedule by `tasks.purge_query_log`
+    (`KARPWIKI_QUERY_LOG_PURGE_INTERVAL_HOURS`). That purge takes each expired call's
+    `QueryFeedback` rows with it — see its own docstring for why they can't be left behind.
     """
 
     __tablename__ = "query_log"

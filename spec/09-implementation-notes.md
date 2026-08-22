@@ -4887,5 +4887,93 @@ with `KARPWIKI_LLM_CURATOR_MODEL` left on `openai:gpt-5-nano` (ollama:gemma4:lat
 unreliable for this role in this real trial) — a deliberate, explained per-role split using the
 exact mechanism `§16` already provides for it, not a silent revert.
 
+## 84. Review Findings Fixed (post-Phase-3, 2026-08-22)
+
+A full review of `spec/` and `src/` against each other, requested directly. Baseline before any
+change: 840 tests passing, `ruff --select F,E9,B,SIM,RUF,ASYNC,S` clean of real findings (all eight
+`S608` SQL-injection flags are false positives — every `f"WHERE {' AND '.join(filters)}"` joins
+module-constant strings with bound parameters), and a scripted check of every `NN §M` spec
+reference in `src/` against the actual section headings found **zero** dangling references.
+
+Four fixes landed here; the rest of the review's findings were reported and deliberately left open
+(see the end of this section).
+
+**1. `query_log`'s 90-day retention was never enforced, and the purge was broken anyway**
+(`query_log.py`, `tasks.py`, `config.py`). `purge_older_than` was written at step 25 for §8's
+retention decision, with its own docstring saying it "exists to be called once the async layer
+(phase2-tasklist.md step 30+) can run it on a recurring job." Step 30 made the async layer real and
+nothing ever went back to schedule it — six other periodic jobs got `beat_schedule` entries,
+including `record_storage_snapshots`, whose docstring cites query_log's purge as the precedent for
+riding retention along with a scheduled task. That precedent was never actually wired, so
+`query_log` grew unboundedly and the window that §8 calls "itself the privacy boundary" did not
+exist in practice.
+
+Wiring it up alone would have failed: `query_feedback.query_id` FKs to `query_log.query_id` with no
+`ON DELETE CASCADE`, so deleting an expired call that had ever been rated raises
+`ForeignKeyViolationError` — reproduced directly against real Postgres before fixing. The existing
+test passed only because it never created a feedback row.
+
+Fixed by deleting each expired call's feedback rows first, inside `purge_older_than` itself, rather
+than adding `ondelete="CASCADE"` and a migration: **nothing in this schema uses `ondelete` anywhere**
+(checked), so a cascade would introduce a new convention for one call site, and the deletion is more
+honest where retention already lives. It is also what §8 actually requires — a `query_feedback` row
+carries its own `principal`, so leaving it behind would keep identifiable search activity past the
+window. Scheduled via a new `query-log-purge` beat entry and
+`KARPWIKI_QUERY_LOG_PURGE_INTERVAL_HOURS` (default 24h); its own entry rather than riding inside
+`record_storage_snapshots`, since that task's purge is housekeeping for data it just wrote whereas
+this is a standalone privacy commitment over a table it never touches. The retention window itself
+stays `query_log.RETENTION_DAYS` — a policy decision, not a deployment knob, so only the *cadence*
+is env-overridable (the same split `config.py` already draws elsewhere).
+
+**2. A page matching two staleness signals was reported twice** (`advisor.py`).
+`run_staleness_detector` did `findings = stale + superseded + low_feedback` with no dedup. Signal 1
+filters on `index_status = stale` and Signal 3 (step 68's feedback signal) filters on nothing but
+feedback, so one page can genuinely satisfy both — reproduced: one page, two entries,
+`page_count: 2`. Beyond the inflated count and severity, resolving the item dispatches `reindex`
+twice for that page, and the second call raises `search.reindex`'s "not pending/stale" `ValueError`
+as an uncaught Celery task failure, because the first already moved it to `indexed`. Deduplicated by
+`page_id` with `setdefault`, so the signal order in the function is the reporting priority.
+
+**3. An MCP rollback left `index.md` stale** (`mcp_server.py`). `POST /pages/{id}/rollback` calls
+both `refresh_log` and `refresh_index` — a rollback can change a page's title/description, so its
+catalog entry needs regenerating (step 60). Step 60 added the second call to the REST path only;
+`wiki_rollback_page` still called `refresh_log` alone. The one place this "thin protocol adapter
+over the same Common Gateway logic" had actually diverged from that claim.
+
+**4. Three docstrings asserting things that stopped being true.** `pipeline.py` pointed at an
+`ERROR_REACHABILITY` symbol that exists nowhere in the repo (renamed `FAILABLE`);
+`curate.render_log_body` said "`lint_log` doesn't exist in Phase 1, no lint pass is built" (step 69
+became its first writer and `refresh_log` reads it); `wiki_export.py` said it "deliberately does not
+write `index.md`: nothing creates a real `index`-type page yet" (step 60 does, and
+`export_workspace`'s all-pages query has been exporting it ever since). A fourth turned up while
+verifying the third: `ingestion.refresh_log` cited "09 §23, §73" for `lint_log`, but §73 is the
+search feedback loop — lint_log's first writer is §74. Fixed in both places (the wrong number had
+already been copied into the new `curate.py` text before the check caught it).
+
+Each of the three behavioral fixes has a regression test verified to **fail against the pre-fix
+code and pass after** — checked by stashing only the three source changes and re-running, not
+assumed. Full suite after: 843 passing.
+
+**Reported and deliberately NOT fixed here** — each needs a decision rather than a patch:
+
+- **`POST /workspaces` bootstrap deadlock** (§83's own closing note, re-verified against an empty
+  DB: **403**). Still contradicts `deployment-guide.md` §9. Needs a real bootstrap policy.
+- **`GET /sources/{id}` is submitter-only; `06` §1's caller column says "submitter, admin"**
+  (`06` §2 says the same for `wiki_get_source_status`). Verified: a workspace admin gets 404 for
+  another user's source, and no connector-submitted source is readable by anyone. Either the code
+  or the spec is right — that's a contract decision. Note `implementation-audit.md` §1 lists the
+  endpoints its code-vs-spec pass sampled against `06` §1's caller table and `sources/{id}` is not
+  among them, which is why both audit passes missed it.
+- **`06` §2's "Argument normalization" requirement** (tolerate near-miss parameter names from
+  LLM-generated tool calls) is unimplemented and, unusually for this codebase, unacknowledged —
+  step 45's writeup enumerates what it built and this is not in it.
+- **Static API-key auth** (`06` §3's API/MCP client row) has no implementation. OAuth
+  client-credentials is genuinely covered, since it yields a bearer JWT `OidcAuthenticator`
+  validates; a static key has no path at all.
+- **`08` §2/§4 still name PyJWT and SAML.** `pyjwt` is in neither `pyproject.toml` nor any import —
+  the real choice is `joserfc`, documented in §48 but never propagated back to `08`. SAML is
+  correctly flagged as unsupported in `auth.py`, `deployment-guide.md` §5, and
+  `phase2-tasklist.md` step 47, but `08` §2 and `06` §3 still assert it at the point of claim.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

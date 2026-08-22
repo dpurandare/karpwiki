@@ -32,9 +32,9 @@ on a page's *next* write, so every page created before this step existed (all of
 has no exported file until then — this closes that gap in one pass, and doubles as a repair
 tool if the object store's mirror ever falls out of sync with the Metadata DB.
 
-Deliberately does **not** write `index.md`: nothing creates a real `index`-type page yet
-(phase3-tasklist.md step 60) — once one exists, it exports through the same write-through
-hook as any other wiki page, no changes needed here.
+`index.md` needs no special handling: since `ingestion.refresh_index` (phase3-tasklist.md
+step 60) creates a real `index`-type page, it is an ordinary `wiki_page` row and exports
+through the same write-through hook — and the same `export_workspace` query — as any other.
 """
 
 import io

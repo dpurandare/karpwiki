@@ -5,7 +5,8 @@ is the append-only system of record for how the source reached it. The two are w
 the same transaction so the pointer can never disagree with the history.
 
 Transitions are exactly those in 03 §1's state diagram — nothing is widened here. See
-`ERROR_REACHABILITY` below for a gap that needs a spec decision rather than an invention.
+`FAILABLE` below for which states can fail into `error`, and why `pending_review` and the
+terminals can't.
 """
 
 import uuid

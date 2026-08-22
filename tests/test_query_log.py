@@ -5,9 +5,10 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
 from karpwiki import query_log, versioning
-from karpwiki.models import FeedbackRating, PageStatus, PageType, QueryLog
+from karpwiki.models import FeedbackRating, PageStatus, PageType, QueryFeedback, QueryLog
 
 
 async def _page(session, workspace, *, title="Doc"):
@@ -35,6 +36,40 @@ async def test_record_and_purge_older_than(session):
     purged = await query_log.purge_older_than(session, days=90)
     assert purged == 1
     assert await session.get(QueryLog, entry.query_id) is None
+
+
+async def test_purge_takes_rated_calls_feedback_with_it(session, workspace):
+    """`query_feedback.query_id` has no ON DELETE CASCADE, so purging a rated call used to
+    raise ForeignKeyViolationError — and leaving the row behind would keep an identifiable
+    `principal` past 09 §8's window, which is itself the privacy boundary."""
+    page = await _page(session, workspace)
+    rated = await query_log.record(
+        session,
+        principal="user:x",
+        query_text="rated",
+        resolved_workspaces=[workspace.workspace_id],
+        results=[{"page_id": str(page.page_id), "score": 1.0}],
+    )
+    await query_log.submit_feedback(
+        session,
+        query_id=rated.query_id,
+        page_id=page.page_id,
+        principal="user:x",
+        rating=FeedbackRating.down,
+    )
+    fresh = await query_log.record(
+        session, principal="user:x", query_text="fresh", resolved_workspaces=["ws"], results=[]
+    )
+    rated.created_at = datetime.now(UTC) - timedelta(days=100)
+    await session.flush()
+
+    assert await query_log.purge_older_than(session, days=90) == 1
+    assert await session.get(QueryLog, rated.query_id) is None
+    assert await session.get(QueryLog, fresh.query_id) is not None
+    remaining = (
+        await session.execute(select(QueryFeedback).where(QueryFeedback.query_id == rated.query_id))
+    ).scalars().all()
+    assert remaining == []
 
 
 async def test_submit_feedback_creates_a_row(session, workspace):

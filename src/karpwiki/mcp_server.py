@@ -404,7 +404,14 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
                 )
             except ValueError as exc:
                 raise api.ApiError(400, "invalid_request", str(exc)) from exc
+            # Both refreshes, exactly as `api.py`'s own rollback endpoint does: 05 §6 logs
+            # the rollback to log.md, and a rollback can change the page's title/description
+            # so its index.md catalog entry needs regenerating too (phase3-tasklist.md step
+            # 60). Step 60 added the second call to the REST path only, leaving an MCP-driven
+            # rollback with a stale catalog — the one place this "thin adapter over the same
+            # Common Gateway logic" had actually diverged from it.
             await api.ingestion.refresh_log(session, workspace_id=page.workspace_id)
+            await api.ingestion.refresh_index(session, workspace_id=page.workspace_id)
             body = api._page_version_body(version)
             await session.commit()
             api.tasks.reindex.delay(str(page.page_id))

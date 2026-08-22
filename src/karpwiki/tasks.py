@@ -20,7 +20,17 @@ from datetime import UTC, datetime, timedelta
 from celery import Celery
 from sqlalchemy import select
 
-from . import advisor, connector_polling, ingestion, monitoring, notifications, pipeline, schema, search
+from . import (
+    advisor,
+    connector_polling,
+    ingestion,
+    monitoring,
+    notifications,
+    pipeline,
+    query_log,
+    schema,
+    search,
+)
 from . import connectors_git  # noqa: F401 — registers "git" into connector_polling.ADAPTERS (step 54)
 from .config import (
     CELERY_BROKER_URL,
@@ -30,6 +40,7 @@ from .config import (
     MAINTENANCE_INTERVAL_HOURS,
     MAINTENANCE_STUCK_PIPELINE_INTERVAL_HOURS,
     NOTIFICATION_SLA_SWEEP_INTERVAL_HOURS,
+    QUERY_LOG_PURGE_INTERVAL_HOURS,
     STORAGE_SNAPSHOT_INTERVAL_HOURS,
 )
 from .db import engine, session_scope
@@ -115,6 +126,17 @@ app.conf.beat_schedule = {
     "storage-snapshot-recording": {
         "task": "karpwiki.maintenance.record_storage_snapshots",
         "schedule": STORAGE_SNAPSHOT_INTERVAL_HOURS * 3600,
+    },
+    # 09 §8's `query_log` retention window. `query_log.purge_older_than` has existed since
+    # step 25 waiting for exactly this, but nothing ever scheduled it once the async layer
+    # became real at step 30 — so the table grew unboundedly and the 90-day window that is
+    # itself the privacy boundary was never actually enforced. Its own entry rather than
+    # riding along inside `record_storage_snapshots` (which purges its own table that way):
+    # that task's retention is housekeeping for data it just wrote, whereas this one is a
+    # standalone privacy commitment over a table nothing else in that task touches.
+    "query-log-purge": {
+        "task": "karpwiki.maintenance.purge_query_log",
+        "schedule": QUERY_LOG_PURGE_INTERVAL_HOURS * 3600,
     },
 }
 
@@ -424,6 +446,17 @@ async def _record_storage_snapshots() -> None:
         await monitoring.purge_storage_snapshots_older_than(session)
 
 
+async def _purge_query_log() -> None:
+    """09 §8's 90-day `query_log` retention — global, not per-workspace: a `query_log` row
+    records the workspaces a search *resolved to*, so a federated call belongs to several
+    at once and there is no single workspace to sweep it under (same global-sweep shape as
+    `_detect_stuck_pipelines`/`_notify_sla_breaches` above)."""
+    async with session_scope() as session:
+        purged = await query_log.purge_older_than(session)
+    if purged:
+        logger.info("purged %s query_log rows past the retention window", purged)
+
+
 async def _dispatch_daily_detectors() -> None:
     """Fired by `KARPWIKI_MAINTENANCE_INTERVAL_HOURS` (default 24h, `config.py`) — the four
     detectors with no LLM cost at detection time. Enumerates active workspaces at fire
@@ -571,6 +604,11 @@ def notify_sla_breaches() -> None:
 @app.task(name="karpwiki.maintenance.record_storage_snapshots")
 def record_storage_snapshots() -> None:
     asyncio.run(_run_and_release(_record_storage_snapshots()))
+
+
+@app.task(name="karpwiki.maintenance.purge_query_log")
+def purge_query_log() -> None:
+    asyncio.run(_run_and_release(_purge_query_log()))
 
 
 @app.task(name="karpwiki.maintenance.dispatch_daily_detectors")

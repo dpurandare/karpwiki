@@ -188,6 +188,15 @@ STORAGE_SNAPSHOT_INTERVAL_HOURS = float(
     os.environ.get("KARPWIKI_STORAGE_SNAPSHOT_INTERVAL_HOURS", "24")
 )
 
+# `query_log` retention sweep (query_log.py/tasks.py) — how often the purge runs, not how
+# long a row is kept: the window itself is 09 §8's decided 90 days, a policy decision that
+# stays `query_log.RETENTION_DAYS`, not a deployment knob. Same daily cadence category as
+# the storage snapshot above — a row a few hours past 90 days is not a meaningful breach of
+# the window, so nothing is gained by sweeping more often.
+QUERY_LOG_PURGE_INTERVAL_HOURS = float(
+    os.environ.get("KARPWIKI_QUERY_LOG_PURGE_INTERVAL_HOURS", "24")
+)
+
 # Optional read-through search-result cache (02 §6, phase3-tasklist.md step 76) — off by
 # default: "not required for correctness — purely a latency optimization" (02 §6's own
 # wording), so a reference deployment shouldn't pay a Redis round trip on every search

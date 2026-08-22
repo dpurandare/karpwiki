@@ -21,7 +21,15 @@ from sqlalchemy import select
 
 from karpwiki import mcp_server, search, versioning
 from karpwiki.auth import Principal
-from karpwiki.models import AccessPolicy, PageStatus, PageType, PageVersion, RawSourceStatus, Role
+from karpwiki.models import (
+    AccessPolicy,
+    PageStatus,
+    PageType,
+    PageVersion,
+    RawSourceStatus,
+    Role,
+    WikiPage,
+)
 
 DUPLICATE_BODY = "The payments worker drains its queue before restart."
 
@@ -428,6 +436,22 @@ async def test_wiki_rollback_page_end_to_end(
     await session.refresh(refreshed)
     new_version = await session.get(PageVersion, refreshed.current_version_id)
     assert "v1 body" in new_version.content
+
+    # An MCP rollback refreshes BOTH log.md and index.md, exactly as `POST /pages/{id}/
+    # rollback` does — a rollback can change a page's title/description, so its catalog
+    # entry has to be regenerated too (phase3-tasklist.md step 60). This tool called only
+    # `refresh_log` until that divergence was found.
+    for path in ("log.md", "index.md"):
+        singleton = (
+            await session.execute(
+                select(WikiPage).where(
+                    WikiPage.workspace_id == workspace.workspace_id, WikiPage.path == path
+                )
+            )
+        ).scalar_one_or_none()
+        assert singleton is not None, f"{path} was not refreshed by the MCP rollback"
+    catalog = await session.get(PageVersion, singleton.current_version_id)
+    assert "Rollback Target" in catalog.content
 
 
 # --- wiki_submit on-behalf-of delegation (09 §5, phase2-tasklist.md step 46) --------------
