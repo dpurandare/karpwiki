@@ -42,10 +42,7 @@ import os
 import uuid
 from datetime import date
 
-try:
-    from mcp.server.mcpserver import Context, MCPServer
-except ImportError:
-    from mcp.server.fastmcp import Context, FastMCP as MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from . import api, ingestion, review, versioning, workspaces
 from .auth import Authenticator, Principal, any_workspace_with_role, default_authenticator, has_role
@@ -110,9 +107,8 @@ def create_mcp_server(authenticator: Authenticator | None = None) -> MCPServer:
 
     async def _resolve_principal(ctx: Context) -> Principal:
         nonlocal stdio_principal
-        headers = getattr(ctx, "headers", None)
-        if headers is not None:
-            return await _resolve_http_principal(resolved_authenticator, headers)
+        if ctx.headers is not None:
+            return await _resolve_http_principal(resolved_authenticator, ctx.headers)
         if stdio_principal is None:
             stdio_principal = await _resolve_stdio_principal(resolved_authenticator)
         return stdio_principal

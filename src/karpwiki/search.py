@@ -161,7 +161,11 @@ async def search(
         [PageStatus.draft.value] if include_drafts else []
     )
 
-    filters = ["i.workspace_id IN :workspace_ids", "p.status IN :statuses", "i.tsv @@ q"]
+    # The tsquery match itself is kept out of this list: the OR fallback below runs the
+    # same filters against a differently-built query expression, and splicing its own
+    # match predicate in by string-replacing this one would break the moment either
+    # statement's SQL is edited.
+    filters = ["i.workspace_id IN :workspace_ids", "p.status IN :statuses"]
     params: dict = {
         "config": CONFIG,
         "query": query,
@@ -209,44 +213,14 @@ async def search(
         "JOIN wiki_page p ON p.page_id = i.page_id "
         "JOIN page_version pv ON pv.version_id = i.version_id, "
         "     websearch_to_tsquery(CAST(:config AS regconfig), :query) q "
-        f"WHERE {' AND '.join(filters)} "
+        f"WHERE {' AND '.join(['i.tsv @@ q', *filters])} "
         "ORDER BY score DESC, i.page_id "
         "LIMIT :limit"
     ).bindparams(*binds)
 
     rows = list(await session.execute(stmt, params))
     if not rows:
-        fallback_stmt = text(
-            "WITH parsed AS ("
-            "    SELECT to_tsquery(CAST(:config AS regconfig), string_agg(lexeme, ' | ')) as or_q "
-            "    FROM unnest(tsvector_to_array(to_tsvector(CAST(:config AS regconfig), :query))) as lexeme"
-            ") "
-            "SELECT i.page_id, i.workspace_id, p.path, p.page_type, "
-            "       COALESCE(pv.frontmatter ->> 'title', '') AS title, "
-            "       ts_rank_cd(i.tsv, parsed.or_q, 32) * (CASE WHEN EXISTS ( "
-            "           SELECT 1 FROM page_link pl "
-            "           JOIN wiki_page idx ON idx.page_id = pl.from_page_id "
-            "           WHERE pl.to_page_id = i.page_id AND idx.workspace_id = i.workspace_id "
-            "                 AND idx.path = 'index.md' "
-            "       ) AND to_tsvector(CAST(:config AS regconfig), "
-            "                 COALESCE(pv.frontmatter ->> 'title', '') || ' ' || "
-            "                 COALESCE(pv.frontmatter ->> 'description', '')) @@ parsed.or_q "
-            "       THEN :catalog_boost ELSE 1.0 END) AS score, "
-            "       ts_headline(CAST(:config AS regconfig), pv.content, parsed.or_q, "
-            "                   'MaxFragments=1, MinWords=15, MaxWords=35') AS excerpt, "
-            "       pv.content AS content "
-            "FROM page_index i "
-            "CROSS JOIN parsed "
-            "JOIN wiki_page p ON p.page_id = i.page_id "
-            "JOIN page_version pv ON pv.version_id = i.version_id "
-            f"WHERE {' AND '.join(filters).replace('i.tsv @@ q', 'parsed.or_q IS NOT NULL AND i.tsv @@ parsed.or_q')} "
-            "ORDER BY score DESC, i.page_id "
-            "LIMIT :limit"
-        ).bindparams(*binds)
-        try:
-            rows = list(await session.execute(fallback_stmt, params))
-        except Exception:
-            pass
+        rows = list(await session.execute(_or_fallback_statement(filters, binds), params))
 
     return [
         SearchResult(
@@ -261,6 +235,65 @@ async def search(
         )
         for r in rows
     ]
+
+
+def _or_fallback_statement(filters: list[str], binds: list):
+    """The zero-result retry: the same query, ORing the caller's terms instead of ANDing
+    them.
+
+    `websearch_to_tsquery` ANDs bare terms, so a query spanning two topics ("kafka leave")
+    matches nothing unless one page happens to cover both — documented as real-but-
+    unwritten-down behaviour in `09` §32 and hit in real use. This runs only when the
+    primary AND query returned nothing, so a query that already matches is never
+    reinterpreted: recall is widened only where the alternative is an empty result.
+
+    **Lexemes are `quote_literal`-quoted** — the same technique `find_similar` below
+    already uses, and for the same reason. `tsvector_to_array` yields raw lexemes, and
+    Postgres keeps URLs/emails as single lexemes; feeding those back unquoted lets their
+    own punctuation re-parse as tsquery syntax. Unquoted, `see http://ex.com/a(b` raises
+    `syntax error in tsquery`, and a URL containing `&` silently becomes an AND operator
+    rather than one of the ORed terms.
+
+    Failures deliberately propagate rather than being swallowed: `api.run_search` already
+    catches them, records the workspace as unavailable, and — critically — rolls the
+    session back, since an aborted statement otherwise leaves the transaction unusable for
+    the `query_log` write that follows (that function's own docstring says so). Catching
+    here would turn a degraded-but-successful search into a failed request.
+
+    Known limitation: an explicitly-quoted phrase search that matches nothing also falls
+    back to ORed terms, which is looser than the caller asked for. Left as-is rather than
+    special-cased — it only ever replaces an empty result, and 04 §1-3 names no behaviour
+    for this case either way.
+    """
+    return text(
+        "WITH parsed AS ("
+        "    SELECT to_tsquery(CAST(:config AS regconfig), "
+        "                      string_agg(quote_literal(lexeme), ' | ')) AS or_q "
+        "    FROM unnest(tsvector_to_array("
+        "             to_tsvector(CAST(:config AS regconfig), :query))) AS lexeme"
+        ") "
+        "SELECT i.page_id, i.workspace_id, p.path, p.page_type, "
+        "       COALESCE(pv.frontmatter ->> 'title', '') AS title, "
+        "       ts_rank_cd(i.tsv, parsed.or_q, 32) * (CASE WHEN EXISTS ( "
+        "           SELECT 1 FROM page_link pl "
+        "           JOIN wiki_page idx ON idx.page_id = pl.from_page_id "
+        "           WHERE pl.to_page_id = i.page_id AND idx.workspace_id = i.workspace_id "
+        "                 AND idx.path = 'index.md' "
+        "       ) AND to_tsvector(CAST(:config AS regconfig), "
+        "                 COALESCE(pv.frontmatter ->> 'title', '') || ' ' || "
+        "                 COALESCE(pv.frontmatter ->> 'description', '')) @@ parsed.or_q "
+        "       THEN :catalog_boost ELSE 1.0 END) AS score, "
+        "       ts_headline(CAST(:config AS regconfig), pv.content, parsed.or_q, "
+        "                   'MaxFragments=1, MinWords=15, MaxWords=35') AS excerpt, "
+        "       pv.content AS content "
+        "FROM page_index i "
+        "CROSS JOIN parsed "
+        "JOIN wiki_page p ON p.page_id = i.page_id "
+        "JOIN page_version pv ON pv.version_id = i.version_id "
+        f"WHERE {' AND '.join(['parsed.or_q IS NOT NULL', 'i.tsv @@ parsed.or_q', *filters])} "
+        "ORDER BY score DESC, i.page_id "
+        "LIMIT :limit"
+    ).bindparams(*binds)
 
 
 def merge_federated(

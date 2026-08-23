@@ -30,6 +30,7 @@ from typing import Annotated, Any
 
 import redis.asyncio as redis
 from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, Response, UploadFile
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -141,9 +142,6 @@ def _rate_limit_workspace_id(request: Request) -> str | None:
     return request.path_params.get("workspace_id") or request.query_params.get("workspace_id")
 
 
-from fastapi.openapi.utils import get_openapi
-
-
 def create_app(authenticator: Authenticator | None = None) -> FastAPI:
     app = FastAPI(
         title="karpwiki gateway",
@@ -244,7 +242,17 @@ def create_app(authenticator: Authenticator | None = None) -> FastAPI:
                     window_seconds=window,
                 )
         except Exception:
-            # If Redis is unavailable, allow requests to proceed rather than failing 500
+            # Redis unreachable: fail OPEN — serve the request unthrottled rather than 500
+            # the whole gateway over a degraded rate limiter. Deliberate availability-over-
+            # enforcement tradeoff: rate limiting is abuse control (07 §3), not an
+            # authorization boundary, and every endpoint's own auth check still runs
+            # normally below.
+            #
+            # Logged at exception level, not swallowed silently: this drops a real control,
+            # so it must be visible in the operational record rather than only showing up
+            # as an unexplained absence of `RateLimit-*` headers. The response also carries
+            # no such headers in this path — there is no real counter to report.
+            logger.exception("rate limiter unavailable, allowing request unthrottled")
             return await call_next(request)
 
         breached = not principal_result.allowed or (workspace_result is not None and not workspace_result.allowed)

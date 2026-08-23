@@ -4975,5 +4975,82 @@ assumed. Full suite after: 843 passing.
   correctly flagged as unsupported in `auth.py`, `deployment-guide.md` §5, and
   `phase2-tasklist.md` step 47, but `08` §2 and `06` §3 still assert it at the point of claim.
 
+## 85. Merging the `demo` Branch's Real-Use Fixes (post-Phase-3, 2026-08-23)
+
+Deepak used the platform in a real application, hit several issues, fixed them on a `demo`
+branch, and asked whether those fixes could land on `main`. Five distinct changes across three
+files. The branch merged with no conflicts and the merged tree passed all 845 tests unchanged —
+but two of the five carried real defects the suite could not see, both reproduced directly
+before deciding.
+
+**Merged as-is (three):**
+
+- **OpenAPI security schemes** (`api.py`) — declares the two real auth paths
+  (`X-Karpwiki-User`/`X-Karpwiki-Groups` per `TrustedHeaderAuthenticator`, bearer JWT per
+  `OidcAuthenticator`) so Swagger UI can actually authenticate against a running gateway.
+  Purely additive. Its `get_openapi` import was moved from mid-file to the import block.
+- **Rate-limit exemption for `/docs`/`/redoc`/`/openapi.json`** — extends the existing
+  `/healthz` carve-out, on the same reasoning already written there: these are not one of
+  `07` §3's three real API categories.
+- **Rate-limit fail-open when Redis is unreachable** — right call: rate limiting is abuse
+  control (`07` §3), not an authorization boundary, and every endpoint's own auth check still
+  runs. Serving unthrottled beats 500-ing the gateway over a degraded limiter. **Changed one
+  thing**: it logged nothing, silently dropping a real control. Now `logger.exception`, so the
+  outage appears in the operational record rather than only as an unexplained absence of
+  `RateLimit-*` headers. Live-verified by stopping the real `redis` container: request served
+  200, `redis.exceptions.ConnectionError` logged, normal limits resumed on restart.
+
+**Reverted (one): the MCP FastMCP fallback.** The import fallback itself was harmless; the
+paired `getattr(ctx, "headers", None)` was not. Verified against a real `mcp 1.29.0` install
+that **FastMCP's `Context` has no `.headers` attribute** — so whenever the fallback was active,
+`getattr` returned `None` on every call, execution fell through to `_resolve_stdio_principal`,
+and *every streamable-HTTP caller* was authenticated as the single `KARPWIKI_MCP_USER`/
+`KARPWIKI_MCP_TOKEN` env identity. A silent authentication bypass on the transport `06` §2
+requires for remote/multi-user agents. The original `ctx.headers` raises `AttributeError`
+instead: loud, and fails *closed*.
+
+Confirmed with Deepak before reverting: he uses **both** transports (stdio locally, HTTP for
+remote agents), so the HTTP path must keep per-request identity, and he can standardize on
+`mcp>=2.0` — which `pyproject.toml` already pins and which the installed 2.0.0 satisfies
+(`mcp.server.mcpserver` present, `mcp.server.fastmcp` absent entirely). The fallback existed
+because the MCP server runs outside the compose stack, from an environment that had an older
+`mcp` than the pin allows — a dependency problem, not a code problem, so the fix belongs
+there rather than in a compatibility shim that degrades auth.
+
+**Kept but repaired (one): the zero-result OR fallback** (`search.py`). The intent is right and
+addresses real, previously-unwritten-down behaviour (`§32`: `websearch_to_tsquery` ANDs bare
+terms, so a query spanning two topics matches nothing). Verified both directions: on `main`
+`"kafka leave"` across two unrelated pages returns **0** hits; with the fallback, **2**. Three
+defects fixed:
+
+1. **Unquoted lexemes.** `string_agg(lexeme, ' | ')` fed raw lexemes back into `to_tsquery`.
+   Postgres keeps URLs/emails as single lexemes, so their own punctuation re-parsed as tsquery
+   syntax: `see http://ex.com/a(b` raised `syntax error in tsquery`, and a URL containing `&`
+   silently became an AND operator rather than one of the ORed terms. Fixed with
+   `quote_literal(lexeme)` — the identical technique `find_similar` already uses sixty lines
+   below in the same file.
+2. **`except Exception: pass` left the transaction aborted.** `api.run_search` catches search
+   failures and rolls back precisely because "the failed raw-SQL statement can leave the
+   transaction unusable for the `query_log` write that follows" (its own docstring). Swallowing
+   the error inside `search()` meant that handler never ran, so the next statement died with
+   `InFailedSQLTransactionError` — turning a degraded-but-successful search into a hard 500 on
+   the whole request. Reproduced end-to-end through the gateway: `main` 200, raw `demo` 500,
+   repaired 200. The exception now propagates to the handler that already knows what to do.
+3. **A fragile `.replace('i.tsv @@ q', ...)`** spliced the fallback's match predicate into the
+   shared filter string, and would break the moment either statement's SQL was edited. The
+   tsquery predicate is now kept out of the `filters` list, and each statement composes its own.
+
+**Spec touch-point**: the fallback widens recall only where the alternative is an empty result —
+a query that already matches is never reinterpreted. `04` §1-3 names no behaviour for the
+zero-result case either way, so this is additive rather than contradicting the documented
+single-stage lexical contract. One known limitation left as-is and documented in the function:
+an explicitly-quoted phrase search that matches nothing also falls back to ORed terms, which is
+looser than the caller asked for.
+
+Four regression tests added (`test_search.py`) covering the two-topic case, the
+never-override-a-matching-query guarantee, the three URL-shaped queries, and session usability
+after a fallback failure. 849 tests passing; `/docs`, `/openapi.json`, and the fail-open path
+live-verified against the real running gateway.
+
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

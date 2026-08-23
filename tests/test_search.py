@@ -4,6 +4,7 @@ import uuid
 from datetime import date
 
 import pytest
+from sqlalchemy import text as sa_text
 
 from karpwiki import search, versioning
 from karpwiki.models import IndexState, IndexStatus, IndexType, PageStatus, PageType, PageVersion
@@ -416,6 +417,62 @@ async def test_date_range_filter(session, workspace):
         date_to=date(2021, 1, 1),
     )
     assert [h.title for h in hits] == ["Old Page"]
+
+
+# --- zero-result OR fallback -----------------------------------------------------------
+
+
+async def test_or_fallback_matches_a_query_spanning_two_pages(session, workspace):
+    """`websearch_to_tsquery` ANDs bare terms (09 §32), so a query covering two topics
+    matches nothing unless one page happens to cover both. The zero-result retry ORs the
+    terms instead."""
+    await _page(session, workspace, title="Kafka Runbook", body="Kafka broker restart steps.")
+    await _page(session, workspace, title="Leave Policy", body="Annual leave accrual rules.")
+
+    hits = await search.search(
+        session, query="kafka leave", workspace_ids=[workspace.workspace_id]
+    )
+    assert sorted(h.title for h in hits) == ["Kafka Runbook", "Leave Policy"]
+
+
+async def test_or_fallback_never_overrides_a_query_that_already_matches(session, workspace):
+    """The retry runs only on an empty result, so an AND query that matches is never
+    reinterpreted more loosely."""
+    await _page(session, workspace, title="Both Terms", body="kafka and leave together.")
+    await _page(session, workspace, title="Only Kafka", body="kafka alone.")
+
+    hits = await search.search(
+        session, query="kafka leave", workspace_ids=[workspace.workspace_id]
+    )
+    assert [h.title for h in hits] == ["Both Terms"]
+
+
+async def test_or_fallback_handles_a_query_containing_a_url(session, workspace):
+    """Postgres keeps a URL as a single lexeme, so feeding lexemes back into `to_tsquery`
+    unquoted lets their punctuation re-parse as tsquery syntax — `syntax error in tsquery`
+    for `(`/`!`, and a silent AND for an embedded `&`. `quote_literal` prevents both (the
+    same fix `find_similar` already uses)."""
+    await _page(session, workspace, title="Docs", body="Some content here.")
+
+    for query in (
+        "see http://ex.com/a(b for details",
+        "url http://ex.com/x:y!z",
+        "link http://ex.com/docs?a=1&b=2 here",
+    ):
+        assert await search.search(session, query=query, workspace_ids=[workspace.workspace_id]) == []
+
+
+async def test_or_fallback_failure_leaves_the_session_usable(session, workspace):
+    """A failing fallback must propagate, not be swallowed: `api.run_search` catches it and
+    rolls back, without which the aborted transaction breaks the `query_log` write that
+    follows. Asserted by confirming the session still works after a search."""
+    await _page(session, workspace, title="Docs", body="Some content here.")
+
+    await search.search(
+        session, query="see http://ex.com/a(b for details", workspace_ids=[workspace.workspace_id]
+    )
+    # Any statement at all fails on an aborted transaction.
+    assert (await session.execute(sa_text("SELECT 1"))).scalar_one() == 1
 
 
 # --- merge_federated (04 §4) — phase2-tasklist.md step 26, pure logic, no I/O ----------
