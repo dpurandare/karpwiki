@@ -141,9 +141,54 @@ def _rate_limit_workspace_id(request: Request) -> str | None:
     return request.path_params.get("workspace_id") or request.query_params.get("workspace_id")
 
 
+from fastapi.openapi.utils import get_openapi
+
+
 def create_app(authenticator: Authenticator | None = None) -> FastAPI:
-    app = FastAPI(title="karpwiki gateway")
+    app = FastAPI(
+        title="karpwiki gateway",
+        description="KarpWiki Enterprise Knowledge Base REST Gateway",
+        version="0.1.0",
+    )
     app.state.authenticator = authenticator or default_authenticator()
+
+    def custom_openapi():
+        if app.openapi_schema:
+            return app.openapi_schema
+        openapi_schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+        )
+        openapi_schema.setdefault("components", {})["securitySchemes"] = {
+            "TrustedUser": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-Karpwiki-User",
+                "description": "Username / principal identifier (e.g. 'admin')",
+            },
+            "TrustedGroups": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-Karpwiki-Groups",
+                "description": "Comma-separated group memberships (e.g. 'admin')",
+            },
+            "BearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "JWT",
+                "description": "OIDC Bearer JWT token",
+            },
+        }
+        openapi_schema["security"] = [
+            {"TrustedUser": [], "TrustedGroups": []},
+            {"BearerAuth": []},
+        ]
+        app.openapi_schema = openapi_schema
+        return app.openapi_schema
+
+    app.openapi = custom_openapi
     # Lazy connection pool — constructing this never blocks or binds to an event loop by
     # itself (unlike a client that connects eagerly), so it's safe to create here at
     # `create_app()` time rather than per-request; each real request's own event loop is
@@ -175,28 +220,32 @@ def create_app(authenticator: Authenticator | None = None) -> FastAPI:
         real risk otherwise is self-inflicted (many replicas' healthchecks all present no
         auth header, so they'd all share the same "anon" Redis counter and could throttle
         each other's own healthcheck into failing)."""
-        if request.url.path == "/healthz":
+        if request.url.path in ("/healthz", "/docs", "/redoc", "/openapi.json"):
             return await call_next(request)
 
         category = _rate_limit_category(request)
         principal_limit, workspace_limit = rate_limit_categories[category]
         window = config.RATE_LIMIT_WINDOW_SECONDS
 
-        principal_result = await ratelimit.check(
-            request.app.state.redis,
-            key=f"ratelimit:{category}:principal:{ratelimit.principal_key(dict(request.headers))}",
-            limit=principal_limit,
-            window_seconds=window,
-        )
-        workspace_result = None
-        workspace_id = _rate_limit_workspace_id(request)
-        if workspace_id:
-            workspace_result = await ratelimit.check(
+        try:
+            principal_result = await ratelimit.check(
                 request.app.state.redis,
-                key=f"ratelimit:{category}:workspace:{workspace_id}",
-                limit=workspace_limit,
+                key=f"ratelimit:{category}:principal:{ratelimit.principal_key(dict(request.headers))}",
+                limit=principal_limit,
                 window_seconds=window,
             )
+            workspace_result = None
+            workspace_id = _rate_limit_workspace_id(request)
+            if workspace_id:
+                workspace_result = await ratelimit.check(
+                    request.app.state.redis,
+                    key=f"ratelimit:{category}:workspace:{workspace_id}",
+                    limit=workspace_limit,
+                    window_seconds=window,
+                )
+        except Exception:
+            # If Redis is unavailable, allow requests to proceed rather than failing 500
+            return await call_next(request)
 
         breached = not principal_result.allowed or (workspace_result is not None and not workspace_result.allowed)
         # Report whichever bound is actually binding: the one that failed, or (if both
