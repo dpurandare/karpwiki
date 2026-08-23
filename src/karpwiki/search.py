@@ -214,7 +214,40 @@ async def search(
         "LIMIT :limit"
     ).bindparams(*binds)
 
-    rows = await session.execute(stmt, params)
+    rows = list(await session.execute(stmt, params))
+    if not rows:
+        fallback_stmt = text(
+            "WITH parsed AS ("
+            "    SELECT to_tsquery(CAST(:config AS regconfig), string_agg(lexeme, ' | ')) as or_q "
+            "    FROM unnest(tsvector_to_array(to_tsvector(CAST(:config AS regconfig), :query))) as lexeme"
+            ") "
+            "SELECT i.page_id, i.workspace_id, p.path, p.page_type, "
+            "       COALESCE(pv.frontmatter ->> 'title', '') AS title, "
+            "       ts_rank_cd(i.tsv, parsed.or_q, 32) * (CASE WHEN EXISTS ( "
+            "           SELECT 1 FROM page_link pl "
+            "           JOIN wiki_page idx ON idx.page_id = pl.from_page_id "
+            "           WHERE pl.to_page_id = i.page_id AND idx.workspace_id = i.workspace_id "
+            "                 AND idx.path = 'index.md' "
+            "       ) AND to_tsvector(CAST(:config AS regconfig), "
+            "                 COALESCE(pv.frontmatter ->> 'title', '') || ' ' || "
+            "                 COALESCE(pv.frontmatter ->> 'description', '')) @@ parsed.or_q "
+            "       THEN :catalog_boost ELSE 1.0 END) AS score, "
+            "       ts_headline(CAST(:config AS regconfig), pv.content, parsed.or_q, "
+            "                   'MaxFragments=1, MinWords=15, MaxWords=35') AS excerpt, "
+            "       pv.content AS content "
+            "FROM page_index i "
+            "CROSS JOIN parsed "
+            "JOIN wiki_page p ON p.page_id = i.page_id "
+            "JOIN page_version pv ON pv.version_id = i.version_id "
+            f"WHERE {' AND '.join(filters).replace('i.tsv @@ q', 'parsed.or_q IS NOT NULL AND i.tsv @@ parsed.or_q')} "
+            "ORDER BY score DESC, i.page_id "
+            "LIMIT :limit"
+        ).bindparams(*binds)
+        try:
+            rows = list(await session.execute(fallback_stmt, params))
+        except Exception:
+            pass
+
     return [
         SearchResult(
             page_id=r.page_id,
