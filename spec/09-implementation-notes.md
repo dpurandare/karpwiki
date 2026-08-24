@@ -4957,7 +4957,8 @@ assumed. Full suite after: 843 passing.
 **Reported and deliberately NOT fixed here** — each needs a decision rather than a patch:
 
 - **`POST /workspaces` bootstrap deadlock** (§83's own closing note, re-verified against an empty
-  DB: **403**). Still contradicts `deployment-guide.md` §9. Needs a real bootstrap policy.
+  DB: **403**). Still contradicts `deployment-guide.md` §9. Needs a real bootstrap policy. Fixed
+  in §86.
 - **`GET /sources/{id}` is submitter-only; `06` §1's caller column says "submitter, admin"**
   (`06` §2 says the same for `wiki_get_source_status`). Verified: a workspace admin gets 404 for
   another user's source, and no connector-submitted source is readable by anyone. Either the code
@@ -5051,6 +5052,56 @@ Four regression tests added (`test_search.py`) covering the two-topic case, the
 never-override-a-matching-query guarantee, the three URL-shaped queries, and session usability
 after a fallback failure. 849 tests passing; `/docs`, `/openapi.json`, and the fail-open path
 live-verified against the real running gateway.
+
+## 86. `POST /workspaces` Bootstrap Deadlock — Fixed (post-Phase-3, 2026-08-24)
+
+§84 reported and deliberately left open: `create_workspace` requires the caller to already hold
+`admin` in some *existing* workspace (the same "admin somewhere" answer §22 gives for
+workspace-less review items) — but on a brand-new deployment there are zero workspaces and zero
+`access_policy` rows, so that check can never pass for anyone. Re-verified against an empty DB
+before touching any code: **403**, exactly as §84 recorded. This directly contradicts
+`deployment-guide.md` §9's claim that `POST /workspaces` is the real first-time entry point with
+no separate seed script.
+
+**The naive fix (discussed, not built) — special-case an empty workspace table — was rejected.**
+It checks system state only, not caller identity: whichever authenticated caller's request
+happens to land first (the deployer's, or any other valid principal racing them) becomes the
+first admin. Under `TrustedHeaderAuthenticator` that's whoever's `X-Karpwiki-User` reaches the
+gateway first; under OIDC, any org member who authenticates first. A second, narrower issue is a
+genuine TOCTOU race: two different callers proposing two different `workspace_id`s could both
+observe an empty table before either commits, and both would succeed.
+
+**Fix**: `KARPWIKI_BOOTSTRAP_ADMIN` (`config.py`), unset by default so an already-bootstrapped
+deployment is unaffected. `create_workspace` (`api.py`) now allows a caller through the
+admin-somewhere check when *all* of: the check already failed, the env var is set, the caller's
+`principal.id` matches it exactly, and `workspaces.any_exist(session)` (new — a real `EXISTS`
+query, not a cached count, since the gateway runs as more than one process) is false. The last
+condition means the bypass is a one-time deadlock-breaker, not a standing grant: once that
+principal creates workspace #1 they hold a real `admin` `AccessPolicy` row there (the existing
+post-create grant, unchanged) and pass the normal check from then on: the env var can stay set
+or be unset afterward with no further effect either way.
+
+Four regression tests (`test_workspaces_api.py`, a new `bare_client` fixture — the existing
+`client` fixture always seeds one `workspace`, so exercising an empty table needs a client built
+without it):
+
+1. Deadlock still reproduces by default (`BOOTSTRAP_ADMIN` unset, empty DB → 403) — confirms the
+   fix doesn't silently change default behavior.
+2. The configured identity succeeds on an empty DB (201) and is immediately a real admin there
+   (a follow-up update call succeeds).
+3. Any other identity is still 403 on the same empty DB — the specific-identity requirement,
+   not just "table is empty," is what's under test.
+4. The bypass doesn't apply once any workspace exists (created through the ordinary path) — the
+   configured identity gets the same 403 as anyone else without a real grant, proving this isn't
+   a standing admin grant in disguise.
+
+All four confirmed to **fail against the pre-fix code** (stashed only the three source changes,
+reran — three failures reproducing exactly this deadlock, the fourth already passing since it
+asserts the deadlock itself) and pass after. Full suite: all tests passing.
+
+**Docs**: `deployment-guide.md` §9 updated to name the env var and when it matters. `08`/`06`
+env-var inventories were not touched — this file was the only place enumerating deployment env
+vars in prose form; `08` and `06` describe auth mechanisms, not the bootstrap variable.
 
 ---
 Previous: [08-implementation-stack.md](08-implementation-stack.md) · Back to: [00-overview.md](00-overview.md)

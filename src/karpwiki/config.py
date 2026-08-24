@@ -143,6 +143,15 @@ NOTIFICATION_SLA_SWEEP_INTERVAL_HOURS = float(
 STALENESS_HIGH_TRAFFIC_DAYS = int(os.environ.get("KARPWIKI_STALENESS_HIGH_TRAFFIC_DAYS", "90"))
 STALENESS_LOW_TRAFFIC_DAYS = int(os.environ.get("KARPWIKI_STALENESS_LOW_TRAFFIC_DAYS", "365"))
 
+# First-time bootstrap admin (09 §84's "POST /workspaces bootstrap deadlock", 09 §86).
+# Unset by default, so an already-deployed instance behaves exactly as before. Set once,
+# to the principal id (the exact `X-Karpwiki-User` value, or OIDC principal-claim value)
+# that should be allowed through `POST /workspaces`'s admin-somewhere check while the
+# workspace table is still empty — otherwise that check can never pass (nobody is admin
+# anywhere yet). Naming a specific identity, rather than just checking "table is empty",
+# closes the race any authenticated caller could otherwise win for the first admin slot.
+BOOTSTRAP_ADMIN = os.environ.get("KARPWIKI_BOOTSTRAP_ADMIN", "")
+
 # Real OIDC `Authenticator` (06 §3, 08 §2's Authlib pick; phase2-tasklist.md step 47) —
 # the second `Authenticator` implementation, alongside `TrustedHeaderAuthenticator`
 # (09 §15's Phase 1 stand-in, still the default when these are unset). Empty by default;

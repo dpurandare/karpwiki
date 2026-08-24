@@ -175,7 +175,12 @@ same discipline: migrate first, then deploy the code that assumes the new schema
 - **First workspace and admin**: `POST /workspaces` (whoever calls it becomes that workspace's own
   admin automatically, `06` §1) is the real entry point — there is no separate seed script or admin
   bootstrap CLI; the same REST API a normal admin uses is how the very first workspace gets
-  created too.
+  created too. `POST /workspaces` itself normally requires admin in an *existing* workspace, which
+  is impossible on an empty table — set `KARPWIKI_BOOTSTRAP_ADMIN` to the exact principal id (the
+  `X-Karpwiki-User` value, or OIDC principal-claim value) that should be allowed to make that first
+  call before this deployment's very first `POST /workspaces` (`09` §84/§86). The variable only
+  matters while the workspace table is empty — leave it set afterward, or unset it; it has no
+  further effect either way.
 
 ## 10. Health checks
 

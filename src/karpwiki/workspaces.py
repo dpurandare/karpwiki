@@ -11,7 +11,7 @@ Real SCHEMA.md content is `schema.py`'s job (phase3-tasklist.md step 59), not th
 that has no schema configured yet.
 """
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import wiki_export
@@ -21,6 +21,14 @@ from .pagination import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
 
 class DuplicateWorkspaceError(ValueError):
     """`workspace_id` is already taken."""
+
+
+async def any_exist(session: AsyncSession) -> bool:
+    """Whether any workspace has ever been created in this deployment (09 §84/§86's
+    bootstrap-admin check — a real query rather than trusting an in-memory count, since
+    the gateway runs as more than one process)."""
+    result = await session.execute(select(exists().where(Workspace.workspace_id.is_not(None))))
+    return bool(result.scalar())
 
 
 async def create(

@@ -1457,11 +1457,26 @@ def _register_routes(app: FastAPI) -> None:
         """06 §1: create requires admin. The target workspace doesn't exist yet, so this
         checks admin in at least one *existing* workspace — the same bootstrap answer
         09 §22 already gave for workspace-less review items, reused here rather than
-        inventing the global-admin grant 09 §22 explicitly declined to build."""
+        inventing the global-admin grant 09 §22 explicitly declined to build.
+
+        First-time exception (09 §84's "bootstrap deadlock", 09 §86): with zero workspaces
+        in the deployment, the admin-somewhere check above can never pass for anyone — a
+        real deadlock, contradicting deployment-guide.md §9. `KARPWIKI_BOOTSTRAP_ADMIN`
+        (unset by default, so an already-bootstrapped deployment is unaffected) names the
+        *one* principal id let through while the table is still empty — not "table is
+        empty" alone, which would let any authenticated caller race to grab the first
+        admin slot. Once that principal creates workspace #1 they hold a real admin grant
+        there (below) and this branch never matters again."""
         admin_workspaces = await any_workspace_with_role(
             session, principal=principal, required=Role.admin
         )
-        if not admin_workspaces:
+        is_bootstrap = bool(
+            not admin_workspaces
+            and config.BOOTSTRAP_ADMIN
+            and principal.id == config.BOOTSTRAP_ADMIN
+            and not await workspaces.any_exist(session)
+        )
+        if not admin_workspaces and not is_bootstrap:
             raise ApiError(
                 403, "forbidden", "Creating a workspace requires the admin role somewhere."
             )

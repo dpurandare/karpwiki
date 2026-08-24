@@ -1,10 +1,31 @@
 """Workspace and access-policy endpoints (05 §7, 06 §1, §3) — phase2-tasklist.md step 23."""
 
+import karpwiki.api as api_module
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+
+from karpwiki import config
+from karpwiki.api import create_app
 from karpwiki.models import AccessPolicy, Role, Workspace, WorkspaceStatus
 
 CONTRIBUTOR = {"X-Karpwiki-User": "deepak"}
 READER = {"X-Karpwiki-User": "casey"}
 ADMIN = {"X-Karpwiki-User": "avery"}
+ROOT = {"X-Karpwiki-User": "root"}
+
+
+@pytest_asyncio.fixture
+async def bare_client(session):
+    """Like the `client` fixture, but doesn't pre-create a `workspace` — the bootstrap-
+    deadlock tests below (09 §84/§86) need a genuinely empty workspace table."""
+    app = create_app()
+
+    async def _one_session():
+        yield session
+
+    app.dependency_overrides[api_module._session] = _one_session
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://gateway") as http:
+        yield http
 
 
 async def _grant_admin(session, workspace, principal="avery"):
@@ -50,6 +71,58 @@ async def test_get_a_workspace_reader_can_access(client, session, workspace):
 async def test_create_requires_admin_somewhere(client):
     r = await client.post(
         "/workspaces", headers=CONTRIBUTOR, json={"workspace_id": "new-ws", "name": "New"}
+    )
+    assert r.status_code == 403
+
+
+async def test_bootstrap_deadlock_reproduces_on_an_empty_db_by_default(bare_client):
+    """09 §84: with zero workspaces, the admin-somewhere check can never pass for anyone —
+    `KARPWIKI_BOOTSTRAP_ADMIN` unset (the default) leaves this exactly as before."""
+    r = await bare_client.post(
+        "/workspaces", headers=ROOT, json={"workspace_id": "first-ws", "name": "First"}
+    )
+    assert r.status_code == 403
+
+
+async def test_bootstrap_admin_creates_the_first_workspace_on_an_empty_db(
+    bare_client, monkeypatch
+):
+    """09 §86: the one escape hatch — a specific configured identity, only while the table
+    is genuinely empty. Real admin, not just a one-off pass: manageable right after."""
+    monkeypatch.setattr(config, "BOOTSTRAP_ADMIN", "root")
+    r = await bare_client.post(
+        "/workspaces", headers=ROOT, json={"workspace_id": "first-ws", "name": "First"}
+    )
+    assert r.status_code == 201
+
+    update = await bare_client.post(
+        "/workspaces/first-ws", headers=ROOT, json={"description": "d"}
+    )
+    assert update.status_code == 200
+    assert update.json()["description"] == "d"
+
+
+async def test_bootstrap_admin_wrong_identity_is_still_403_on_an_empty_db(
+    bare_client, monkeypatch
+):
+    """Naming a specific identity — not just checking the table is empty — is the whole
+    point: any other authenticated caller must not be able to race for the first slot."""
+    monkeypatch.setattr(config, "BOOTSTRAP_ADMIN", "root")
+    r = await bare_client.post(
+        "/workspaces", headers=CONTRIBUTOR, json={"workspace_id": "first-ws", "name": "First"}
+    )
+    assert r.status_code == 403
+
+
+async def test_bootstrap_admin_bypass_only_applies_while_the_table_is_empty(
+    client, session, workspace, monkeypatch
+):
+    """Not a standing admin grant — once any workspace exists (via the normal path here),
+    the configured bootstrap identity gets the same 403 as anyone else without a real
+    grant somewhere."""
+    monkeypatch.setattr(config, "BOOTSTRAP_ADMIN", "root")
+    r = await client.post(
+        "/workspaces", headers=ROOT, json={"workspace_id": "second-ws", "name": "Second"}
     )
     assert r.status_code == 403
 
