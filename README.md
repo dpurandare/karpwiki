@@ -371,3 +371,7 @@ taxonomy bulk-move, and real async dispatch with retry/idempotency semantics, an
 notification delivery, fine-grained access control, PII detection, and the rest of that phase's own
 tasklist — plus several real bugs a live end-to-end run caught that the test suite alone had
 missed, across all three phases.
+
+## License
+
+[MIT](LICENSE)
