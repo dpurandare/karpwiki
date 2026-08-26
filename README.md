@@ -9,6 +9,102 @@ A specification for an **Enterprise Wiki Platform** that adapts Andrej Karpathy'
 LLM-maintained knowledge base built from raw sources, a curated wiki, and a schema — into a
 multi-workspace, horizontally scalable system for enterprise use.
 
+## Why karpwiki
+
+Most AI knowledge bases are one of two things:
+
+- **A vector database over your documents (RAG).** Fast to stand up, but the "knowledge" is an
+  opaque pile of embeddings and chunks — nobody can open a page and read what the agent actually
+  knows, and retrieval quality degrades as the pile grows.
+- **A conventional wiki.** Human-readable and editable, but nothing agent-facing: no query
+  protocol, no schema an LLM can reason about, no pipeline that keeps it in sync with new sources.
+
+karpwiki is neither. An LLM agent ingests raw sources, checks them for duplicates, and curates them
+into cited, human-readable Markdown pages — searchable via full-text lexical ranking (no vector
+index), over both a REST API and MCP. The wiki stays something a person can open and read; the
+agent stays the one keeping it current.
+
+| | Traditional wiki | Vector DB / RAG | karpwiki |
+|---|---|---|---|
+| Human-readable | Yes | No — chunks/embeddings | Yes — curated Markdown pages |
+| Natively agent-queryable (MCP) | No | Sometimes, via custom glue | Yes — built-in MCP server |
+| Self-maintaining (dedup, curation, review) | No — manual editing | No — re-chunk/re-embed | Yes — async pipeline with a human review queue |
+| Retrieval | Manual search/browse | Vector similarity | Cited lexical full-text (Postgres/OpenSearch) |
+
+This is a working implementation, not just a paper design: Phases 1–3 of the spec below are
+complete and load-tested (see [Scaling](#scaling)) — async ingestion, multi-workspace routing, real
+auth, rate limiting, and the MCP server all run today via `docker compose up -d`.
+
+## Quickstart
+
+Requires Docker, Python 3.11+, and an `OPENAI_API_KEY` — there is no lighter-weight path than this;
+`docker compose up -d` brings up Postgres, Redis, MinIO, OpenSearch, five workers, and the beat
+scheduler together.
+
+```bash
+cp .env.example .env                     # then fill in OPENAI_API_KEY
+docker compose up -d                     # Postgres + Redis + MinIO + OpenSearch + 5 workers + beat
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e '.[dev]'                  # Python 3.11+ (tested on 3.14)
+alembic upgrade head                     # create the schema
+pytest                                   # full suite
+```
+
+Then run the Gateway itself:
+
+```bash
+uvicorn karpwiki.api:app --reload
+```
+
+`POST /sources` accepts a submission and `GET /search` answers ranked, cited queries — see
+[Implementation](#implementation) below for the full endpoint/MCP/auth reference.
+
+### As an MCP server
+
+Same infra as above (`docker compose up -d`, venv, `pip install -e '.[dev]'`, `alembic upgrade
+head`). Two different identities are involved here — don't conflate them:
+
+**1. An admin grants your group access, once.** This is a REST API call to the Gateway (not the
+MCP server), made by someone who *already* holds the `admin` role in the target workspace — e.g.
+whoever `KARPWIKI_BOOTSTRAP_ADMIN` named when the workspace was first created. `admin` in the
+command below is that person's identity, not yours:
+
+```bash
+curl -X POST -H "X-Karpwiki-User: admin" -H "Content-Type: application/json" \
+  -d '{"principal": "eng-docs-writers", "role": "contributor"}' \
+  http://localhost:8080/workspaces/eng-docs/access-policy
+```
+
+What this does: it adds one entry to the `eng-docs` workspace's access policy saying "anyone whose
+user id or group is `eng-docs-writers` gets the `contributor` role here." `Role` is `reader` |
+`contributor` | `admin` — see
+[`spec/user-guide-admins.md`](spec/user-guide-admins.md#1-creating-and-configuring-a-workspace) for
+the full access-policy reference.
+
+**2. You configure your own MCP identity to match that group.** stdio has no per-request headers,
+so it resolves one identity at process startup, from `.env`:
+
+```bash
+# in .env
+KARPWIKI_MCP_USER=alice                  # your identifier — any string; recorded as who performed each action
+KARPWIKI_MCP_GROUPS=eng-docs-writers     # must match the principal granted a role in step 1
+```
+
+`KARPWIKI_MCP_USER` doesn't need to be pre-registered anywhere — it's just the id attributed to
+your submissions and searches. `KARPWIKI_MCP_GROUPS` does need to be real: without your user id or
+one of these groups holding a granted role somewhere (step 1), `wiki_submit` and most other tools
+will be rejected.
+
+**3. Run the server:**
+
+```bash
+python -m karpwiki.mcp_server    # stdio — point Claude Desktop/Cursor/any MCP client at this command
+```
+
+This exposes `wiki_search`, `wiki_submit`, `wiki_get_page`, and the rest of the tool set over
+stdio — no separate Gateway process needs to be running. See
+[Implementation](#implementation) below for the streamable-HTTP transport and real OIDC auth.
+
 ## Background
 
 ### Karpathy Wiki for Agentic AI
@@ -29,20 +125,9 @@ to an engineering team (or an AI coding agent) to build directly.
 
 ## Specification
 
-The full specification lives in [`spec/`](spec/), as eight documents meant to be read in order:
-
-| Doc | Title |
-|---|---|
-| [00](spec/00-overview.md) | Overview — purpose, design principles, scope, requirements traceability |
-| [01](spec/01-architecture-and-data-model.md) | Architecture and Data Model |
-| [02](spec/02-storage-and-indexing.md) | Storage and Indexing |
-| [03](spec/03-ingestion-and-review-workflows.md) | Ingestion and Review Workflows |
-| [04](spec/04-search-and-retrieval.md) | Search and Retrieval |
-| [05](spec/05-admin-backend-and-maintenance.md) | Admin Backend and Maintenance |
-| [06](spec/06-api-mcp-and-scaling.md) | API, MCP, and Scaling |
-| [07](spec/07-additional-features-and-roadmap.md) | Additional Features and Roadmap |
-
-Start with [`spec/00-overview.md`](spec/00-overview.md).
+The full specification lives in [`spec/`](spec/README.md), as eight documents meant to be read in
+order — see [`spec/README.md`](spec/README.md) for the full index, starting with
+[`spec/00-overview.md`](spec/00-overview.md).
 
 ## Implementation
 
@@ -76,24 +161,9 @@ it — no test, admin action, or manual call needs to drive any of it. The Maint
 detectors run on their own schedule too (step 41): a `celery-beat` container fires every active
 workspace's detector sweeps automatically — daily for the four with no LLM cost at detection,
 weekly for Contradiction Detection (a real model call per candidate), both intervals
-env-overridable (`.env.example`). `docker compose up -d` (below) starts the five worker containers
-and the beat scheduler alongside the rest of the infra; see [Scaling](#scaling) for what running
-more than one of each looks like.
-
-```bash
-cp .env.example .env                     # then fill in OPENAI_API_KEY
-docker compose up -d                     # Postgres + Redis + MinIO + OpenSearch + 5 workers + beat
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e '.[dev]'                  # Python 3.11+ (tested on 3.14)
-alembic upgrade head                     # create the schema
-pytest                                   # full suite
-```
-
-Then run the Gateway itself:
-
-```bash
-uvicorn karpwiki.api:app --reload
-```
+env-overridable (`.env.example`). `docker compose up -d` (see [Quickstart](#quickstart) above)
+starts the five worker containers and the beat scheduler alongside the rest of the infra; see
+[Scaling](#scaling) for what running more than one of each looks like.
 
 `POST /sources` (file, pasted text, or a URL) accepts a submission; `GET /sources/{id}` polls its
 status — with the workers up, nothing else needs to be driven by hand: a submission is classified,
